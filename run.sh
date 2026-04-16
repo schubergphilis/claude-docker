@@ -94,9 +94,12 @@ ENV_VARS=()
 [ "$WITH_GH" = "1" ]   && ENV_VARS+=(GH_TOKEN GITHUB_TOKEN)
 [ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
-for v in "${ENV_VARS[@]}"; do
-  [ -n "${!v:-}" ] && ENV_ARGS+=("-e" "$v")
-done
+# Guarded: bash 3.2 under `set -u` errors on empty-array expansion.
+if [ "${#ENV_VARS[@]}" -gt 0 ]; then
+  for v in "${ENV_VARS[@]}"; do
+    [ -n "${!v:-}" ] && ENV_ARGS+=("-e" "$v")
+  done
+fi
 
 # Host Claude config parity: dereference symlinks (skills/agents often point
 # into shared repos) into a staging dir, then bind-mount read-only.
@@ -123,16 +126,15 @@ CMD=(claude)
 [ "${CLAUDE_DOCKER_TMUX:-0}" = "1" ] && CMD=(tmux new-session -A -s claude "${CMD[@]}")
 
 # Persistent named volumes carry OAuth tokens, gh login, conversation history.
-# --ephemeral skips them for one-shot untrusted sessions.
-PERSIST_ARGS=()
+# --ephemeral skips them for one-shot untrusted sessions. Prepend to MOUNT_ARGS
+# so the docker run line has no conditionally-empty array (bash 3.2 set -u).
 if [ "$EPHEMERAL" = "0" ]; then
-  PERSIST_ARGS=(-v claude-code-root:/root -v claude-code-home:/root/.claude)
+  MOUNT_ARGS=(-v claude-code-root:/root -v claude-code-home:/root/.claude "${MOUNT_ARGS[@]}")
 fi
 
 docker run --rm -it \
   --security-opt no-new-privileges \
   --cap-drop ALL \
-  "${PERSIST_ARGS[@]}" \
   "${MOUNT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \
   -w "$CWD" \
