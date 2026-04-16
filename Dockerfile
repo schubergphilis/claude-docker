@@ -14,6 +14,7 @@ ARG AWSCLI_SHA256_AARCH64=932ff651397d5c56f78987fcdf736dfc62c2a32ed2c0e9c9ae96e9
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     tmux \
+    ncurses-term \
     ca-certificates \
     curl \
     jq \

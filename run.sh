@@ -46,6 +46,7 @@ ws_suffix=""
 [ "$RO_WORKSPACES" = "1" ] && ws_suffix=":ro"
 
 # Parallel arrays (not associative) so macOS system bash 3.2 works.
+# Counter-based iteration avoids ${!arr[@]} which trips set -u on empty arrays.
 SEEN_NAMES=()
 SEEN_PATHS=()
 for ws in "${WORKSPACES[@]}"; do
@@ -56,11 +57,14 @@ for ws in "${WORKSPACES[@]}"; do
       echo "claude-docker: workspace basename '$name' contains characters that break 'docker -v' parsing; allowed: [A-Za-z0-9._-]" >&2
       exit 1 ;;
   esac
-  for i in "${!SEEN_NAMES[@]}"; do
+  n=${#SEEN_NAMES[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
     if [ "${SEEN_NAMES[$i]}" = "$name" ]; then
       echo "claude-docker: workspace basename collision — '$abs' and '${SEEN_PATHS[$i]}' both map to /workspaces/$name" >&2
       exit 1
     fi
+    i=$((i + 1))
   done
   SEEN_NAMES+=("$name")
   SEEN_PATHS+=("$abs")
@@ -104,7 +108,8 @@ fi
 # Host Claude config parity: dereference symlinks (skills/agents often point
 # into shared repos) into a staging dir, then bind-mount read-only.
 stage=$(mktemp -d -t claude-docker-host.XXXXXX)
-trap '[[ "$stage" == */claude-docker-host.* ]] && rm -rf "$stage"' EXIT
+# `case` instead of `[[ ]]` for bash 3.2 friendliness inside the trap string.
+trap 'case "$stage" in */claude-docker-host.*) rm -rf "$stage" ;; esac' EXIT
 
 for item in agents commands skills; do
   if [ -d "$HOME/.claude/$item" ]; then
@@ -123,7 +128,12 @@ done
 
 CMD=(claude)
 [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")
-[ "${CLAUDE_DOCKER_TMUX:-0}" = "1" ] && CMD=(tmux new-session -A -s claude "${CMD[@]}")
+# CLAUDE_DOCKER_TMUX=1   → plain tmux (works in any terminal)
+# CLAUDE_DOCKER_TMUX=cc  → tmux -CC, iTerm2 integration (native panes on macOS)
+case "${CLAUDE_DOCKER_TMUX:-0}" in
+  cc|CC) CMD=(tmux -CC new-session -A -s claude "${CMD[@]}") ;;
+  1)     CMD=(tmux     new-session -A -s claude "${CMD[@]}") ;;
+esac
 
 # Persistent named volumes carry OAuth tokens, gh login, conversation history.
 # --ephemeral skips them for one-shot untrusted sessions. Prepend to MOUNT_ARGS
