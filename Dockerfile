@@ -23,7 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     unzip \
  && rm -rf /var/lib/apt/lists/*
 
-# GitHub CLI (apt signs the package via the committed keyring)
+# GitHub CLI (keyring fetched at build; TODO: commit the keyring to the repo)
 RUN install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       | tee /etc/apt/keyrings/githubcli-archive-keyring.gpg > /dev/null \
