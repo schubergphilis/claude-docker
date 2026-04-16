@@ -31,24 +31,39 @@ Let one container expose several host directories at stable container paths so c
 
 ### Requirement: Sibling worktrees supported
 
-Users SHALL be able to pass both a repo and its sibling git worktree (or a shared parent) so that git operations across them succeed.
+Users SHALL be able to pass both a repo and its sibling git worktree (or a shared parent) so that git operations across them succeed. Because git worktrees embed absolute host paths in their `.git` files, users MAY need to run `git worktree repair` once inside the container to rewrite those paths.
 
-#### Scenario: Sibling worktree accessible
+#### Scenario: Sibling worktree accessible after repair
 
 - **GIVEN** `~/repo/main` and `~/repo/feature-x` are separate git worktrees
-- **WHEN** user runs `~/claude-docker/run.sh ~/repo/main ~/repo/feature-x`
+- **WHEN** user runs `claude-docker ~/repo/main ~/repo/feature-x`
+- **AND** runs `git worktree repair` inside the container
 - **THEN** git operations in either dir resolve the other worktree successfully
 
 ### Requirement: Passthrough claude flags after `--`
 
-`run.sh` SHALL treat a `--` token as a separator: positional args before it are workspaces, tokens after it are forwarded verbatim to the `claude` command inside the container.
+`run.sh` SHALL treat a `--` token as a separator: positional args before it are workspaces (or recognised shortcut flags like `--yolo`), tokens after it are forwarded verbatim to the `claude` command inside the container.
 
 #### Scenario: Resume mode via passthrough
 
-- **WHEN** user runs `~/claude-docker/run.sh ~/repo-a -- --resume`
+- **WHEN** user runs `claude-docker ~/repo-a -- --resume`
 - **THEN** `~/repo-a` is mounted at `/workspaces/repo-a` and the container launches `claude --resume`
 
 #### Scenario: No flags given
 
-- **WHEN** user runs `~/claude-docker/run.sh ~/repo-a` (no `--`)
+- **WHEN** user runs `claude-docker ~/repo-a` (no `--`)
 - **THEN** the container launches plain `claude` with no extra flags
+
+### Requirement: `--yolo` flag shortcut
+
+`run.sh` SHALL recognise `--yolo` as a positional token (before `--`) and translate it to `--dangerously-skip-permissions` on the `claude` invocation.
+
+#### Scenario: Yolo shortcut
+
+- **WHEN** user runs `claude-docker --yolo ~/repo`
+- **THEN** the container launches `claude --dangerously-skip-permissions` with `~/repo` mounted
+
+#### Scenario: Yolo combines with passthrough
+
+- **WHEN** user runs `claude-docker --yolo ~/repo -- --resume`
+- **THEN** the container launches `claude --dangerously-skip-permissions --resume`
