@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Make the container feel like the user's host Claude Code: same statusline, skills, agents, commands, global preferences, and select `settings.json` keys — without copying macOS-only configuration or host-filesystem hooks that would misfire inside the Linux container.
+Make the container feel like the user's host Claude Code: same statusline, skills, agents, commands, global preferences, and a container-specific `settings.docker.json` when the user provides one — without copying macOS-only configuration or host-filesystem hooks that would misfire inside the Linux container.
 
 ## Requirements
 
@@ -22,22 +22,27 @@ Make the container feel like the user's host Claude Code: same statusline, skill
 - **WHEN** user runs `claude-docker` and `claude` starts
 - **THEN** the statusline renders using the host-provided script
 
-### Requirement: Curated settings subset
+### Requirement: Container-specific settings file
 
-When the host has `~/.claude/settings.json` and `jq` is available, `run.sh` SHALL generate a subset containing only: `statusLine`, `effortLevel`, `autoUpdatesChannel`, `voiceEnabled`, `model`. Keys with null values MUST be dropped. The subset SHALL be mounted read-only at `/root/.claude/settings.json`.
+When `~/.claude/settings.docker.json` exists on the host, `run.sh` SHALL bind-mount it read-only at `/root/.claude/settings.json`. When absent, no host-derived settings file is mounted and Claude uses its built-in defaults. The host's own `~/.claude/settings.json` is NOT derived from or filtered into the container — the user maintains `settings.docker.json` explicitly to avoid surprising drift.
 
-#### Scenario: Container-unsafe keys stripped
+#### Scenario: Container uses dedicated settings file
 
-- **GIVEN** host `settings.json` includes `sandbox`, `env.SSL_CERT_FILE`, `enabledPlugins`, and `hooks`
+- **GIVEN** `~/.claude/settings.docker.json` contains `{"effortLevel": "high"}`
 - **WHEN** user runs `claude-docker`
-- **THEN** the container's `settings.json` contains none of those keys
+- **THEN** `/root/.claude/settings.json` in the container is that file
 
-### Requirement: jq optional
+#### Scenario: No settings file
 
-`run.sh` SHALL degrade gracefully when `jq` is not installed: skip the settings subset rather than failing the launch. All other host config items MUST still be mounted.
-
-#### Scenario: Launch succeeds without jq
-
-- **GIVEN** `jq` is not in PATH on the host
+- **GIVEN** `~/.claude/settings.docker.json` does not exist
 - **WHEN** user runs `claude-docker`
-- **THEN** the container starts with host agents/skills/commands/etc. mounted but no host-derived `settings.json`
+- **THEN** the container starts without a host-derived `settings.json` and Claude uses defaults
+
+### Requirement: IS_SANDBOX env for root + dangerous-skip-permissions
+
+The image SHALL set `IS_SANDBOX=1` so `claude --dangerously-skip-permissions` (and the `--yolo` shortcut) work despite the container running as root. The Docker container is the sandbox; this is strictly safer than using the flag on the host.
+
+#### Scenario: YOLO works in container
+
+- **WHEN** user runs `claude-docker --yolo`
+- **THEN** `claude --dangerously-skip-permissions` launches without the root refusal error

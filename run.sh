@@ -65,13 +65,8 @@ for item in CLAUDE.md statusline-command.sh; do
   [ -f "$HOME/.claude/$item" ] && cp -L "$HOME/.claude/$item" "$stage/$item" && \
     MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
 done
-if [ -f "$HOME/.claude/settings.json" ] && command -v jq >/dev/null 2>&1; then
-  jq '{statusLine, effortLevel, autoUpdatesChannel, voiceEnabled, model}
-      | with_entries(select(.value != null))' \
-    "$HOME/.claude/settings.json" > "$stage/settings.json" 2>/dev/null \
-    && [ -s "$stage/settings.json" ] \
-    && MOUNT_ARGS+=("-v" "$stage/settings.json:/root/.claude/settings.json:ro")
-fi
+[ -f "$HOME/.claude/settings.docker.json" ] \
+  && MOUNT_ARGS+=("-v" "$HOME/.claude/settings.docker.json:/root/.claude/settings.json:ro")
 
 CMD=(claude)
 [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")

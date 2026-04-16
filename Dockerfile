@@ -46,7 +46,8 @@ RUN set -e; ARCH=$(uname -m); \
 
 RUN npm install -g @anthropic-ai/claude-code
 
-ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1
+ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
+    IS_SANDBOX=1
 
 WORKDIR /workspaces
 

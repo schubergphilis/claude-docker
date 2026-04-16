@@ -35,7 +35,9 @@ On every run, these items are dereferenced (symlinks resolved) and bind-mounted 
 | `~/.claude/CLAUDE.md`             | global preferences (`gprefs`)       |
 | `~/.claude/statusline-command.sh` | statusline renderer                 |
 
-A curated `settings.json` is generated at runtime from your host's (`jq` required), containing only: `statusLine`, `effortLevel`, `autoUpdatesChannel`, `voiceEnabled`, `model`. The `sandbox` block, `env.SSL_CERT_FILE`, `enabledPlugins`, and `hooks` are stripped — host hooks exist to protect the host filesystem, and Docker already isolates yours.
+For `settings.json`, maintain a dedicated `~/.claude/settings.docker.json` (any valid Claude `settings.json` schema) — it's bind-mounted at `/root/.claude/settings.json` when present. Keeping it separate from your host `settings.json` avoids dragging macOS-only keys (`sandbox`, `env.SSL_CERT_FILE`, `enabledPlugins`) or host-filesystem `hooks` into the container. See [`examples/settings.docker.json`](examples/settings.docker.json) for a starting point.
+
+The image sets `IS_SANDBOX=1` so `--yolo` / `--dangerously-skip-permissions` works despite running as root. The container IS the sandbox — this is safer than using the flag on your host.
 
 ## Auth model
 
