@@ -32,11 +32,10 @@ On every run, these items are dereferenced (symlinks resolved) and bind-mounted 
 | `~/.claude/agents/`               | custom agent definitions            |
 | `~/.claude/skills/`               | custom skills                       |
 | `~/.claude/commands/`             | slash commands                      |
-| `~/.claude/hooks/`                | PreToolUse / PostToolUse hooks      |
 | `~/.claude/CLAUDE.md`             | global preferences (`gprefs`)       |
 | `~/.claude/statusline-command.sh` | statusline renderer                 |
 
-A curated `settings.json` is generated at runtime from your host's (`jq` required), containing only: `statusLine`, `hooks`, `effortLevel`, `autoUpdatesChannel`, `voiceEnabled`, `model`. The `sandbox` block, `env.SSL_CERT_FILE`, and `enabledPlugins` are stripped (host-only / would break container HTTPS).
+A curated `settings.json` is generated at runtime from your host's (`jq` required), containing only: `statusLine`, `effortLevel`, `autoUpdatesChannel`, `voiceEnabled`, `model`. The `sandbox` block, `env.SSL_CERT_FILE`, `enabledPlugins`, and `hooks` are stripped — host hooks exist to protect the host filesystem, and Docker already isolates yours.
 
 ## Auth model
 

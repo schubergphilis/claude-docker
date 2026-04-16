@@ -57,7 +57,7 @@ done
 # settings.json containing only container-safe keys.
 stage="${TMPDIR:-/tmp}/claude-docker-host-$$"
 mkdir -p "$stage"
-for item in agents commands skills hooks; do
+for item in agents commands skills; do
   [ -d "$HOME/.claude/$item" ] && cp -RL "$HOME/.claude/$item" "$stage/$item" 2>/dev/null || true
   [ -d "$stage/$item" ] && MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
 done
@@ -66,7 +66,7 @@ for item in CLAUDE.md statusline-command.sh; do
     MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
 done
 if [ -f "$HOME/.claude/settings.json" ] && command -v jq >/dev/null 2>&1; then
-  jq '{statusLine, hooks, effortLevel, autoUpdatesChannel, voiceEnabled, model}
+  jq '{statusLine, effortLevel, autoUpdatesChannel, voiceEnabled, model}
       | with_entries(select(.value != null))' \
     "$HOME/.claude/settings.json" > "$stage/settings.json" 2>/dev/null \
     && [ -s "$stage/settings.json" ] \
