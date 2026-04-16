@@ -51,12 +51,12 @@ for v in GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN AWS_PROFILE AWS_REGION \
   [ -n "${!v:-}" ] && ENV_ARGS+=("-e" "$v")
 done
 
-# --- Host Claude config parity (read-only) -----------------------------------
-# Dereferences any symlinks (skills, agents etc. often point into shared repos)
-# into a staging dir so they resolve inside the container. Generates a curated
-# settings.json containing only container-safe keys.
+# Host Claude config parity: dereference symlinks (skills/agents often point
+# into shared repos) into a staging dir, then bind-mount read-only.
 stage="${TMPDIR:-/tmp}/claude-docker-host-$$"
 mkdir -p "$stage"
+trap 'rm -rf "$stage"' EXIT
+
 for item in agents commands skills; do
   [ -d "$HOME/.claude/$item" ] && cp -RL "$HOME/.claude/$item" "$stage/$item" 2>/dev/null || true
   [ -d "$stage/$item" ] && MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
@@ -72,7 +72,6 @@ if [ -f "$HOME/.claude/settings.json" ] && command -v jq >/dev/null 2>&1; then
     && [ -s "$stage/settings.json" ] \
     && MOUNT_ARGS+=("-v" "$stage/settings.json:/root/.claude/settings.json:ro")
 fi
-# -----------------------------------------------------------------------------
 
 CMD=(claude)
 [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")

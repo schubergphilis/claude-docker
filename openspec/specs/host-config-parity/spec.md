@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Make the container feel like the user's host Claude Code: same statusline, hooks, skills, agents, commands, global preferences, and select `settings.json` keys — without copying macOS-only configuration that would break inside the Linux container.
+Make the container feel like the user's host Claude Code: same statusline, skills, agents, commands, global preferences, and select `settings.json` keys — without copying macOS-only configuration or host-filesystem hooks that would misfire inside the Linux container.
 
 ## Requirements
 
@@ -40,4 +40,4 @@ When the host has `~/.claude/settings.json` and `jq` is available, `run.sh` SHAL
 
 - **GIVEN** `jq` is not in PATH on the host
 - **WHEN** user runs `claude-docker`
-- **THEN** the container starts with host agents/skills/hooks/etc. mounted but no host-derived `settings.json`
+- **THEN** the container starts with host agents/skills/commands/etc. mounted but no host-derived `settings.json`
