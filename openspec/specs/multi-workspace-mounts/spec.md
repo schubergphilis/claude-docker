@@ -20,6 +20,16 @@ Let one container expose several host directories at stable container paths so c
 - **WHEN** user runs `~/claude-docker/run.sh` from `~/repo-a`
 - **THEN** `~/repo-a` is mounted at `/workspaces/repo-a`
 
+### Requirement: Reject basename collisions
+
+When two or more workspace arguments resolve to the same basename, `run.sh` SHALL fail fast with a non-zero exit and an error identifying both host paths, rather than silently letting Docker drop all but the last mount.
+
+#### Scenario: Colliding basenames error out
+
+- **WHEN** user runs `claude-docker ~/client-a/api ~/client-b/api`
+- **THEN** `run.sh` exits non-zero with a message naming both host paths
+- **AND** no container is started
+
 ### Requirement: First arg is initial cwd
 
 `claude` MUST launch with cwd set to the container path of the first workspace argument.
@@ -53,6 +63,16 @@ Users SHALL be able to pass both a repo and its sibling git worktree (or a share
 
 - **WHEN** user runs `claude-docker ~/repo-a` (no `--`)
 - **THEN** the container launches plain `claude` with no extra flags
+
+### Requirement: Read-only workspace mode
+
+`run.sh` SHALL support a `--ro` flag that mounts every workspace argument read-only instead of read-write. Intended for code review / audit sessions where writes to the host must be prevented.
+
+#### Scenario: --ro mounts workspaces read-only
+
+- **WHEN** user runs `claude-docker --ro ~/repo`
+- **THEN** `~/repo` is mounted at `/workspaces/repo` read-only
+- **AND** writes to `/workspaces/repo/*` from inside the container fail with EROFS
 
 ### Requirement: `--yolo` flag shortcut
 

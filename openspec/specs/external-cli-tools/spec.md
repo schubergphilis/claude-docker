@@ -20,30 +20,43 @@ The container image SHALL ship with `gh`, `glab`, and `aws` (v2) on the default 
 - **WHEN** `docker build -t claude-code:local ~/claude-docker` runs on arm64
 - **THEN** the build succeeds and no CLI fails with exec-format error
 
-### Requirement: Host credential bind-mounts for file-based CLIs
+### Requirement: Credentials opt-in
 
-When the host has a glab config directory or `~/.aws/`, `run.sh` SHALL bind-mount each into the container read-write. The glab source path is platform-aware: `~/Library/Application Support/glab-cli` on macOS, `~/.config/glab-cli` on Linux. Both target `/root/.config/glab-cli` in the container.
+Host credentials (files or env vars) SHALL NOT reach the container unless the user explicitly opts in per-run. `run.sh` defaults to no credential mounts and no token env forwarding. Opt-ins are granted via dedicated flags:
 
-#### Scenario: glab inherits host token
+- `--aws`: mount `~/.aws/config` at `/root/.aws/config:ro` and, when present, `~/.aws/sso/` at `/root/.aws/sso:ro`; forward `AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` when set on the host.
+- `--gh`: forward `GH_TOKEN`, `GITHUB_TOKEN` when set on the host.
+- `--glab`: mount the platform-appropriate glab config dir — `~/Library/Application Support/glab-cli` on macOS, `~/.config/glab-cli` on Linux — at `/root/.config/glab-cli:ro`; forward `GITLAB_TOKEN` when set on the host.
+
+All credential bind-mounts SHALL be read-only so a compromised container cannot rewrite host config or tokens. `~/.aws/credentials` and `~/.aws/cli/cache/` SHALL NEVER be mounted, even under `--aws`.
+
+#### Scenario: No flags means no credentials
+
+- **GIVEN** host has `~/.aws/config`, `~/.config/glab-cli/config.yml`, and `GH_TOKEN=ghp_x` exported
+- **WHEN** user runs `claude-docker ~/repo`
+- **THEN** `/root/.aws/` does not exist inside the container
+- **AND** `/root/.config/glab-cli/` does not exist inside the container
+- **AND** `echo $GH_TOKEN` inside the container is empty
+
+#### Scenario: --aws grants scoped AWS access
+
+- **GIVEN** the host has completed `aws sso login --profile X` and exports `AWS_PROFILE=X`
+- **WHEN** user runs `claude-docker --aws ~/repo`
+- **THEN** `aws sts get-caller-identity` inside the container returns the host's identity
+- **AND** `~/.aws/credentials` is not present inside the container
+- **AND** writes to `/root/.aws/` from inside the container fail with EROFS
+
+#### Scenario: --glab grants read-only token access
 
 - **GIVEN** the host has a valid `~/.config/glab-cli/config.yml`
-- **WHEN** user launches the container
+- **WHEN** user runs `claude-docker --glab ~/repo`
 - **THEN** `glab auth status` reports "logged in" without prompting
+- **AND** writes to `/root/.config/glab-cli/` from inside the container fail with EROFS
 
-#### Scenario: aws inherits host credentials
-
-- **GIVEN** `~/.aws/credentials` is configured on the host
-- **WHEN** user launches the container
-- **THEN** `aws sts get-caller-identity` returns the host's identity
-
-### Requirement: Auth env var forwarding
-
-`run.sh` SHALL forward `GH_TOKEN`, `GITHUB_TOKEN`, `GITLAB_TOKEN`, `AWS_PROFILE`, `AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` into the container when set on the host.
-
-#### Scenario: Host token forwarded
+#### Scenario: --gh forwards host token
 
 - **GIVEN** `GH_TOKEN=ghp_x` is exported in the host shell
-- **WHEN** user launches the container
+- **WHEN** user runs `claude-docker --gh ~/repo`
 - **THEN** `echo $GH_TOKEN` inside the container prints `ghp_x`
 
 ### Requirement: In-container gh login persists
