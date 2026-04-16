@@ -45,7 +45,9 @@ CONTAINER_PATHS=()
 ws_suffix=""
 [ "$RO_WORKSPACES" = "1" ] && ws_suffix=":ro"
 
-declare -A SEEN_NAMES=()
+# Parallel arrays (not associative) so macOS system bash 3.2 works.
+SEEN_NAMES=()
+SEEN_PATHS=()
 for ws in "${WORKSPACES[@]}"; do
   abs=$(cd "$ws" && pwd)
   name=$(basename "$abs")
@@ -54,11 +56,14 @@ for ws in "${WORKSPACES[@]}"; do
       echo "claude-docker: workspace basename '$name' contains characters that break 'docker -v' parsing; allowed: [A-Za-z0-9._-]" >&2
       exit 1 ;;
   esac
-  if [ -n "${SEEN_NAMES[$name]:-}" ]; then
-    echo "claude-docker: workspace basename collision — '$abs' and '${SEEN_NAMES[$name]}' both map to /workspaces/$name" >&2
-    exit 1
-  fi
-  SEEN_NAMES[$name]="$abs"
+  for i in "${!SEEN_NAMES[@]}"; do
+    if [ "${SEEN_NAMES[$i]}" = "$name" ]; then
+      echo "claude-docker: workspace basename collision — '$abs' and '${SEEN_PATHS[$i]}' both map to /workspaces/$name" >&2
+      exit 1
+    fi
+  done
+  SEEN_NAMES+=("$name")
+  SEEN_PATHS+=("$abs")
   MOUNT_ARGS+=("-v" "$abs:/workspaces/$name$ws_suffix")
   CONTAINER_PATHS+=("/workspaces/$name")
 done
