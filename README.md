@@ -109,18 +109,7 @@ git worktree repair
 
 ## Split-pane agent teams
 
-Wrap `claude` in a container-local tmux session so Claude Code's split-pane teammates feature has panes to attach to:
-
-| Env var value           | Behaviour                                                                 |
-|-------------------------|---------------------------------------------------------------------------|
-| `CLAUDE_DOCKER_TMUX=1`  | Plain tmux inside the container. Works in any terminal. Status bar shows at the bottom of your terminal. |
-| `CLAUDE_DOCKER_TMUX=cc` | `tmux -CC` (iTerm2 control mode) — tmux panes are rendered as **native iTerm2 tabs/windows**. macOS + iTerm2 only. |
-
-Example:
-
-```bash
-CLAUDE_DOCKER_TMUX=cc claude-docker ~/repo
-```
+Set `CLAUDE_DOCKER_TMUX=1` to wrap `claude` in a container-local tmux session (required for Claude Code's split-pane teammates feature).
 
 ## Specs
 

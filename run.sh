@@ -128,12 +128,7 @@ done
 
 CMD=(claude)
 [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")
-# CLAUDE_DOCKER_TMUX=1   → plain tmux (works in any terminal)
-# CLAUDE_DOCKER_TMUX=cc  → tmux -CC, iTerm2 integration (native panes on macOS)
-case "${CLAUDE_DOCKER_TMUX:-0}" in
-  cc|CC) CMD=(tmux -CC new-session -A -s claude "${CMD[@]}") ;;
-  1)     CMD=(tmux     new-session -A -s claude "${CMD[@]}") ;;
-esac
+[ "${CLAUDE_DOCKER_TMUX:-0}" = "1" ] && CMD=(tmux new-session -A -s claude "${CMD[@]}")
 
 # Persistent named volumes carry OAuth tokens, gh login, conversation history.
 # --ephemeral skips them for one-shot untrusted sessions. Prepend to MOUNT_ARGS
