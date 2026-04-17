@@ -40,7 +40,7 @@ When `~/.claude/settings.docker.json` exists on the host, `run.sh` SHALL bind-mo
 
 ### Requirement: IS_SANDBOX env for root + dangerous-skip-permissions
 
-The image SHALL set `IS_SANDBOX=1` so `claude --dangerously-skip-permissions` (and the `--yolo` shortcut) work despite the container running as root. The Docker container is the sandbox; this is strictly safer than using the flag on the host.
+The image SHALL set `IS_SANDBOX=1` so `claude --dangerously-skip-permissions` (and the `--yolo` shortcut) work despite the container running as root. The container narrows blast radius compared to using the flag on the host, but is not a full sandbox — see the threat model in `claude-docker/README.md`.
 
 #### Scenario: YOLO works in container
 

@@ -23,3 +23,14 @@ Sessions from every workspace MUST live under the same `/root/.claude/projects/`
 
 - **WHEN** the user runs `claude --resume` in any mounted workspace and presses Ctrl+A
 - **THEN** sessions from every workspace used in prior runs appear in the menu
+
+### Requirement: Ephemeral mode opts out of persistence
+
+`run.sh` SHALL support a `--ephemeral` flag that skips the `claude-code-root` and `claude-code-home` named-volume mounts. In this mode no OAuth tokens, `gh` login, shell history, or session history persist between container runs. Intended for one-shot or untrusted-workspace sessions.
+
+#### Scenario: --ephemeral leaves no trace
+
+- **GIVEN** a prior run completed with session history in `claude-code-home`
+- **WHEN** user runs `claude-docker --ephemeral ~/repo`
+- **THEN** `/root/.claude/projects/` starts empty inside the new container
+- **AND** on exit, no writes under `/root/` or `/root/.claude/` are retained in either named volume
