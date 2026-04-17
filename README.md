@@ -39,6 +39,8 @@ Combine as needed: `claude-docker --aws --gh ~/repo`.
 |-----------------|--------|
 | `--ephemeral`   | Skip the `claude-code-root` and `claude-code-home` named volumes. No Claude OAuth token, `gh` login, or conversation history persists across runs. Use for one-shot sessions on untrusted workspaces. |
 | `--ro`          | Mount every workspace read-only. Code review / audit mode. |
+| `--iterm`       | Wrap `claude` in `tmux -CC` for native iTerm2 split-pane teammates (macOS + iTerm2). See [Split-pane agent teams](#split-pane-agent-teams). |
+| `--tmux`        | Wrap `claude` in plain tmux. Teammates render as tmux splits in one terminal tab. Works anywhere. |
 
 Example — review-only session on an untrusted repo, zero creds, no persistence:
 
@@ -113,14 +115,15 @@ git worktree repair
 
 ## Split-pane agent teams
 
-Claude's teammate feature needs tmux. Two modes, picked by `CLAUDE_DOCKER_TMUX`:
+Claude's teammate feature needs tmux. Two modes:
 
-| Value | Effect |
-|-------|--------|
-| `1`   | Plain tmux inside the container. Teammates render as tmux splits inside one terminal tab; switch with `C-b` + arrow keys. Works in any terminal (including VS Code's). |
-| `cc`  | `tmux -CC` (iTerm2 control mode). Teammates render as **native iTerm2 panes/tabs**. macOS + iTerm2 only. |
+| Flag       | Env var equivalent       | Effect |
+|------------|--------------------------|--------|
+| *(none — default)* | *(unset)*        | No tmux. Teammates fall back to Claude's **in-process** mode; cycle with Shift+Down. |
+| `--tmux`   | `CLAUDE_DOCKER_TMUX=1`   | Plain tmux. Teammates = tmux splits in one terminal tab; switch with `C-b` + arrow keys. Any terminal. |
+| `--iterm`  | `CLAUDE_DOCKER_TMUX=cc`  | `tmux -CC` (iTerm2 control mode). Teammates = **native iTerm2 panes/tabs**. macOS + iTerm2 only. |
 
-Both modes need `teammateMode` set in `settings.docker.json` — see [`examples/settings.docker.json`](examples/settings.docker.json).
+The env vars are handy for `export` in your shell rc; the flags are handy for one-offs. Both modes need `teammateMode` set in `settings.docker.json` — see [`examples/settings.docker.json`](examples/settings.docker.json).
 
 ### iTerm2 tips for `cc` mode
 

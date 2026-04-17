@@ -33,6 +33,8 @@ for arg in "$@"; do
     --aws)       WITH_AWS=1 ;;
     --gh)        WITH_GH=1 ;;
     --glab)      WITH_GLAB=1 ;;
+    --iterm)     CLAUDE_DOCKER_TMUX=cc ;;
+    --tmux)      CLAUDE_DOCKER_TMUX=1 ;;
     *)           WORKSPACES+=("$arg") ;;
   esac
 done
