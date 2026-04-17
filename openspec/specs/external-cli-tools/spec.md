@@ -33,10 +33,12 @@ All credential bind-mounts SHALL be read-only so a compromised container cannot 
 #### Scenario: No flags means no credentials
 
 - **GIVEN** host has `~/.aws/config`, `~/.config/glab-cli/config.yml`, and `GH_TOKEN=ghp_x` exported
+- **AND** a prior container run completed `gh auth login` (state persisted in `claude-code-root`)
 - **WHEN** user runs `claude-docker ~/repo`
 - **THEN** `/root/.aws/` does not exist inside the container
-- **AND** `/root/.config/glab-cli/` does not exist inside the container
+- **AND** `/root/.config/glab-cli/` is empty inside the container
 - **AND** `echo $GH_TOKEN` inside the container is empty
+- **AND** `gh auth status` inside the container reports "not logged in"
 
 #### Scenario: --aws grants scoped AWS access
 
@@ -59,12 +61,26 @@ All credential bind-mounts SHALL be read-only so a compromised container cannot 
 - **WHEN** user runs `claude-docker --gh ~/repo`
 - **THEN** `echo $GH_TOKEN` inside the container prints `ghp_x`
 
-### Requirement: In-container gh login persists
+### Requirement: In-container gh login persists only under --gh
 
-Because macOS `gh` uses the Keychain (no host file to mount), the container SHALL support a fresh `gh auth login` whose resulting `~/.config/gh/` persists across runs via the existing `claude-code-root` volume.
+Because macOS `gh` uses the Keychain (no host file to mount), the container SHALL support a fresh `gh auth login` whose resulting `~/.config/gh/` persists across runs via the existing `claude-code-root` volume. Access to that persisted state SHALL be gated on `--gh` being passed in the current run: when `--gh` is not set, `/root/.config/gh/` inside the container MUST appear empty (achieved by overlaying a tmpfs mask) so a prior login cannot grant credentials to a session the user didn't opt in to. The same masking rule SHALL apply to `/root/.config/glab-cli/` when `--glab` is not set.
 
-#### Scenario: gh login survives container exit
+#### Scenario: gh login survives container exit under --gh
 
-- **GIVEN** user completes `gh auth login` inside a container
-- **WHEN** they exit and relaunch
+- **GIVEN** user completes `gh auth login` inside a container launched with `--gh`
+- **WHEN** they exit and relaunch with `--gh`
 - **THEN** `gh auth status` reports "logged in" without re-prompting
+
+#### Scenario: prior gh login is hidden without --gh
+
+- **GIVEN** a prior container run completed `gh auth login` (state persisted in `claude-code-root`)
+- **WHEN** user runs `claude-docker ~/repo` without `--gh`
+- **THEN** `gh auth status` inside the container reports "not logged in"
+- **AND** `/root/.config/gh/` inside the container is empty
+
+#### Scenario: prior glab login is hidden without --glab
+
+- **GIVEN** a prior container run completed `glab auth login` (state persisted in `claude-code-root`)
+- **WHEN** user runs `claude-docker ~/repo` without `--glab`
+- **THEN** `glab auth status` inside the container reports no authenticated host
+- **AND** `/root/.config/glab-cli/` inside the container is empty
