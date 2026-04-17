@@ -8,7 +8,8 @@ Hardened Docker container for running Claude Code. Filesystem access is scoped t
 # Build the image from your checkout (one-time; rerun after Dockerfile changes)
 docker build -t claude-code:local ./claude-docker
 
-# Put on your PATH
+# Put on your PATH (create ~/bin if it doesn't exist)
+mkdir -p ~/bin
 ln -s "$(pwd)/claude-docker/run.sh" ~/bin/claude-docker
 ```
 
