@@ -65,7 +65,9 @@ RUN set -e; ARCH=$(uname -m); \
 RUN npm install -g --ignore-scripts "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
 
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
-    IS_SANDBOX=1
+    IS_SANDBOX=1 \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
 
 # Container runs as root by design: IS_SANDBOX=1 + --cap-drop ALL + no-new-privileges
 # make the container itself the security boundary. Do not add a USER directive

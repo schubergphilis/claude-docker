@@ -128,7 +128,14 @@ done
 
 CMD=(claude)
 [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")
-[ "${CLAUDE_DOCKER_TMUX:-0}" = "1" ] && CMD=(tmux new-session -A -s claude "${CMD[@]}")
+# CLAUDE_DOCKER_TMUX=1   → plain tmux (works in any terminal)
+# CLAUDE_DOCKER_TMUX=cc  → tmux -CC, iTerm2 control mode (native panes on macOS).
+#                          Host must NOT already be inside tmux -CC — nesting
+#                          collapses the inner server to plain splits.
+case "${CLAUDE_DOCKER_TMUX:-0}" in
+  cc|CC) CMD=(tmux -u -CC new-session -A -s claude "${CMD[@]}") ;;
+  1)     CMD=(tmux -u     new-session -A -s claude "${CMD[@]}") ;;
+esac
 
 # Persistent named volumes carry OAuth tokens, gh login, conversation history.
 # --ephemeral skips them for one-shot untrusted sessions. Prepend to MOUNT_ARGS

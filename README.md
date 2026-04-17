@@ -107,9 +107,27 @@ Sibling worktrees need a one-time repair inside the container because `.git` poi
 git worktree repair
 ```
 
+## Pasting images
+
+`Cmd-V` to paste a clipboard image doesn't work inside the container — Claude Code reads the macOS clipboard via OS APIs that a Linux container can't reach. Workaround: save the image into any workspace you mounted (e.g. `Cmd-Shift-4` to Desktop, then move it into `~/repo`) and reference it from Claude with `@screenshot.png`.
+
 ## Split-pane agent teams
 
-Set `CLAUDE_DOCKER_TMUX=1` to wrap `claude` in a container-local tmux session (required for Claude Code's split-pane teammates feature).
+Claude's teammate feature needs tmux. Two modes, picked by `CLAUDE_DOCKER_TMUX`:
+
+| Value | Effect |
+|-------|--------|
+| `1`   | Plain tmux inside the container. Teammates render as tmux splits inside one terminal tab; switch with `C-b` + arrow keys. Works in any terminal (including VS Code's). |
+| `cc`  | `tmux -CC` (iTerm2 control mode). Teammates render as **native iTerm2 panes/tabs**. macOS + iTerm2 only. |
+
+Both modes need `teammateMode` set in `settings.docker.json` — see [`examples/settings.docker.json`](examples/settings.docker.json).
+
+### iTerm2 tips for `cc` mode
+
+- Launch from a tab that is **not** already inside a host `tmux -CC` session — nesting degrades the inner server to plain splits.
+- iTerm2 → Settings → General → tmux → Attaching → **"When attaching, restore windows as:"** → `Tabs in the attaching window` keeps the gateway and Claude's content inside one iTerm2 window (default is `Native windows`, which spawns a separate window).
+- iTerm2 → Settings → General → tmux → **"Automatically bury the tmux client session after connecting"** → hides the `** tmux mode started **` gateway tab on attach so only the Claude tab is visible. Retrieve the gateway later via Session → Buried Sessions if needed.
+- The UTF-8 warning from earlier builds is resolved — the image sets `LANG=C.UTF-8` and `run.sh` passes `tmux -u`.
 
 ## Specs
 
