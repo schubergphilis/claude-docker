@@ -134,6 +134,11 @@ CMD=(claude)
 # --ephemeral skips them for one-shot untrusted sessions. Prepend to MOUNT_ARGS
 # so the docker run line has no conditionally-empty array (bash 3.2 set -u).
 if [ "$EPHEMERAL" = "0" ]; then
+  # Mask persisted in-container auth state when the opt-in flag is off, so a
+  # prior `gh`/`glab auth login` stored under claude-code-root doesn't leak
+  # into a session the user didn't ask to grant those creds to.
+  [ "$WITH_GH" = "0" ]   && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
+  [ "$WITH_GLAB" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   MOUNT_ARGS=(-v claude-code-root:/root -v claude-code-home:/root/.claude "${MOUNT_ARGS[@]}")
 fi
 
