@@ -2,6 +2,8 @@
 
 Hardened Docker container for running Claude Code. Filesystem access is scoped to the directories you pass in; your host statusline, skills, agents, and commands come along via read-only bind-mounts.
 
+Bundled CLIs on the default PATH: `claude`, `gh`, `glab`, `aws` (v2), `openspec`. See [Credential opt-in](#credential-opt-in) for `gh` / `glab` / `aws`; `openspec` needs no flags.
+
 ## Install
 
 ```bash
