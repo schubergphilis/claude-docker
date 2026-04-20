@@ -49,7 +49,11 @@ Example — review-only session on an untrusted repo, zero creds, no persistence
 claude-docker --ephemeral --ro ~/untrusted-repo
 ```
 
-`claude --resume` + Ctrl+A lists sessions from every workspace you've ever used (shared Docker volume). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](#threat-model) for what it does and doesn't protect.
+In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](#threat-model) for what it does and doesn't protect.
+
+### Resuming sessions across workspaces
+
+Conversation history persists in the shared `claude-code-home` volume (skipped under `--ephemeral`), so `claude --resume` followed by `Ctrl+A` lists sessions from every workspace you've ever used — not just the one you're currently in.
 
 ## Host config parity
 
@@ -124,7 +128,7 @@ Claude's teammate feature needs tmux. Two modes:
 | `--tmux`   | `CLAUDE_DOCKER_TMUX=1`   | Plain tmux. Teammates = tmux splits in one terminal tab; switch with `C-b` + arrow keys. Any terminal. |
 | `--iterm`  | `CLAUDE_DOCKER_TMUX=cc`  | `tmux -CC` (iTerm2 control mode). Teammates = **native iTerm2 panes/tabs**. macOS + iTerm2 only. |
 
-The env vars are handy for `export` in your shell rc; the flags are handy for one-offs. Both modes need `teammateMode` set in `settings.docker.json` — see [`examples/settings.docker.json`](examples/settings.docker.json).
+The env vars are handy for `export` in your shell rc; the flags are handy for one-offs. Both modes need `teammateMode` set in `settings.docker.json` — see [`examples/settings.docker.json`](examples/settings.docker.json). The image already bakes in `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1`, so you don't need to add that env var yourself.
 
 ### iTerm2 tips for `cc` mode
 
