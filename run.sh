@@ -149,6 +149,22 @@ if [ "${#ENV_VARS[@]}" -gt 0 ]; then
   done
 fi
 
+# Surface active opt-ins in-container via CLAUDE_DOCKER_FLAGS so the statusline
+# wrapper (below) can tag the session with what was actually granted. Order
+# mirrors the README table so the tag reads predictably.
+# --yolo is omitted intentionally: Claude Code already shows the permission
+# mode in its UI, so duplicating it here would just be noise.
+DOCKER_FLAGS=()
+[ "$WITH_GH" = "1" ]       && DOCKER_FLAGS+=("gh")
+[ "$WITH_AWS" = "1" ]      && DOCKER_FLAGS+=("aws")
+[ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
+[ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
+[ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
+if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
+  old_ifs=$IFS; IFS=','; DOCKER_FLAGS_CSV="${DOCKER_FLAGS[*]}"; IFS=$old_ifs
+  ENV_ARGS+=("-e" "CLAUDE_DOCKER_FLAGS=$DOCKER_FLAGS_CSV")
+fi
+
 # Host Claude config parity: dereference symlinks (skills/agents often point
 # into shared repos) into a staging dir, then bind-mount read-only.
 stage=$(mktemp -d -t claude-docker-host.XXXXXX)
@@ -161,12 +177,35 @@ for item in agents commands skills; do
     MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
   fi
 done
-for item in CLAUDE.md statusline-command.sh; do
-  if [ -f "$HOME/.claude/$item" ]; then
-    cp -L "$HOME/.claude/$item" "$stage/$item"
-    MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
-  fi
-done
+if [ -f "$HOME/.claude/CLAUDE.md" ]; then
+  cp -L "$HOME/.claude/CLAUDE.md" "$stage/CLAUDE.md"
+  MOUNT_ARGS+=("-v" "$stage/CLAUDE.md:/root/.claude/CLAUDE.md:ro")
+fi
+
+# Statusline: mount the host script as-is, plus a thin wrapper at the canonical
+# path that prefixes a `docker:<flags>` tag when CLAUDE_DOCKER_FLAGS is set.
+# The wrapper is a no-op passthrough when unset so non-claude-docker runs of
+# the same file would behave identically.
+if [ -f "$HOME/.claude/statusline-command.sh" ]; then
+  cp -L "$HOME/.claude/statusline-command.sh" "$stage/statusline-command.original.sh"
+  chmod +x "$stage/statusline-command.original.sh"
+  cat >"$stage/statusline-command.sh" <<'WRAP'
+#!/bin/sh
+# claude-docker wrapper — prepends active opt-in flag tag to host statusline.
+input=$(cat)
+body=$(printf '%s' "$input" | /root/.claude/statusline-command.original.sh)
+if [ -n "${CLAUDE_DOCKER_FLAGS:-}" ]; then
+  printf '\033[33mdocker:%s\033[0m %s' "$CLAUDE_DOCKER_FLAGS" "$body"
+else
+  printf '%s' "$body"
+fi
+WRAP
+  chmod +x "$stage/statusline-command.sh"
+  MOUNT_ARGS+=(
+    "-v" "$stage/statusline-command.original.sh:/root/.claude/statusline-command.original.sh:ro"
+    "-v" "$stage/statusline-command.sh:/root/.claude/statusline-command.sh:ro"
+  )
+fi
 [ -f "$HOME/.claude/settings.docker.json" ] \
   && MOUNT_ARGS+=("-v" "$HOME/.claude/settings.docker.json:/root/.claude/settings.json:ro")
 
