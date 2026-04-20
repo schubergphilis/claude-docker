@@ -22,6 +22,8 @@ claude-docker --yolo ~/repo               # alias for --dangerously-skip-permiss
 claude-docker ~/repo -- --resume          # any claude flag after --
 ```
 
+`claude-docker --help` (or `-h`) prints every wrapper flag with a one-line explanation — the canonical reference.
+
 ### Credential opt-in
 
 **Credentials are off by default.** No AWS / GitHub / GitLab config, tokens, or env vars reach the container unless you explicitly opt in:

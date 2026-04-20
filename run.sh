@@ -3,16 +3,57 @@ set -euo pipefail
 
 IMAGE="claude-code:local"
 
-# Args parsing: workspaces and recognised flags before `--`, verbatim
-# claude flags after `--`.
-#   claude-docker ~/repo-a ~/repo-b -- --resume
-#   claude-docker --yolo ~/repo-a                (-> claude --dangerously-skip-permissions)
-#   claude-docker --ephemeral ~/repo             (no persistent named volumes)
-#   claude-docker --ro ~/repo                    (read-only workspace mounts)
-#   claude-docker --aws ~/repo                   (opt in to AWS config/sso + AWS_* env)
-#   claude-docker --gh ~/repo                    (opt in to GH_TOKEN/GITHUB_TOKEN env)
-#   claude-docker --glab ~/repo                  (opt in to glab config + GITLAB_TOKEN env)
-# Credentials are off by default. Combine opt-ins as needed: `--aws --gh`.
+# Keep this in sync with the flag-parsing case statement below — adding or
+# removing a wrapper flag means updating both the case branch and this heredoc
+# in the same diff.
+print_help() {
+  cat <<'EOF'
+Usage: claude-docker [OPTIONS] [WORKSPACE...] [-- CLAUDE_FLAGS...]
+
+Hardened Docker wrapper for Claude Code. Wrapper flags and workspace paths
+are parsed before `--`; anything after `--` is forwarded verbatim to the
+`claude` binary inside the container.
+
+Workspaces:
+  WORKSPACE...        One or more host directories to mount at
+                      /workspaces/<basename>. Defaults to $PWD when omitted.
+                      First workspace becomes the container's working dir.
+
+Wrapper flags:
+  -h, --help          Print this help and exit 0 without starting Docker.
+  --yolo              Pass --dangerously-skip-permissions to claude.
+  --ephemeral         Skip the claude-code-root/claude-code-home named
+                      volumes. No OAuth token, gh login, shell history, or
+                      session history persists across runs.
+  --ro                Mount every workspace read-only (review / audit mode).
+  --aws               Opt in to AWS: mount ~/.aws/config + ~/.aws/sso (:ro)
+                      and forward AWS_PROFILE / AWS_REGION /
+                      AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
+                      AWS_SESSION_TOKEN when set.
+  --gh                Opt in to GitHub: forward GH_TOKEN / GITHUB_TOKEN and
+                      unmask in-container gh login state.
+  --glab              Opt in to GitLab: mount glab-cli config (:ro) and
+                      forward GITLAB_TOKEN; unmask in-container glab login.
+  --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
+                      panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
+  --tmux              Wrap claude in plain tmux (works in any terminal).
+                      Equivalent to CLAUDE_DOCKER_TMUX=1.
+
+Separator:
+  --                  Ends wrapper-flag parsing. Everything after is passed
+                      to `claude`, e.g. `claude-docker ~/repo -- --resume`.
+
+Environment:
+  CLAUDE_DOCKER_TMUX  1  → plain tmux wrapper (same as --tmux).
+                      cc → tmux -CC iTerm2 control mode (same as --iterm).
+
+Credentials are off by default; combine opt-ins as needed:
+  claude-docker --aws --gh ~/repo
+EOF
+}
+
+# Wrapper flags and workspace paths before `--`; verbatim claude flags after.
+# See `print_help` above or `claude-docker --help` for the flag list.
 WORKSPACES=()
 CLAUDE_FLAGS=()
 EPHEMERAL=0
@@ -27,6 +68,7 @@ for arg in "$@"; do
     CLAUDE_FLAGS+=("$arg"); continue
   fi
   case "$arg" in
+    -h|--help)   print_help; exit 0 ;;
     --yolo)      CLAUDE_FLAGS+=("--dangerously-skip-permissions") ;;
     --ephemeral) EPHEMERAL=1 ;;
     --ro)        RO_WORKSPACES=1 ;;
