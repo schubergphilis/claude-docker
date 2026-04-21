@@ -2,8 +2,9 @@
 # Bump with: docker buildx imagetools inspect node:20-bookworm-slim --format '{{.Manifest.Digest}}'
 FROM node:20-bookworm-slim@sha256:f93745c153377ee2fbbdd6e24efcd03cd2e86d6ab1d8aa9916a3790c40313a55
 
-# When bumping a version ARG, also refresh its sha256 ARG in the same commit.
+# When bumping a version ARG, also refresh any paired sha256 ARG in the same commit.
 ARG CLAUDE_CODE_VERSION=2.1.112
+ARG OPENSPEC_VERSION=1.3.0
 ARG GLAB_VERSION=1.92.1
 ARG GLAB_DEB_SHA256_AMD64=18048e5cb2cbc92eb31d4190852c6da32f6713633cfefc7b3fe00c18806c4f53
 ARG GLAB_DEB_SHA256_ARM64=f12a5e5e820b4c0b2803de4136884a90a64918bc3c7fd309f8c5a3ca9455fa8b
@@ -73,8 +74,10 @@ RUN set -e; ARCH=$(uname -m); \
  && /tmp/aws/install \
  && rm -rf /tmp/aws /tmp/awscli.zip
 
-# claude-code — pinned version, no lifecycle scripts
-RUN npm install -g --ignore-scripts "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
+# npm-backed CLIs — pinned versions, no lifecycle scripts
+RUN npm install -g --ignore-scripts \
+      "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+      "@fission-ai/openspec@${OPENSPEC_VERSION}"
 
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     IS_SANDBOX=1 \
