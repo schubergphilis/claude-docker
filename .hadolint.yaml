@@ -1,0 +1,5 @@
+ignored:
+  # DL3008: Debian stable only exposes one version per package; pinning breaks
+  # on every repo update. Security is handled via the base image digest pin
+  # and sha256-verified direct downloads for third-party binaries.
+  - DL3008
