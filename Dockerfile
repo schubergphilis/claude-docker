@@ -11,6 +11,18 @@ ARG AWSCLI_VERSION=2.34.31
 ARG AWSCLI_SHA256_X86_64=d1540db414d48650c87cea7e2b585368b864d2be5fc4034f9af3b1e3dc2f678a
 ARG AWSCLI_SHA256_AARCH64=932ff651397d5c56f78987fcdf736dfc62c2a32ed2c0e9c9ae96e9a7ff1e85ea
 
+# Make apt runnable under --cap-drop ALL at runtime. Two pieces:
+#  1. APT::Sandbox::User "root" stops the http method from setgroups()→_apt
+#     (needs CAP_SETGID, dropped at runtime).
+#  2. chown archives/partial to root so apt can write it without
+#     CAP_DAC_OVERRIDE/CAP_FOWNER — Debian ships it as _apt:root 0700.
+#     lists/partial doesn't need chowning: apt re-creates it as root at
+#     runtime now that sandbox user is root.
+# Safe here: the container itself is the security boundary, not apt's
+# internal user split.
+RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
+ && chown root:root /var/cache/apt/archives/partial
+
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     tmux \
