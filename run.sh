@@ -17,7 +17,9 @@ are parsed before `--`; anything after `--` is forwarded verbatim to the
 Workspaces:
   WORKSPACE...        One or more host directories to mount at
                       /workspaces/<basename>. Defaults to $PWD when omitted.
-                      First workspace becomes the container's working dir.
+                      First workspace becomes the container's working dir;
+                      every additional workspace is passed to claude as
+                      --add-dir so the agent can read/write across all of them.
 
 Wrapper flags:
   -h, --help          Print this help and exit 0 without starting Docker.
@@ -232,6 +234,15 @@ fi
   && MOUNT_ARGS+=("-v" "$HOME/.claude/settings.docker.json:/root/.claude/settings.json:ro")
 
 CMD=(claude)
+# Grant claude read/write access to every mounted workspace, not just cwd.
+# Index 0 is already cwd, so skip it. Repeat --add-dir is allowed; we don't
+# dedupe against any user-supplied --add-dir after `--`.
+n=${#CONTAINER_PATHS[@]}
+i=1
+while [ "$i" -lt "$n" ]; do
+  CMD+=("--add-dir" "${CONTAINER_PATHS[$i]}")
+  i=$((i + 1))
+done
 [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")
 # CLAUDE_DOCKER_TMUX=1   → plain tmux (works in any terminal)
 # CLAUDE_DOCKER_TMUX=cc  → tmux -CC, iTerm2 control mode (native panes on macOS).

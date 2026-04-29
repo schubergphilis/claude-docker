@@ -39,6 +39,27 @@ When two or more workspace arguments resolve to the same basename, `run.sh` SHAL
 - **WHEN** user runs `~/claude-docker/run.sh ~/repo-a ~/repo-b`
 - **THEN** `claude` starts in `/workspaces/repo-a`
 
+### Requirement: Additional workspaces granted to claude
+
+For every workspace argument beyond the first, `run.sh` SHALL pass `--add-dir <container-path>` to the `claude` invocation so the agent has read/write scope over every mounted workspace, not just the cwd. The first workspace is omitted because cwd already grants it. The wrapper does not dedupe against any user-supplied `--add-dir` after `--`; `claude` accepts repeated occurrences.
+
+#### Scenario: Extra workspaces become additional working dirs
+
+- **WHEN** user runs `claude-docker ~/repo-a ~/repo-b ~/repo-c`
+- **THEN** the container launches `claude --add-dir /workspaces/repo-b --add-dir /workspaces/repo-c`
+- **AND** the agent can read and write files in all three workspaces
+
+#### Scenario: Single workspace adds no flag
+
+- **WHEN** user runs `claude-docker ~/repo`
+- **THEN** the container launches `claude` with no `--add-dir` flag
+
+#### Scenario: --ro workspaces still added
+
+- **WHEN** user runs `claude-docker --ro ~/repo-a ~/repo-b`
+- **THEN** the container launches `claude --add-dir /workspaces/repo-b`
+- **AND** writes to either workspace fail with EROFS at the OS layer (the `--add-dir` flag itself has no read-only mode)
+
 ### Requirement: Sibling worktrees supported
 
 Users SHALL be able to pass both a repo and its sibling git worktree (or a shared parent) so that git operations across them succeed. Because git worktrees embed absolute host paths in their `.git` files, users MAY need to run `git worktree repair` once inside the container to rewrite those paths.
