@@ -16,9 +16,11 @@ Two bugs in the existing mounting logic were also discovered during this work:
 
 2. **The staging directory was invisible inside the container.** `mktemp -d -t`
    places the stage under `$TMPDIR`, which on macOS resolves to
-   `/var/folders/…`. Colima and Docker Desktop (depending on file-sharing
-   configuration) do not mount `/var/folders` into the Linux VM, so bind-mounts
-   from the stage appeared as empty directories in the container.
+   `/var/folders/…`. Colima's default mount config exposes only `$HOME`
+   (`/Users/$USER`) to the Linux VM — neither `$TMPDIR` nor `/tmp` is shared.
+   A bind-mount sourced from outside `$HOME` starts without error but
+   silently yields an empty mountpoint inside the container. Docker Desktop
+   shares more host paths by default, which masked the bug for that runtime.
 
 ## What Changes
 
@@ -28,8 +30,9 @@ Two bugs in the existing mounting logic were also discovered during this work:
   user-specified directory instead of `~/.claude`.
 - Fix top-level directory symlink resolution: resolve the symlink chain with
   `readlink` before staging so `cp -RL` always receives a real directory path.
-- Move the staging directory from `$TMPDIR` to `/tmp` (`/private/tmp` on macOS),
-  which is shared into the Linux VM by both Docker Desktop and Colima.
+- Move the staging directory from `$TMPDIR` to `$HOME/.cache/claude-docker/`,
+  which is the only host path Colima shares into its Linux VM by default
+  (Docker Desktop also shares it).
 - Update `--help` output to document `--claude-dir`, `CLAUDE_DOCKER_CONFIG_DIR`,
   and the `settings.docker.json` → `settings.json` mounting behaviour.
 

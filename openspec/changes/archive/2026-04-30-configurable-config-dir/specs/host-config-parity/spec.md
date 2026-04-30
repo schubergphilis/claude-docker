@@ -35,10 +35,12 @@ resolved at two levels:
    within the directory tree during staging, so targets outside the mount root
    still resolve inside the container.
 
-The stage directory MUST reside under `/tmp` (not `$TMPDIR`). On macOS, `$TMPDIR`
-resolves to `/var/folders/…`, which container runtimes such as Colima and Docker
-Desktop do not mount into the Linux VM. `/tmp` (→ `/private/tmp`) is always
-available.
+The stage directory MUST reside under `$HOME` (e.g. `$HOME/.cache/claude-docker/host.XXXXXX`).
+Colima's default mount config exposes only `$HOME` (`/Users/$USER`) to its
+Linux VM — `/tmp` and `$TMPDIR` are NOT shared. A bind-mount sourced from
+outside `$HOME` starts without error but silently yields an empty mountpoint
+inside the container under Colima. Docker Desktop also shares `$HOME` (under
+`/Users`), so `$HOME` is the one stage location that works on both runtimes.
 
 Host `hooks/` and the `hooks` settings key are intentionally NOT carried over.
 

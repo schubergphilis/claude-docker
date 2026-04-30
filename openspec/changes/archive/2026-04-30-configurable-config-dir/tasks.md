@@ -7,8 +7,8 @@
 ## 2. Symlink and staging fixes
 
 - [x] 2.1 Replace `[ -d "$HOME/.claude/$item" ]` + `cp -RL` with a `while [ -L ]` symlink-resolution loop, then `cp -RL` from the resolved real path.
-- [x] 2.2 Change `mktemp -d -t claude-docker-host.XXXXXX` to `mktemp -d /tmp/claude-docker-host.XXXXXX` so the stage lands in `/private/tmp` on macOS.
-- [x] 2.3 Update the `EXIT` trap pattern from `*/claude-docker-host.*` to `/tmp/claude-docker-host.*`.
+- [x] 2.2 Change `mktemp -d -t claude-docker-host.XXXXXX` to `mktemp -d "$HOME/.cache/claude-docker/host.XXXXXX"` (with `mkdir -p` of the parent) so the stage lands inside `$HOME`, the only host path Colima shares into its VM by default.
+- [x] 2.3 Update the `EXIT` trap pattern from `*/claude-docker-host.*` to `"$HOME/.cache/claude-docker/host."*`.
 - [x] 2.4 Replace all remaining `$HOME/.claude/` references in the staging section with `$CLAUDE_CONFIG_DIR/`.
 
 ## 3. Single-file mounts
@@ -35,4 +35,4 @@
 - [x] 6.3 Config dir where a subdirectory (e.g. `commands/`) is itself a symlink — files appear in the container.
 - [x] 6.4 Config dir where items inside a directory are symlinks — files resolve (not dangling) in the container.
 - [x] 6.5 `settings.docker.json` present in the config dir — mounted as `settings.json` in the container.
-- [x] 6.6 Verified on Colima (the runtime where the `$TMPDIR` bug was first reproduced).
+- [x] 6.6 Verified on Colima (the runtime where the staging bug was reproduced; Colima only shares `$HOME` by default, so any non-`$HOME` stage path silently fails).

@@ -221,14 +221,19 @@ fi
 
 # Host Claude config parity: mount host config items read-only into the container.
 # Directories: resolve the top-level symlink so Docker gets a real path under
-# /Users (which Docker Desktop always shares). Staging in $TMPDIR ($TMPDIR on
-# macOS is /var/folders/... which Docker Desktop does NOT share, so a temp-dir
-# mount would silently appear empty in the container).
-# Statusline wrapper is generated content so it still needs a real stage dir;
-# use /tmp (/private/tmp) which Docker Desktop does share on macOS.
-stage=$(mktemp -d /tmp/claude-docker-host.XXXXXX)
+# /Users (which is the only host path Colima shares into its VM by default;
+# Docker Desktop also shares it). The statusline wrapper is generated content
+# so it still needs a real stage dir — stage that under $HOME for the same
+# reason: /tmp and $TMPDIR are NOT shared by Colima's default mount config,
+# so any bind-mount from those paths silently yields an empty mountpoint in
+# the container. $TMPDIR on macOS is /var/folders/... (not shared by either
+# runtime); /tmp is shared by Docker Desktop only.
+stage_root="$HOME/.cache/claude-docker"
+mkdir -p "$stage_root"
+stage=$(mktemp -d "$stage_root/host.XXXXXX")
 # `case` instead of `[[ ]]` for bash 3.2 friendliness inside the trap string.
-trap 'case "$stage" in /tmp/claude-docker-host.*) rm -rf "$stage" ;; esac' EXIT
+# $HOME is expanded at trap execution time, * is a glob wildcard.
+trap 'case "$stage" in "$HOME/.cache/claude-docker/host."*) rm -rf "$stage" ;; esac' EXIT
 
 for item in agents commands skills; do
   src="$CLAUDE_CONFIG_DIR/$item"

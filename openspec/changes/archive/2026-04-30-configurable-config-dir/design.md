@@ -54,18 +54,26 @@ Mounting the resolved real path directly (without `cp -RL`) was considered as
 a simpler alternative. It was rejected because absolute symlinks inside the
 directory would be dangling in the container; `cp -RL` makes them regular files.
 
-### Decision: Stage in `/tmp`, not `$TMPDIR`
+### Decision: Stage in `$HOME`, not `$TMPDIR` or `/tmp`
 
-On macOS, `mktemp -d -t …` creates under `$TMPDIR` which resolves to
-`/var/folders/…`. Colima (and Docker Desktop with certain file-sharing
-configurations) does not mount `/var/folders` into the Linux VM. Bind-mounts
-from that path are accepted by Docker without error but appear as empty
-directories in the container — a silent failure that is hard to diagnose.
+Colima's default mount config (verified against `colima.yaml` and confirmed by
+inspecting `mount` inside a running Colima VM) shares exactly one macOS host
+path into its Linux VM: `$HOME`, mounted via virtiofs at the same path
+(`/Users/$USER`). Neither `$TMPDIR` (`/var/folders/…`) nor `/tmp` is shared.
 
-`/tmp` on macOS is a symlink to `/private/tmp`. `/private` is always in both
-Docker Desktop's and Colima's default mount list. Using an explicit
-`/tmp/claude-docker-host.XXXXXX` template (no `-t` flag) ensures the stage
-lands in `/private/tmp` regardless of `$TMPDIR`.
+A bind-mount sourced from outside `$HOME` is accepted by `docker run` without
+error, but the bind-mount target ends up referencing the *VM's* filesystem
+at that path (which is empty) rather than the macOS host. The container
+shows an empty mountpoint with no obvious indication of why — a silent
+failure that is hard to diagnose. An earlier iteration of this change used
+`/tmp/claude-docker-host.XXXXXX` and worked under Docker Desktop (which
+shares `/private`, including `/private/tmp`) but failed under Colima for
+exactly this reason.
+
+Staging under `$HOME/.cache/claude-docker/host.XXXXXX` works for both
+runtimes: `$HOME` is always shared. The `.cache/` subdirectory follows the
+XDG basedir convention so the parent dir survives across runs and only the
+`host.XXXXXX` subdirectory is removed by the EXIT trap.
 
 ### Decision: No `--forward-settings` flag
 
@@ -79,13 +87,14 @@ providing no advantage over the existing file-based mechanism.
 ### Decision: Single files (`CLAUDE.md`, `statusline-command.sh`, `settings.docker.json`) are mounted directly
 
 For single files, Docker resolves host-side symlinks in bind-mounts
-automatically. Staging them (copying to `/tmp` then mounting the copy) adds
-I/O with no benefit. Only directory trees need staging to dereference internal
-symlinks that would otherwise be dangling in the container.
+automatically. Staging them (copying to a stage dir then mounting the copy)
+adds I/O with no benefit. Only directory trees need staging to dereference
+internal symlinks that would otherwise be dangling in the container.
 
 The generated statusline wrapper script is the one exception: it is created in
-the stage rather than copied from the host, so it still uses the `/tmp` stage.
-The original `statusline-command.sh` is mounted directly from the config dir.
+the stage rather than copied from the host, so it still uses the `$HOME`
+stage. The original `statusline-command.sh` is mounted directly from the
+config dir.
 
 ## Risks / Trade-offs
 
@@ -93,8 +102,9 @@ The original `statusline-command.sh` is mounted directly from the config dir.
   dereferences them, so they become regular files in the container. The trade-off
   is that edits made to staged copies are not reflected back to the originals
   (they are read-only mounts anyway). Acceptable for a read-only bind-mount.
-- [`/tmp` cleaned by the OS mid-session] → The `EXIT` trap removes the stage on
-  normal exit. A crash could leave orphaned `/tmp/claude-docker-host.*`
-  directories. Identical risk to the prior `$TMPDIR`-based approach.
+- [Crash leaves orphaned stage dirs in `$HOME/.cache/claude-docker/`] → The
+  `EXIT` trap removes the stage on normal exit. A crash could leave orphaned
+  `host.XXXXXX` subdirectories under `$HOME/.cache/claude-docker/`. Cheap to
+  clean up manually; same risk profile as any temp-dir approach.
 - [Users expecting `settings.json` to auto-forward] → Documented in `--help`
   output and the spec. `settings.docker.json` is the explicit opt-in.
