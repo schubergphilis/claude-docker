@@ -43,17 +43,23 @@ Wrapper flags:
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
                       Equivalent to CLAUDE_DOCKER_TMUX=1.
+  --claude-dir=PATH   Use PATH as the host Claude config dir instead of
+                      ~/.claude. Affects agents, commands, skills, CLAUDE.md,
+                      and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
 
 Separator:
   --                  Ends wrapper-flag parsing. Everything after is passed
                       to `claude`, e.g. `claude-docker ~/repo -- --resume`.
 
 Environment:
-  CLAUDE_DOCKER_TMUX  1  → plain tmux wrapper (same as --tmux).
-                      cc → tmux -CC iTerm2 control mode (same as --iterm).
-  CLAUDE_DOCKER_IMAGE Override the image tag (default: claude-code:local).
-                      Used by child images that extend this one and want to
-                      reuse this wrapper.
+  CLAUDE_DOCKER_TMUX       1  → plain tmux wrapper (same as --tmux).
+                           cc → tmux -CC iTerm2 control mode (same as
+                           --iterm).
+  CLAUDE_DOCKER_IMAGE      Override the image tag (default: claude-code:local).
+                           Used by child images that extend this one and want to
+                           reuse this wrapper.
+  CLAUDE_DOCKER_CONFIG_DIR Override the host Claude config dir (same as
+                           --claude-dir=PATH).
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -63,6 +69,9 @@ host's global git config as GIT_AUTHOR_* / GIT_COMMITTER_* env vars so
 in-container `git commit` works without a `-c user.email=...` override.
 Not gated: identity is already public on every commit you've ever made.
 Signing, credential helpers, and hooks are NOT forwarded.
+
+If <config-dir>/settings.docker.json exists it is mounted as settings.json
+in the container; the regular settings.json is never forwarded automatically.
 EOF
 }
 
@@ -75,6 +84,7 @@ RO_WORKSPACES=0
 WITH_AWS=0
 WITH_GH=0
 WITH_GLAB=0
+CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
   if [ "$arg" = "--" ]; then saw_sep=1; continue; fi
@@ -89,12 +99,17 @@ for arg in "$@"; do
     --aws)       WITH_AWS=1 ;;
     --gh)        WITH_GH=1 ;;
     --glab)      WITH_GLAB=1 ;;
-    --iterm)     CLAUDE_DOCKER_TMUX=cc ;;
-    --tmux)      CLAUDE_DOCKER_TMUX=1 ;;
-    *)           WORKSPACES+=("$arg") ;;
+    --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
+    --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
+    --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
+    -*)             echo "claude-docker: unknown flag '$arg' (use -- to pass flags to claude)" >&2; exit 1 ;;
+    *)              WORKSPACES+=("$arg") ;;
   esac
 done
 [ "${#WORKSPACES[@]}" -eq 0 ] && WORKSPACES=("$PWD")
+# Expand a leading ~ in CLAUDE_CONFIG_DIR — needed when set via env var, where
+# the shell does not perform tilde expansion.
+case "$CLAUDE_CONFIG_DIR" in "~"*) CLAUDE_CONFIG_DIR="$HOME${CLAUDE_CONFIG_DIR#\~}" ;; esac
 
 MOUNT_ARGS=()
 ENV_ARGS=(-e TERM)
@@ -195,30 +210,40 @@ if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
   ENV_ARGS+=("-e" "CLAUDE_DOCKER_FLAGS=$DOCKER_FLAGS_CSV")
 fi
 
-# Host Claude config parity: dereference symlinks (skills/agents often point
-# into shared repos) into a staging dir, then bind-mount read-only.
-stage=$(mktemp -d -t claude-docker-host.XXXXXX)
+# Host Claude config parity: mount host config items read-only into the container.
+# Directories: resolve the top-level symlink so Docker gets a real path under
+# /Users (which Docker Desktop always shares). Staging in $TMPDIR ($TMPDIR on
+# macOS is /var/folders/... which Docker Desktop does NOT share, so a temp-dir
+# mount would silently appear empty in the container).
+# Statusline wrapper is generated content so it still needs a real stage dir;
+# use /tmp (/private/tmp) which Docker Desktop does share on macOS.
+stage=$(mktemp -d /tmp/claude-docker-host.XXXXXX)
 # `case` instead of `[[ ]]` for bash 3.2 friendliness inside the trap string.
-trap 'case "$stage" in */claude-docker-host.*) rm -rf "$stage" ;; esac' EXIT
+trap 'case "$stage" in /tmp/claude-docker-host.*) rm -rf "$stage" ;; esac' EXIT
 
 for item in agents commands skills; do
-  if [ -d "$HOME/.claude/$item" ]; then
-    cp -RL "$HOME/.claude/$item" "$stage/$item"
+  src="$CLAUDE_CONFIG_DIR/$item"
+  # Resolve top-level symlink so cp -RL gets a real directory path, not a link.
+  while [ -L "$src" ]; do
+    link=$(readlink "$src")
+    case "$link" in /*) src="$link" ;; *) src="$(dirname "$src")/$link" ;; esac
+  done
+  if [ -d "$src" ]; then
+    # cp -RL dereferences all symlinks within the tree so internal symlinks
+    # (e.g. skills/foo -> ~/git/repo/skills/foo) resolve inside the container.
+    cp -RL "$src" "$stage/$item"
     MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
   fi
 done
-if [ -f "$HOME/.claude/CLAUDE.md" ]; then
-  cp -L "$HOME/.claude/CLAUDE.md" "$stage/CLAUDE.md"
-  MOUNT_ARGS+=("-v" "$stage/CLAUDE.md:/root/.claude/CLAUDE.md:ro")
+if [ -f "$CLAUDE_CONFIG_DIR/CLAUDE.md" ]; then
+  MOUNT_ARGS+=("-v" "$CLAUDE_CONFIG_DIR/CLAUDE.md:/root/.claude/CLAUDE.md:ro")
 fi
 
 # Statusline: mount the host script as-is, plus a thin wrapper at the canonical
 # path that prefixes a `docker:<flags>` tag when CLAUDE_DOCKER_FLAGS is set.
 # The wrapper is a no-op passthrough when unset so non-claude-docker runs of
 # the same file would behave identically.
-if [ -f "$HOME/.claude/statusline-command.sh" ]; then
-  cp -L "$HOME/.claude/statusline-command.sh" "$stage/statusline-command.original.sh"
-  chmod +x "$stage/statusline-command.original.sh"
+if [ -f "$CLAUDE_CONFIG_DIR/statusline-command.sh" ]; then
   cat >"$stage/statusline-command.sh" <<'WRAP'
 #!/bin/sh
 # claude-docker wrapper — prepends active opt-in flag tag to host statusline.
@@ -232,12 +257,12 @@ fi
 WRAP
   chmod +x "$stage/statusline-command.sh"
   MOUNT_ARGS+=(
-    "-v" "$stage/statusline-command.original.sh:/root/.claude/statusline-command.original.sh:ro"
+    "-v" "$CLAUDE_CONFIG_DIR/statusline-command.sh:/root/.claude/statusline-command.original.sh:ro"
     "-v" "$stage/statusline-command.sh:/root/.claude/statusline-command.sh:ro"
   )
 fi
-[ -f "$HOME/.claude/settings.docker.json" ] \
-  && MOUNT_ARGS+=("-v" "$HOME/.claude/settings.docker.json:/root/.claude/settings.json:ro")
+[ -f "$CLAUDE_CONFIG_DIR/settings.docker.json" ] \
+  && MOUNT_ARGS+=("-v" "$CLAUDE_CONFIG_DIR/settings.docker.json:/root/.claude/settings.json:ro")
 
 CMD=(claude)
 # Grant claude read/write access to every mounted workspace, not just cwd.
