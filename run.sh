@@ -183,8 +183,12 @@ fi
 # to export anything manually. Silent on failure (gh absent or not logged in).
 if [ "$WITH_GH" = "1" ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
   if command -v gh >/dev/null 2>&1; then
-    gh_token=$(gh auth token 2>/dev/null) && [ -n "$gh_token" ] \
-      && ENV_ARGS+=("-e" "GH_TOKEN=$gh_token")
+    gh_token=$(gh auth token 2>/dev/null)
+    if [ -n "$gh_token" ]; then
+      GH_TOKEN="$gh_token"
+      export GH_TOKEN
+      ENV_ARGS+=("-e" "GH_TOKEN")
+    fi
   fi
 fi
 
