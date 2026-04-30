@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-IMAGE="claude-code:local"
+# Override via CLAUDE_DOCKER_IMAGE so child images (FROM claude-code:local) can
+# reuse this wrapper's full feature set — credential opt-ins, statusline tag,
+# git-identity forwarding, host-config bind-mounts — without forking it.
+IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
 
 # Keep this in sync with the flag-parsing case statement below — adding or
 # removing a wrapper flag means updating both the case branch and this heredoc
@@ -48,6 +51,9 @@ Separator:
 Environment:
   CLAUDE_DOCKER_TMUX  1  → plain tmux wrapper (same as --tmux).
                       cc → tmux -CC iTerm2 control mode (same as --iterm).
+  CLAUDE_DOCKER_IMAGE Override the image tag (default: claude-code:local).
+                      Used by child images that extend this one and want to
+                      reuse this wrapper.
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo

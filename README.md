@@ -149,6 +149,30 @@ The env vars are handy for `export` in your shell rc; the flags are handy for on
 - iTerm2 → Settings → General → tmux → **"Automatically bury the tmux client session after connecting"** → hides the `** tmux mode started **` gateway tab on attach so only the Claude tab is visible. Retrieve the gateway later via Session → Buried Sessions if needed.
 - The UTF-8 warning from earlier builds is resolved — the image sets `LANG=C.UTF-8` and `run.sh` passes `tmux -u`.
 
+## Extending the image
+
+When a project needs extra tooling (language runtimes, package managers, project-scoped CLIs) that doesn't belong in the base image, build a child image and reuse this wrapper via the `CLAUDE_DOCKER_IMAGE` env var — no need to fork `run.sh`.
+
+In the child repo:
+
+```dockerfile
+# .claude-docker/Dockerfile
+FROM claude-code:local
+RUN ...   # add your extras here
+```
+
+```bash
+#!/usr/bin/env bash
+# claude-docker (project-root entrypoint)
+set -euo pipefail
+here=$(cd "$(dirname "$0")" && pwd)
+IMAGE="claude-code-myproject:local"
+docker build -t "$IMAGE" "$here/.claude-docker"
+CLAUDE_DOCKER_IMAGE="$IMAGE" exec claude-docker "$@"
+```
+
+The child Dockerfile uses `FROM claude-code:local` (locally-built tag) — assumes the base has been built once on the host. Every wrapper flag (`--aws`, `--gh`, `--ephemeral`, `--ro`, `--iterm`, …) keeps working because the child script just exec's into this one with a different image tag.
+
 ## Specs
 
 Behavioural requirements live in [`openspec/specs/`](openspec/specs/); change history in [`openspec/changes/archive/`](openspec/changes/archive/).
