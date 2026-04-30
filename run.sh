@@ -177,6 +177,15 @@ if [ "${#ENV_VARS[@]}" -gt 0 ]; then
     [ -n "${!v:-}" ] && ENV_ARGS+=("-e" "$v")
   done
 fi
+# --gh fallback: if neither GH_TOKEN nor GITHUB_TOKEN was forwarded, try the
+# gh CLI's active token so users authenticated via `gh auth login` don't have
+# to export anything manually. Silent on failure (gh absent or not logged in).
+if [ "$WITH_GH" = "1" ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+  if command -v gh >/dev/null 2>&1; then
+    gh_token=$(gh auth token 2>/dev/null) && [ -n "$gh_token" ] \
+      && ENV_ARGS+=("-e" "GH_TOKEN=$gh_token")
+  fi
+fi
 
 # Forward host git identity so in-container `git commit` works without a
 # per-invocation `-c user.email=...` dance. Non-opt-in: user.name/user.email
