@@ -92,13 +92,13 @@ for arg in "$@"; do
     CLAUDE_FLAGS+=("$arg"); continue
   fi
   case "$arg" in
-    -h|--help)   print_help; exit 0 ;;
-    --yolo)      CLAUDE_FLAGS+=("--dangerously-skip-permissions") ;;
-    --ephemeral) EPHEMERAL=1 ;;
-    --ro)        RO_WORKSPACES=1 ;;
-    --aws)       WITH_AWS=1 ;;
-    --gh)        WITH_GH=1 ;;
-    --glab)      WITH_GLAB=1 ;;
+    -h|--help)      print_help; exit 0 ;;
+    --yolo)         CLAUDE_FLAGS+=("--dangerously-skip-permissions") ;;
+    --ephemeral)    EPHEMERAL=1 ;;
+    --ro)           RO_WORKSPACES=1 ;;
+    --aws)          WITH_AWS=1 ;;
+    --gh)           WITH_GH=1 ;;
+    --glab)         WITH_GLAB=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
     --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
     --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -107,9 +107,10 @@ for arg in "$@"; do
   esac
 done
 [ "${#WORKSPACES[@]}" -eq 0 ] && WORKSPACES=("$PWD")
-# Expand a leading ~ in CLAUDE_CONFIG_DIR — needed when set via env var, where
-# the shell does not perform tilde expansion.
-case "$CLAUDE_CONFIG_DIR" in "~"*) CLAUDE_CONFIG_DIR="$HOME${CLAUDE_CONFIG_DIR#\~}" ;; esac
+# Expand a leading ~/ in CLAUDE_CONFIG_DIR — needed when set via env var, where
+# the shell does not perform tilde expansion. Pattern is "~/" not "~" so a
+# user-tilde form like "~alice/path" is not silently misresolved as "$HOME/alice/path".
+case "$CLAUDE_CONFIG_DIR" in "~/"*) CLAUDE_CONFIG_DIR="$HOME/${CLAUDE_CONFIG_DIR#\~/}" ;; esac
 
 MOUNT_ARGS=()
 ENV_ARGS=(-e TERM)
@@ -238,9 +239,12 @@ trap 'case "$stage" in "$HOME/.cache/claude-docker/host."*) rm -rf "$stage" ;; e
 for item in agents commands skills; do
   src="$CLAUDE_CONFIG_DIR/$item"
   # Resolve top-level symlink so cp -RL gets a real directory path, not a link.
-  while [ -L "$src" ]; do
+  # Hop counter guards against pathological symlink cycles (a -> b -> a).
+  hops=0
+  while [ -L "$src" ] && [ "$hops" -lt 10 ]; do
     link=$(readlink "$src")
     case "$link" in /*) src="$link" ;; *) src="$(dirname "$src")/$link" ;; esac
+    hops=$((hops + 1))
   done
   if [ -d "$src" ]; then
     # cp -RL dereferences all symlinks within the tree so internal symlinks

@@ -61,7 +61,7 @@ When help is printed, `run.sh` SHALL NOT default an empty workspace list to `$PW
 #### Scenario: No staging dir created
 
 - **WHEN** user runs `claude-docker --help`
-- **THEN** no `claude-docker-host.*` directory is left under `$TMPDIR` after the command returns
+- **THEN** no `host.*` directory is left under `$HOME/.cache/claude-docker/` after the command returns
 
 #### Scenario: No docker process spawned
 
