@@ -5,12 +5,16 @@ FROM node:20-bookworm-slim@sha256:f93745c153377ee2fbbdd6e24efcd03cd2e86d6ab1d8aa
 # When bumping a version ARG, also refresh any paired sha256 ARG in the same commit.
 ARG CLAUDE_CODE_VERSION=2.1.112
 ARG OPENSPEC_VERSION=1.3.0
+ARG PNPM_VERSION=10.33.2
 ARG GLAB_VERSION=1.92.1
 ARG GLAB_DEB_SHA256_AMD64=18048e5cb2cbc92eb31d4190852c6da32f6713633cfefc7b3fe00c18806c4f53
 ARG GLAB_DEB_SHA256_ARM64=f12a5e5e820b4c0b2803de4136884a90a64918bc3c7fd309f8c5a3ca9455fa8b
 ARG AWSCLI_VERSION=2.34.31
 ARG AWSCLI_SHA256_X86_64=d1540db414d48650c87cea7e2b585368b864d2be5fc4034f9af3b1e3dc2f678a
 ARG AWSCLI_SHA256_AARCH64=932ff651397d5c56f78987fcdf736dfc62c2a32ed2c0e9c9ae96e9a7ff1e85ea
+ARG UV_VERSION=0.11.8
+ARG UV_SHA256_X86_64=56dd1b66701ecb62fe896abb919444e4b83c5e8645cca953e6ddd496ff8a0feb
+ARG UV_SHA256_AARCH64=eee8dd658d20e5ac85fec9c2326b6cbc9d83a1eef09ef07433e58698ac849591
 
 # Make apt runnable under --cap-drop ALL at runtime. Two pieces:
 #  1. APT::Sandbox::User "root" stops the http method from setgroups()→_apt
@@ -74,10 +78,30 @@ RUN set -e; ARCH=$(uname -m); \
  && /tmp/aws/install \
  && rm -rf /tmp/aws /tmp/awscli.zip
 
+# uv (Astral) — pinned version + sha256 verify; uvx ships in the same archive.
+# gnu variant: bookworm-slim is glibc; musl would silently fail at runtime.
+# Hash pinned in ARG (not fetched from .sha256 sidecar) so a CDN swap is caught
+# at build time — same trust model as the AWS CLI block above.
+RUN set -e; ARCH=$(uname -m); \
+    case "$ARCH" in \
+      x86_64)  SHA="${UV_SHA256_X86_64}" ;; \
+      aarch64) SHA="${UV_SHA256_AARCH64}" ;; \
+      *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${ARCH}-unknown-linux-gnu.tar.gz" \
+      -o /tmp/uv.tar.gz \
+ && echo "${SHA}  /tmp/uv.tar.gz" | sha256sum -c - \
+ && mkdir -p /tmp/uv \
+ && tar -xzf /tmp/uv.tar.gz -C /tmp/uv \
+ && install -m 0755 "/tmp/uv/uv-${ARCH}-unknown-linux-gnu/uv" /usr/local/bin/uv \
+ && install -m 0755 "/tmp/uv/uv-${ARCH}-unknown-linux-gnu/uvx" /usr/local/bin/uvx \
+ && rm -rf /tmp/uv /tmp/uv.tar.gz
+
 # npm-backed CLIs — pinned versions, no lifecycle scripts
 RUN npm install -g --ignore-scripts \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
-      "@fission-ai/openspec@${OPENSPEC_VERSION}"
+      "@fission-ai/openspec@${OPENSPEC_VERSION}" \
+      "pnpm@${PNPM_VERSION}"
 
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     IS_SANDBOX=1 \
