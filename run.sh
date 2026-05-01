@@ -270,7 +270,7 @@ if [ -f "$CLAUDE_CONFIG_DIR/statusline-command.sh" ]; then
 #!/bin/sh
 # claude-docker wrapper — prepends active opt-in flag tag to host statusline.
 input=$(cat)
-body=$(printf '%s' "$input" | /root/.claude/statusline-command.original.sh)
+body=$(printf '%s' "$input" | sh /root/.claude/statusline-command.original.sh)
 if [ -n "${CLAUDE_DOCKER_FLAGS:-}" ]; then
   printf '\033[33mdocker:%s\033[0m %s' "$CLAUDE_DOCKER_FLAGS" "$body"
 else
