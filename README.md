@@ -142,12 +142,32 @@ Hardening applied: `--cap-drop ALL`, `--security-opt no-new-privileges`, pinned 
 
 ## Git worktrees
 
-Sibling worktrees need a one-time repair inside the container because `.git` points to a host-absolute path:
+Git worktrees embed the path between the worktree and its repo's `.git/` in two link files. By default those paths are absolute, so a worktree created on the host breaks inside the container (and vice versa) because the same files sit at different absolute paths in each environment.
+
+**Recommended (host git ≥ 2.48):** opt in to relative paths once on the host, then worktrees nested inside the repo (e.g. `<repo>/.claude/worktrees/<name>`) round-trip cleanly between host and container — created either side, used from the other — with no repair step.
 
 ```bash
-# inside the container, in the worktree:
+# host, one-time per repo (or use --global):
+git config worktree.useRelativePaths true
+
+# convert any existing worktree to relative paths:
+git worktree repair --relative-paths <worktree-path>
+```
+
+After this, `git status` works in the worktree from both the host and inside `claude-docker` without any further action. The container image ships `git` 2.53 (Ubuntu 26.04's archive — Debian bookworm's 2.39 wouldn't have been new enough), so the same relative-path workflow operates symmetrically on both ends, including when you `git worktree add` from inside the container.
+
+**Fallback — `git worktree repair` (no flag), inside the container:**
+
+```bash
 git worktree repair
 ```
+
+Use this when:
+
+- Your host git is < 2.48 (no `--relative-paths` flag available — `/usr/bin/git` on macOS often lags; Homebrew is usually current).
+- You passed a repo and a *sibling* worktree as separate workspace args (`claude-docker ~/repo ~/repo-feature`). Sibling-flattened mounts collapse the parent directory, so the relative offset between worktree and repo is not preserved by the bind mount and relative paths can't help.
+
+**Layout caveat:** relative paths assume the worktree's location relative to the repo's `.git/` is the same in both environments. Nested layouts always satisfy this; moving a worktree to a totally different parent dir breaks both relative and absolute setups.
 
 ## Pasting images
 

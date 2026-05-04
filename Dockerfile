@@ -1,12 +1,21 @@
 # Pinned base image (digest pins all arches via the multi-arch index).
-# Bump with: docker buildx imagetools inspect node:20-bookworm-slim --format '{{.Manifest.Digest}}'
-FROM node:20-bookworm-slim@sha256:f93745c153377ee2fbbdd6e24efcd03cd2e86d6ab1d8aa9916a3790c40313a55
+# Bump with: docker buildx imagetools inspect ubuntu:26.04 --format '{{.Manifest.Digest}}'
+#
+# Why Ubuntu 26.04 LTS and not Debian bookworm/trixie: this image needs git
+# ≥ 2.48 for `worktree.useRelativePaths` (set together with
+# `extensions.relativeWorktrees`, which older git refuses to operate on).
+# Debian bookworm ships 2.39, trixie ships 2.47.3, and bookworm/trixie-backports
+# don't carry git at all. Ubuntu 26.04 LTS ships git 2.53.0 in its main archive.
+FROM ubuntu:26.04@sha256:5e275723f82c67e387ba9e3c24baa0abdcb268917f276a0561c97bef9450d0b4
 
 # pipefail propagates failures in RUN ... | ... — without this, a failed curl
 # into tee/sha256sum silently succeeds and the build continues with bad data.
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
 # When bumping a version ARG, also refresh any paired sha256 ARG in the same commit.
+# NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
+# Bump with: curl -fsSL https://deb.nodesource.com/node_20.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
+ARG NODE_VERSION=20.20.2-1nodesource1
 ARG CLAUDE_CODE_VERSION=2.1.112
 ARG OPENSPEC_VERSION=1.3.0
 ARG PNPM_VERSION=10.33.2
@@ -26,7 +35,7 @@ ARG TFENV_SHA256=463132e45a211fa3faf85e62fdfaa9bb746343ff1954ccbad91cae743df3b64
 #  1. APT::Sandbox::User "root" stops the http method from setgroups()→_apt
 #     (needs CAP_SETGID, dropped at runtime).
 #  2. chown archives/partial to root so apt can write it without
-#     CAP_DAC_OVERRIDE/CAP_FOWNER — Debian ships it as _apt:root 0700.
+#     CAP_DAC_OVERRIDE/CAP_FOWNER — Ubuntu ships it as _apt:root 0700.
 #     lists/partial doesn't need chowning: apt re-creates it as root at
 #     runtime now that sandbox user is root.
 # Safe here: the container itself is the security boundary, not apt's
@@ -34,17 +43,28 @@ ARG TFENV_SHA256=463132e45a211fa3faf85e62fdfaa9bb746343ff1954ccbad91cae743df3b64
 RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
  && chown root:root /var/cache/apt/archives/partial
 
+# NodeSource for Node 20 LTS (Ubuntu's archive `nodejs` package tracks an
+# older minor and isn't pinned to upstream LTS releases). Combined bootstrap
+# (ca-certificates/curl/gnupg) + NodeSource setup + main apt install in one
+# layer to keep the image lean.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    tmux \
-    ncurses-term \
-    ca-certificates \
-    curl \
-    jq \
-    less \
-    openssh-client \
-    gnupg \
-    unzip \
+    ca-certificates curl gnupg \
+ && install -d -m 0755 /etc/apt/keyrings \
+ && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
+      | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
+ && chmod go+r /etc/apt/keyrings/nodesource.gpg \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+      > /etc/apt/sources.list.d/nodesource.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends \
+      "nodejs=${NODE_VERSION}" \
+      git \
+      tmux \
+      ncurses-term \
+      jq \
+      less \
+      openssh-client \
+      unzip \
  && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (keyring fetched at build; TODO: commit the keyring to the repo)
@@ -85,7 +105,7 @@ RUN set -e; ARCH=$(uname -m); \
  && rm -rf /tmp/aws /tmp/awscli.zip
 
 # uv (Astral) — pinned version + sha256 verify; uvx ships in the same archive.
-# gnu variant: bookworm-slim is glibc; musl would silently fail at runtime.
+# gnu variant: ubuntu is glibc; musl would silently fail at runtime.
 # Hash pinned in ARG (not fetched from .sha256 sidecar) so a CDN swap is caught
 # at build time — same trust model as the AWS CLI block above.
 RUN set -e; ARCH=$(uname -m); \
