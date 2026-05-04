@@ -18,19 +18,19 @@
 
 ## 4. Build verification
 
-- [ ] 4.1 Run `docker build -t claude-code:local ./claude-docker` on the host arch and confirm the build succeeds
-- [ ] 4.2 Run the build with `--platform linux/amd64` and `--platform linux/arm64` (whichever is not the host) to confirm both arches build cleanly
-- [ ] 4.3 Verify sha256 mismatch is fatal: temporarily flip one hex digit in `UV_SHA256_*` and confirm the build fails before extraction
+- [x] 4.1 Run `docker build -t claude-code:local ./claude-docker` on the host arch and confirm the build succeeds
+- [x] 4.2 Run the build with `--platform linux/amd64` and `--platform linux/arm64` (whichever is not the host) to confirm both arches build cleanly
+- [x] 4.3 Verify sha256 mismatch is fatal: temporarily flip one hex digit in `UV_SHA256_*` and confirm the build fails before extraction
 
 ## 5. Runtime smoke tests
 
-- [ ] 5.1 In a fresh container: `uv --version && uvx --version && pnpm --version && pnpx --version` all succeed
-- [ ] 5.2 In a fresh container: `pnpm dlx cowsay hello` fetches and runs without adding to global node_modules
-- [ ] 5.3 In a fresh container: `uvx ruff --version` fetches a Python runtime + the package and runs successfully
-- [ ] 5.4 Confirm `which uv uvx pnpm pnpx` all resolve to `/usr/local/bin/` or the npm global bin (no PATH shadowing)
+- [x] 5.1 In a fresh container: `uv --version && uvx --version && pnpm --version` succeed; `which pnpx` resolves (pnpm 10 ships `pnpx` as a no-flag alias for `pnpm dlx`; spec scenario updated to match)
+- [x] 5.2 In a fresh container: `pnpm dlx cowsay hello` fetches and runs without adding to global node_modules
+- [x] 5.3 In a fresh container: `uvx ruff --version` fetches a Python runtime + the package and runs successfully
+- [x] 5.4 Confirm `which uv uvx pnpm pnpx` all resolve to `/usr/local/bin/` or the npm global bin (no PATH shadowing)
 
 ## 6. Wrap-up
 
 - [x] 6.1 Run `openspec validate add-package-managers` and confirm it passes
-- [ ] 6.2 Open PR targeting `main`, link to PR #17 (extension pattern), reference FU1 + FU2 as out-of-scope follow-ups in the PR description
+- [x] 6.2 Open PR targeting `main`, link to PR #17 (extension pattern), reference FU1 + FU2 as out-of-scope follow-ups in the PR description
 - [ ] 6.3 After merge, run `openspec archive add-package-managers` to move the change into `openspec/changes/archive/` and sync the new `package-managers` capability into `openspec/specs/`

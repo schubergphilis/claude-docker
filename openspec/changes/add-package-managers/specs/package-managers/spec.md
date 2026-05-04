@@ -7,7 +7,8 @@ The container image SHALL ship with `uv`, `uvx`, `pnpm`, and `pnpx` on the defau
 #### Scenario: package managers present
 
 - **WHEN** the container launches
-- **THEN** `uv --version`, `uvx --version`, `pnpm --version`, and `pnpx --version` all succeed
+- **THEN** `uv --version`, `uvx --version`, and `pnpm --version` all succeed
+- **AND** `which pnpx` resolves to a binary on PATH (pnpm 10 ships `pnpx` as a thin alias for `pnpm dlx` with no own-version flag)
 
 #### Scenario: builds on Apple Silicon
 
