@@ -103,6 +103,19 @@ RUN npm install -g --ignore-scripts \
       "@fission-ai/openspec@${OPENSPEC_VERSION}" \
       "pnpm@${PNPM_VERSION}"
 
+# Plain `tmux` mode swallows Shift+Enter so Claude's prompt sees only Enter,
+# forcing users to type `\` for a literal newline. `always` is required
+# (not `on`) because Claude does not send the kitty activation request that
+# `on` waits for — see claude-code#26629. /etc/tmux.conf, not
+# /root/.tmux.conf, because /root is masked by the claude-code-root named
+# volume at runtime. Harmless under tmux -CC: iTerm2 control mode bypasses
+# tmux's input layer. Placed after npm install so edits don't invalidate
+# the heavy AWS CLI / uv / glab / npm download layers above.
+RUN cat > /etc/tmux.conf <<'EOF'
+set -s extended-keys always
+set -as terminal-features "*:extkeys"
+EOF
+
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     IS_SANDBOX=1 \
     LANG=C.UTF-8 \
