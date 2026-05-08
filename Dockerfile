@@ -15,6 +15,8 @@ ARG AWSCLI_SHA256_AARCH64=932ff651397d5c56f78987fcdf736dfc62c2a32ed2c0e9c9ae96e9
 ARG UV_VERSION=0.11.8
 ARG UV_SHA256_X86_64=56dd1b66701ecb62fe896abb919444e4b83c5e8645cca953e6ddd496ff8a0feb
 ARG UV_SHA256_AARCH64=eee8dd658d20e5ac85fec9c2326b6cbc9d83a1eef09ef07433e58698ac849591
+ARG TFENV_VERSION=3.0.0
+ARG TFENV_SHA256=463132e45a211fa3faf85e62fdfaa9bb746343ff1954ccbad91cae743df3b648
 
 # Make apt runnable under --cap-drop ALL at runtime. Two pieces:
 #  1. APT::Sandbox::User "root" stops the http method from setgroups()→_apt
@@ -102,6 +104,25 @@ RUN npm install -g --ignore-scripts \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@fission-ai/openspec@${OPENSPEC_VERSION}" \
       "pnpm@${PNPM_VERSION}"
+
+# tfenv — pure-bash terraform version manager. Arch-independent (just
+# bash scripts), so a single sha256 covers amd64 and arm64. We deliberately
+# ship NO terraform binary; the project's `.terraform-version` (or an
+# interactive `tfenv install <v>`) fetches the right version from
+# releases.hashicorp.com at runtime, in the same runtime-fetch class as
+# `pnpm dlx`/`uvx`. Installed under /opt (not /root) so image-level
+# version bumps aren't shadowed by the claude-code-root named volume.
+# Placed after the heavier npm install so a tfenv version bump doesn't
+# invalidate that layer's cache (tfenv pins move far less often than the
+# claude-code/openspec/pnpm pins above).
+RUN curl -fsSL "https://github.com/tfutils/tfenv/archive/refs/tags/v${TFENV_VERSION}.tar.gz" \
+      -o /tmp/tfenv.tar.gz \
+ && echo "${TFENV_SHA256}  /tmp/tfenv.tar.gz" | sha256sum -c - \
+ && mkdir -p /opt/tfenv \
+ && tar -xzf /tmp/tfenv.tar.gz -C /opt/tfenv --strip-components=1 \
+ && ln -s /opt/tfenv/bin/tfenv /usr/local/bin/tfenv \
+ && ln -s /opt/tfenv/bin/terraform /usr/local/bin/terraform \
+ && rm /tmp/tfenv.tar.gz
 
 # Plain `tmux` mode swallows Shift+Enter so Claude's prompt sees only Enter,
 # forcing users to type `\` for a literal newline. `always` is required
