@@ -154,7 +154,7 @@ git config worktree.useRelativePaths true
 git worktree repair --relative-paths <worktree-path>
 ```
 
-After this, `git status` works in the worktree from both the host and inside `claude-docker` without any further action. The container image ships `git` 2.53 (Ubuntu 26.04's archive — Debian bookworm's 2.39 wouldn't have been new enough), so the same relative-path workflow operates symmetrically on both ends, including when you `git worktree add` from inside the container.
+After this, `git status` works in both the host and container without further action, including for worktrees created inside the container.
 
 **Fallback — `git worktree repair` (no flag), inside the container:**
 

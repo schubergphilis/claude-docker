@@ -1,11 +1,8 @@
 # Pinned base image (digest pins all arches via the multi-arch index).
 # Bump with: docker buildx imagetools inspect ubuntu:26.04 --format '{{.Manifest.Digest}}'
-#
-# Why Ubuntu 26.04 LTS and not Debian bookworm/trixie: this image needs git
-# ≥ 2.48 for `worktree.useRelativePaths` (set together with
-# `extensions.relativeWorktrees`, which older git refuses to operate on).
-# Debian bookworm ships 2.39, trixie ships 2.47.3, and bookworm/trixie-backports
-# don't carry git at all. Ubuntu 26.04 LTS ships git 2.53.0 in its main archive.
+# Ubuntu (not Debian): only ubuntu:26.04 ships git ≥ 2.48 in its main archive,
+# needed for the `extensions.relativeWorktrees` repo extension. Rationale and
+# alternatives in openspec/changes/worktree-relative-paths/design.md.
 FROM ubuntu:26.04@sha256:5e275723f82c67e387ba9e3c24baa0abdcb268917f276a0561c97bef9450d0b4
 
 # pipefail propagates failures in RUN ... | ... — without this, a failed curl
@@ -43,10 +40,9 @@ ARG TFENV_SHA256=463132e45a211fa3faf85e62fdfaa9bb746343ff1954ccbad91cae743df3b64
 RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
  && chown root:root /var/cache/apt/archives/partial
 
-# NodeSource for Node 20 LTS (Ubuntu's archive `nodejs` package tracks an
-# older minor and isn't pinned to upstream LTS releases). Combined bootstrap
-# (ca-certificates/curl/gnupg) + NodeSource setup + main apt install in one
-# layer to keep the image lean.
+# NodeSource ships Node 20 LTS pinned to upstream releases — Ubuntu's archive
+# `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
+# NodeSource's distro-independent codename (works on any Debian/Ubuntu).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
