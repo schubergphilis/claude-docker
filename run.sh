@@ -39,6 +39,10 @@ Wrapper flags:
                       unmask in-container gh login state.
   --glab              Opt in to GitLab: mount glab-cli config (:ro) and
                       forward GITLAB_TOKEN; unmask in-container glab login.
+  --tfe               Opt in to Terraform Cloud (app.terraform.io): mount
+                      ~/.terraform.d/credentials.tfrc.json (:ro) when
+                      present and forward TF_TOKEN_app_terraform_io;
+                      unmask in-container `terraform login` state.
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -84,6 +88,7 @@ RO_WORKSPACES=0
 WITH_AWS=0
 WITH_GH=0
 WITH_GLAB=0
+WITH_TFE=0
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
@@ -99,6 +104,7 @@ for arg in "$@"; do
     --aws)          WITH_AWS=1 ;;
     --gh)           WITH_GH=1 ;;
     --glab)         WITH_GLAB=1 ;;
+    --tfe)          WITH_TFE=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
     --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
     --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -168,10 +174,20 @@ if [ "$WITH_AWS" = "1" ]; then
   [ -d "$HOME/.aws/sso" ]    && MOUNT_ARGS+=("-v" "$HOME/.aws/sso:/root/.aws/sso:ro")
 fi
 
+# Terraform Cloud credentials file written by `terraform login`. Standard
+# location on every platform is ~/.terraform.d/credentials.tfrc.json. Only
+# app.terraform.io is in scope here; the file format supports other hosts
+# but mounting them is intentional and out of scope for --tfe.
+if [ "$WITH_TFE" = "1" ]; then
+  [ -f "$HOME/.terraform.d/credentials.tfrc.json" ] \
+    && MOUNT_ARGS+=("-v" "$HOME/.terraform.d/credentials.tfrc.json:/root/.terraform.d/credentials.tfrc.json:ro")
+fi
+
 ENV_VARS=()
 [ "$WITH_GH" = "1" ]   && ENV_VARS+=(GH_TOKEN GITHUB_TOKEN)
 [ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
+[ "$WITH_TFE" = "1" ]  && ENV_VARS+=(TF_TOKEN_app_terraform_io)
 # Guarded: bash 3.2 under `set -u` errors on empty-array expansion.
 if [ "${#ENV_VARS[@]}" -gt 0 ]; then
   for v in "${ENV_VARS[@]}"; do
@@ -217,6 +233,7 @@ DOCKER_FLAGS=()
 [ "$WITH_GH" = "1" ]       && DOCKER_FLAGS+=("gh")
 [ "$WITH_AWS" = "1" ]      && DOCKER_FLAGS+=("aws")
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
+[ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
 [ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
 if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
@@ -316,10 +333,11 @@ esac
 # so the docker run line has no conditionally-empty array (bash 3.2 set -u).
 if [ "$EPHEMERAL" = "0" ]; then
   # Mask persisted in-container auth state when the opt-in flag is off, so a
-  # prior `gh`/`glab auth login` stored under claude-code-root doesn't leak
-  # into a session the user didn't ask to grant those creds to.
+  # prior `gh`/`glab`/`terraform` auth login stored under claude-code-root
+  # doesn't leak into a session the user didn't ask to grant those creds to.
   [ "$WITH_GH" = "0" ]   && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "$WITH_GLAB" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/glab-cli")
+  [ "$WITH_TFE" = "0" ]  && MOUNT_ARGS+=("--tmpfs" "/root/.terraform.d")
   MOUNT_ARGS=(-v claude-code-root:/root -v claude-code-home:/root/.claude "${MOUNT_ARGS[@]}")
 fi
 

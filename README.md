@@ -2,7 +2,7 @@
 
 Hardened Docker container for running Claude Code. Filesystem access is scoped to the directories you pass in; your host statusline, skills, agents, and commands come along via read-only bind-mounts.
 
-Bundled CLIs on the default PATH: `claude`, `gh`, `glab`, `aws` (v2), `openspec`, `uv`, `uvx`, `pnpm`, `pnpx`. See [Credential opt-in](#credential-opt-in) for `gh` / `glab` / `aws`; `openspec` and the package managers (`uv`/`uvx`/`pnpm`/`pnpx`) need no flags.
+Bundled CLIs on the default PATH: `claude`, `gh`, `glab`, `aws` (v2), `openspec`, `uv`, `uvx`, `pnpm`, `pnpx`, `tfenv`. See [Credential opt-in](#credential-opt-in) for `gh` / `glab` / `aws` / `tfe`; `openspec`, the package managers (`uv`/`uvx`/`pnpm`/`pnpx`), and `tfenv` itself need no flags.
 
 ## Install
 
@@ -35,6 +35,7 @@ claude-docker ~/repo -- --resume          # any claude flag after --
 | `--aws`      | Mount `~/.aws/config` + `~/.aws/sso` (:ro) and forward `AWS_PROFILE`/`AWS_REGION`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`. |
 | `--gh`       | Forward `GH_TOKEN`/`GITHUB_TOKEN` **and** unmask in-container `gh auth login` state persisted in `claude-code-root`. Without this flag, `/root/.config/gh/` is hidden by a tmpfs overlay so a prior login can't leak into a non-opted-in session. |
 | `--glab`     | Mount the platform-appropriate `glab-cli` config dir (:ro) and forward `GITLAB_TOKEN`. Also unmasks any in-container `glab auth login` state; without the flag, `/root/.config/glab-cli/` is hidden by a tmpfs overlay. |
+| `--tfe`      | Mount `~/.terraform.d/credentials.tfrc.json` (:ro) when present and forward `TF_TOKEN_app_terraform_io`. Targets `app.terraform.io` (HCP Terraform) only — self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are out of scope. Without the flag, `/root/.terraform.d/` is hidden by a tmpfs overlay so a prior in-container `terraform login` can't leak. See [Terraform Cloud workflow](#terraform-cloud-workflow). |
 
 Combine as needed: `claude-docker --aws --gh ~/repo`.
 
@@ -92,6 +93,7 @@ Credentials are opt-in per run (see [Credential opt-in](#credential-opt-in) abov
 | `--gh`       | In-container `gh auth login` persists via `claude-code-root` volume (host macOS Keychain is not reachable), but is only visible when `--gh` is passed — otherwise `/root/.config/gh/` is masked by a tmpfs. Host `GH_TOKEN`/`GITHUB_TOKEN` env vars are forwarded when set. |
 | `--glab`     | Read-only bind-mount of `~/Library/Application Support/glab-cli` (macOS) or `~/.config/glab-cli` (Linux). Any in-container `glab auth login` state is likewise only visible under `--glab`; without the flag `/root/.config/glab-cli/` is masked by a tmpfs. Host `GITLAB_TOKEN` env var forwarded when set. |
 | `--aws`      | Read-only bind-mount of `~/.aws/config` and `~/.aws/sso/` only. `~/.aws/credentials` (long-lived keys) and `~/.aws/cli/cache/` are **not** exposed. Host `AWS_PROFILE`/`AWS_REGION`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` forwarded when set. |
+| `--tfe`      | Read-only bind-mount of `~/.terraform.d/credentials.tfrc.json` when present (the file `terraform login` writes). Host `TF_TOKEN_app_terraform_io` forwarded when set. Any in-container `terraform login` state is likewise only visible under `--tfe`; without the flag `/root/.terraform.d/` is masked by a tmpfs. |
 
 ### AWS SSO flow (`--aws`)
 
@@ -107,13 +109,33 @@ claude-docker --aws ...
 
 Container then uses `AWS_ACCESS_KEY_ID`/`SECRET`/`SESSION_TOKEN` and the SSO cache is not needed inside. Temp creds freeze at container start (~1h TTL).
 
+### Terraform Cloud workflow
+
+Standard usage targets `app.terraform.io` (HCP Terraform):
+
+```bash
+# One-time on the host: writes ~/.terraform.d/credentials.tfrc.json
+terraform login app.terraform.io
+
+# Per session
+claude-docker --tfe ~/repo
+
+# Inside the container, fetch the project-pinned terraform version
+tfenv install            # reads .terraform-version, downloads from releases.hashicorp.com
+terraform plan
+```
+
+The image ships `tfenv` (a pure-bash terraform version manager) and **does not** ship a pre-installed `terraform` binary version — versions are project-pinned (`required_version` / `.terraform-version`) and a single bundled version would drift against real workspaces. `tfenv install` writes terraform binaries under `/opt/tfenv/versions/`, which is **not** in the `claude-code-root` named volume; downloads do not persist across `docker run --rm` exits. Power users can build a child image (`FROM claude-code:local`) that runs `tfenv install <version>` at build time to bake a specific version into a derived image.
+
+Token alternative: instead of (or in addition to) the credentials file, export `TF_TOKEN_app_terraform_io=<token>` on the host and `--tfe` will forward it. The terraform CLI honours both.
+
 ## Threat model
 
 The container narrows blast radius vs. running `claude --yolo` on the host, but it is **not** a full sandbox:
 
 - **Protected:** host filesystem outside your passed workspaces, host `~/.aws/credentials` (long-lived keys), host AWS/glab config dirs are read-only from inside (container can't persist changes back).
 - **Exposed:** your passed workspaces are read-write; short-lived AWS SSO bearer tokens (`~/.aws/sso/cache`) and the glab config token are readable inside the container; `gh`/`GITLAB_TOKEN` env vars are readable; full outbound network.
-- **Runtime code-fetch:** `npx`, `pnpm dlx`, and `uvx` fetch and execute arbitrary code from public registries (npm, PyPI) on first use. Under `--yolo`, a prompt-injected workspace can trigger these. `pnpm dlx` adds zero marginal blast radius vs the already-reachable `npx`; `uvx` is a *new* PyPI execution primitive (no Python runtime existed in the image before). Build-time installs of the CLIs themselves are pinned by version + sha256 where the ecosystem supports it (uv binary), and by version only for npm-backed packages (claude-code, openspec, pnpm) — `--ignore-scripts` blocks lifecycle scripts at install time but does not protect against a compromised registry serving a malicious tarball at the pinned version.
+- **Runtime code-fetch:** `npx`, `pnpm dlx`, `uvx`, and `tfenv install` fetch and execute arbitrary code from public sources on first use — npm and PyPI for the package managers, `releases.hashicorp.com` for `tfenv install`. Under `--yolo`, a prompt-injected workspace can trigger these. `pnpm dlx` adds zero marginal blast radius vs the already-reachable `npx`; `uvx` is a *new* PyPI execution primitive (no Python runtime existed in the image before); `tfenv install` is a *new* HashiCorp release-channel execution primitive whose downloaded `terraform` binary is intentionally **not** sha256-pinned in the image (versions are project-pinned via `.terraform-version`, so the image stays neutral on version policy). Build-time installs of the CLIs themselves are pinned by version + sha256 where the ecosystem supports it (uv binary, glab .deb, AWS CLI, tfenv source archive), and by version only for npm-backed packages (claude-code, openspec, pnpm) — `--ignore-scripts` blocks lifecycle scripts at install time but does not protect against a compromised registry serving a malicious tarball at the pinned version.
 - **Implication:** a prompt-injected file in any mounted workspace can exfiltrate those tokens and read/write any workspace. Don't mount repos you don't trust. Rotate tokens if the container is compromised.
 
 Hardening applied: `--cap-drop ALL`, `--security-opt no-new-privileges`, pinned base image + app versions with sha256 verification on downloaded artifacts.
