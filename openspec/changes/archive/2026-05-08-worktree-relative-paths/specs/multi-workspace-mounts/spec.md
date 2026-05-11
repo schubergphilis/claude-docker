@@ -1,64 +1,4 @@
-# multi-workspace-mounts
-
-## Purpose
-
-Let one container expose several host directories at stable container paths so cross-project work, sibling git worktrees, and cross-workspace session resume all function without extra configuration.
-
-## Requirements
-
-### Requirement: Variadic workspace args
-
-`run.sh` SHALL accept N host directory paths as positional arguments and mount each at `/workspaces/<basename>` in the container. With no args, `$PWD` is mounted.
-
-#### Scenario: Multiple dirs mounted
-
-- **WHEN** user runs `~/claude-docker/run.sh ~/repo-a ~/repo-b`
-- **THEN** `/workspaces/repo-a` and `/workspaces/repo-b` are both present and writable
-
-#### Scenario: No args defaults to PWD
-
-- **WHEN** user runs `~/claude-docker/run.sh` from `~/repo-a`
-- **THEN** `~/repo-a` is mounted at `/workspaces/repo-a`
-
-### Requirement: Reject basename collisions
-
-When two or more workspace arguments resolve to the same basename, `run.sh` SHALL fail fast with a non-zero exit and an error identifying both host paths, rather than silently letting Docker drop all but the last mount.
-
-#### Scenario: Colliding basenames error out
-
-- **WHEN** user runs `claude-docker ~/client-a/api ~/client-b/api`
-- **THEN** `run.sh` exits non-zero with a message naming both host paths
-- **AND** no container is started
-
-### Requirement: First arg is initial cwd
-
-`claude` MUST launch with cwd set to the container path of the first workspace argument.
-
-#### Scenario: First dir becomes cwd
-
-- **WHEN** user runs `~/claude-docker/run.sh ~/repo-a ~/repo-b`
-- **THEN** `claude` starts in `/workspaces/repo-a`
-
-### Requirement: Additional workspaces granted to claude
-
-For every workspace argument beyond the first, `run.sh` SHALL pass `--add-dir <container-path>` to the `claude` invocation so the agent has read/write scope over every mounted workspace, not just the cwd. The first workspace is omitted because cwd already grants it. The wrapper does not dedupe against any user-supplied `--add-dir` after `--`; `claude` accepts repeated occurrences.
-
-#### Scenario: Extra workspaces become additional working dirs
-
-- **WHEN** user runs `claude-docker ~/repo-a ~/repo-b ~/repo-c`
-- **THEN** the container launches `claude --add-dir /workspaces/repo-b --add-dir /workspaces/repo-c`
-- **AND** the agent can read and write files in all three workspaces
-
-#### Scenario: Single workspace adds no flag
-
-- **WHEN** user runs `claude-docker ~/repo`
-- **THEN** the container launches `claude` with no `--add-dir` flag
-
-#### Scenario: --ro workspaces still added
-
-- **WHEN** user runs `claude-docker --ro ~/repo-a ~/repo-b`
-- **THEN** the container launches `claude --add-dir /workspaces/repo-b`
-- **AND** writes to either workspace fail with EROFS at the OS layer (the `--add-dir` flag itself has no read-only mode)
+## ADDED Requirements
 
 ### Requirement: Nested worktrees portable via relative paths
 
@@ -89,6 +29,8 @@ This requirement assumes the user's host git is also ≥ 2.48 (needed to write t
 - **WHEN** the user runs `claude-docker <repo>` and runs any git command inside the mounted repo
 - **THEN** the command succeeds (i.e. the container's git does NOT abort with `fatal: unknown repository extension found: relativeworktrees`)
 
+## MODIFIED Requirements
+
 ### Requirement: Sibling worktrees supported
 
 Users SHALL be able to pass both a repo and its sibling git worktree (or a shared parent) as separate workspace arguments so that git operations across them succeed. Because each workspace argument is bind-mounted at `/workspaces/<basename>` in the container, the relative offset between the worktree's `.git` link file and the repo's `.git/worktrees/<name>/` directory is NOT preserved (the host parent directory does not appear in the container). For this layout, users MAY need to run `git worktree repair` once inside the container to rewrite the link-file paths, regardless of whether `worktree.useRelativePaths` is set on the host.
@@ -108,41 +50,3 @@ This requirement covers only sibling-flattened layouts, and also covers hosts wh
 - **AND** `~/repo` and `~/repo-feature` are passed as separate workspace arguments
 - **WHEN** user runs `claude-docker ~/repo ~/repo-feature`
 - **THEN** `git status` inside `/workspaces/repo-feature` MAY fail until `git worktree repair` is run, because the relative offset between the two workspaces differs between host and container
-
-### Requirement: Passthrough claude flags after `--`
-
-`run.sh` SHALL treat a `--` token as a separator: positional args before it are workspaces (or recognised shortcut flags like `--yolo`), tokens after it are forwarded verbatim to the `claude` command inside the container.
-
-#### Scenario: Resume mode via passthrough
-
-- **WHEN** user runs `claude-docker ~/repo-a -- --resume`
-- **THEN** `~/repo-a` is mounted at `/workspaces/repo-a` and the container launches `claude --resume`
-
-#### Scenario: No flags given
-
-- **WHEN** user runs `claude-docker ~/repo-a` (no `--`)
-- **THEN** the container launches plain `claude` with no extra flags
-
-### Requirement: Read-only workspace mode
-
-`run.sh` SHALL support a `--ro` flag that mounts every workspace argument read-only instead of read-write. Intended for code review / audit sessions where writes to the host must be prevented.
-
-#### Scenario: --ro mounts workspaces read-only
-
-- **WHEN** user runs `claude-docker --ro ~/repo`
-- **THEN** `~/repo` is mounted at `/workspaces/repo` read-only
-- **AND** writes to `/workspaces/repo/*` from inside the container fail with EROFS
-
-### Requirement: `--yolo` flag shortcut
-
-`run.sh` SHALL recognise `--yolo` as a positional token (before `--`) and translate it to `--dangerously-skip-permissions` on the `claude` invocation.
-
-#### Scenario: Yolo shortcut
-
-- **WHEN** user runs `claude-docker --yolo ~/repo`
-- **THEN** the container launches `claude --dangerously-skip-permissions` with `~/repo` mounted
-
-#### Scenario: Yolo combines with passthrough
-
-- **WHEN** user runs `claude-docker --yolo ~/repo -- --resume`
-- **THEN** the container launches `claude --dangerously-skip-permissions --resume`
