@@ -2,6 +2,10 @@
 # Bump with: docker buildx imagetools inspect node:20-bookworm-slim --format '{{.Manifest.Digest}}'
 FROM node:20-bookworm-slim@sha256:f93745c153377ee2fbbdd6e24efcd03cd2e86d6ab1d8aa9916a3790c40313a55
 
+# pipefail propagates failures in RUN ... | ... — without this, a failed curl
+# into tee/sha256sum silently succeeds and the build continues with bad data.
+SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
+
 # When bumping a version ARG, also refresh any paired sha256 ARG in the same commit.
 ARG CLAUDE_CODE_VERSION=2.1.112
 ARG OPENSPEC_VERSION=1.3.0
