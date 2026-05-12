@@ -13,7 +13,9 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_20.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
 ARG NODE_VERSION=20.20.2-1nodesource1
-ARG CLAUDE_CODE_VERSION=2.1.112
+ARG CLAUDE_CODE_VERSION=2.1.131
+# Policy: only pin versions ≥ 5 days old (loud supply-chain attacks usually get
+# yanked within hours; the soak catches those, not quiet/targeted compromises).
 ARG OPENSPEC_VERSION=1.3.0
 ARG PNPM_VERSION=10.33.2
 ARG GLAB_VERSION=1.92.1
@@ -119,11 +121,20 @@ RUN set -e; ARCH=$(uname -m); \
  && install -m 0755 "/tmp/uv/uv-${ARCH}-unknown-linux-gnu/uvx" /usr/local/bin/uvx \
  && rm -rf /tmp/uv /tmp/uv.tar.gz
 
-# npm-backed CLIs — pinned versions, no lifecycle scripts
+# npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
+# run `npm audit signatures <pkg>@<ver>` when bumping.
+# --ignore-scripts blocks lifecycle hooks for every package + transitive dep
+# (hard security boundary, kept on). claude-code 2.1.x ships its real binary
+# in a per-arch optional-dep package; the launcher's postinstall (install.cjs)
+# copies it over bin/claude.exe. Without it `claude` is a stub that errors at
+# exec. We invoke that one script ourselves — platform-detect + file copy,
+# no network/exec, audit-verified for 2.1.131; re-read on each bump.
+# `npm root -g` over a hardcoded path so we don't break on a different prefix.
 RUN npm install -g --ignore-scripts \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@fission-ai/openspec@${OPENSPEC_VERSION}" \
-      "pnpm@${PNPM_VERSION}"
+      "pnpm@${PNPM_VERSION}" \
+ && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs"
 
 # tfenv — pure-bash terraform version manager. Arch-independent (just
 # bash scripts), so a single sha256 covers amd64 and arm64. We deliberately
