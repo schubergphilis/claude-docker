@@ -4,7 +4,7 @@
     "command": "bash ~/.claude/statusline-command.sh"
   },
   "effortLevel": "high",
-  "autoUpdatesChannel": "latest",
+  "autoUpdates": false,
   "model": "opus[1m]",
   "teammateMode": "tmux"
 }

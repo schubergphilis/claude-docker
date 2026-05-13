@@ -168,7 +168,11 @@ set -s extended-keys always
 set -as terminal-features "*:extkeys"
 EOF
 
+# DISABLE_AUTOUPDATER=1 keeps the pinned CLAUDE_CODE_VERSION authoritative —
+# without it, claude auto-replaces itself at runtime, defeating the
+# --ignore-scripts supply-chain pinning above. Bump the image to upgrade.
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
+    DISABLE_AUTOUPDATER=1 \
     IS_SANDBOX=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
