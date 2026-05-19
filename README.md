@@ -144,17 +144,13 @@ Hardening applied: `--cap-drop ALL`, `--security-opt no-new-privileges`, pinned 
 
 Git worktrees embed the path between the worktree and its repo's `.git/` in two link files. By default those paths are absolute, so a worktree created on the host breaks inside the container (and vice versa) because the same files sit at different absolute paths in each environment.
 
-**Recommended (host git ≥ 2.48):** opt in to relative paths once on the host, then worktrees nested inside the repo (e.g. `<repo>/.claude/worktrees/<name>`) round-trip cleanly between host and container — created either side, used from the other — with no repair step.
+**No host config change needed.** For every workspace whose `.git/config` is a regular file (i.e. the main repo, not a worktree pointer), `claude-docker` overlays a container-only copy of `.git/config` that declares `extensions.relativeWorktrees = true` and `worktree.useRelativePaths = true`. The host's on-disk `.git/config` is never touched. Worktrees created inside the container therefore get relative paths, and those link files are then portable to the host without any opt-in.
 
-```bash
-# host, one-time per repo (or use --global):
-git config worktree.useRelativePaths true
+This asymmetry is deliberate: the extension flag — when written into the host's `.git/config` — blinds tools that bundle an older libgit2 (notably `gitstatusd`, which powers the Powerlevel10k git prompt), because they refuse to open a v1 repo declaring an extension they don't know. Keeping the flag container-only sidesteps that.
 
-# convert any existing worktree to relative paths:
-git worktree repair --relative-paths <worktree-path>
-```
+To convert pre-existing absolute-path worktrees: from inside the container, run `git worktree repair --relative-paths <worktree-path>`. New worktrees added in the container get relative paths automatically.
 
-After this, `git status` works in both the host and container without further action, including for worktrees created inside the container.
+**Trade-off:** container-side `git config` writes (e.g. `git remote add ...` writing to local config) land in the ephemeral overlay and are discarded when the container exits. Persistent `git config` edits should happen on the host.
 
 **Fallback — `git worktree repair` (no flag), inside the container:**
 
@@ -162,12 +158,12 @@ After this, `git status` works in both the host and container without further ac
 git worktree repair
 ```
 
-Use this when:
+Use this when you passed a repo and a *sibling* worktree as separate workspace args (`claude-docker ~/repo ~/repo-feature`). Sibling-flattened mounts collapse the parent directory, so the relative offset between worktree and repo is not preserved by the bind mount and relative paths can't help.
 
-- Your host git is < 2.48 (no `--relative-paths` flag available — `/usr/bin/git` on macOS often lags; Homebrew is usually current).
-- You passed a repo and a *sibling* worktree as separate workspace args (`claude-docker ~/repo ~/repo-feature`). Sibling-flattened mounts collapse the parent directory, so the relative offset between worktree and repo is not preserved by the bind mount and relative paths can't help.
+**Caveats:**
 
-**Layout caveat:** relative paths assume the worktree's location relative to the repo's `.git/` is the same in both environments. Nested layouts always satisfy this; moving a worktree to a totally different parent dir breaks both relative and absolute setups.
+- The overlay only applies to workspaces whose `.git` is a real directory (the main repo). If you mount only a worktree without its main repo, no overlay is created for it. Mount the main repo alongside if you need bidirectional worktree work.
+- Relative paths assume the worktree's location relative to the repo's `.git/` is the same in both environments. Nested layouts (e.g. `<repo>/.claude/worktrees/<name>`) always satisfy this; moving a worktree to a totally different parent dir breaks both relative and absolute setups.
 
 ## Pasting images
 

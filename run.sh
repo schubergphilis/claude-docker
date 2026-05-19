@@ -304,6 +304,43 @@ fi
 [ -f "$CLAUDE_CONFIG_DIR/settings.docker.json" ] \
   && MOUNT_ARGS+=("-v" "$CLAUDE_CONFIG_DIR/settings.docker.json:/root/.claude/settings.json:ro")
 
+# Container-only .git/config overlay: enable relative-path worktrees inside the
+# container without touching the host's on-disk repo config. The host file
+# stays unmodified, so host tools that bundle an old libgit2 (notably
+# gitstatusd → Powerlevel10k) keep opening the repo fine; only the container's
+# view of .git/config declares extensions.relativeWorktrees, so git inside the
+# container writes relative paths into worktree link files. Those link files
+# live in the shared on-disk tree and are readable by both ends.
+# Bumping core.repositoryformatversion to 1 in the overlay is required — git
+# refuses an extensions entry on a v0 repo ("v1-only extension found").
+# Overlay is NOT mounted :ro: container-side `git config` / `git remote add`
+# need to succeed; those writes land in the ephemeral overlay and are dropped
+# at exit, which matches the trade-off documented in the README.
+# Counter loop for bash 3.2 (no "${!arr[@]}" on indexed arrays).
+n=${#SEEN_NAMES[@]}
+i=0
+while [ "$i" -lt "$n" ]; do
+  ws_abs="${SEEN_PATHS[$i]}"
+  ws_name="${SEEN_NAMES[$i]}"
+  # Skip workspaces where .git is a worktree/submodule pointer file rather
+  # than a directory — only the main repo's .git/config needs the overlay,
+  # and the worktree resolves through the main repo's mount anyway.
+  if [ -f "$ws_abs/.git/config" ]; then
+    cp "$ws_abs/.git/config" "$stage/git-config-$ws_name"
+    cat >>"$stage/git-config-$ws_name" <<'EOF'
+
+[core]
+	repositoryformatversion = 1
+[extensions]
+	relativeWorktrees = true
+[worktree]
+	useRelativePaths = true
+EOF
+    MOUNT_ARGS+=("-v" "$stage/git-config-$ws_name:/workspaces/$ws_name/.git/config")
+  fi
+  i=$((i + 1))
+done
+
 CMD=(claude)
 # Grant claude read/write access to every mounted workspace, not just cwd.
 # Index 0 is already cwd, so skip it. Repeat --add-dir is allowed; we don't
