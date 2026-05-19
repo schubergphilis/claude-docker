@@ -133,10 +133,12 @@ SEEN_PATHS=()
 for ws in "${WORKSPACES[@]}"; do
   abs=$(cd "$ws" && pwd)
   name=$(basename "$abs")
+  # Other chars (spaces, parens, unicode) are safe because each consumer
+  # below (`-v`, `-w`, `--add-dir`) receives the path as one quoted argv
+  # element; only `:` (docker -v separator) and empty need rejecting.
   case "$name" in
-    *[!A-Za-z0-9._-]*|"")
-      echo "claude-docker: workspace basename '$name' contains characters that break 'docker -v' parsing; allowed: [A-Za-z0-9._-]" >&2
-      exit 1 ;;
+    "")  echo "claude-docker: workspace basename is empty; cannot mount at /workspaces/" >&2; exit 1 ;;
+    *:*) echo "claude-docker: workspace basename '$name' cannot contain ':' (breaks docker -v parsing)" >&2; exit 1 ;;
   esac
   n=${#SEEN_NAMES[@]}
   i=0
