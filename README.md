@@ -74,6 +74,17 @@ On every run, these items are dereferenced (symlinks resolved) and bind-mounted 
 
 For `settings.json`, maintain a dedicated `~/.claude/settings.docker.json` (any valid Claude `settings.json` schema) — it's bind-mounted at `/root/.claude/settings.json` when present. Keeping it separate from your host `settings.json` avoids dragging macOS-only keys (`sandbox`, `env.SSL_CERT_FILE`, `enabledPlugins`) or host-filesystem `hooks` into the container. See [`examples/settings.docker.json`](examples/settings.docker.json) for a starting point.
 
+### Alternate Claude config dirs (`--claude-dir`)
+
+If you keep more than one host Claude config (e.g. a personal `~/.claude/` and a work-only `~/.claude-work/`), point the wrapper at the one you want with `--claude-dir=PATH` or the `CLAUDE_DOCKER_CONFIG_DIR` env var:
+
+```bash
+claude-docker --claude-dir=~/.claude-work ~/repo
+CLAUDE_DOCKER_CONFIG_DIR=~/.claude-work claude-docker ~/repo
+```
+
+The chosen dir takes the place of `~/.claude` for every item in the parity table above (agents, skills, commands, `CLAUDE.md`, statusline, `settings.docker.json`).
+
 ### Git identity
 
 `user.name` and `user.email` from your global git config (`~/.gitconfig`) are forwarded automatically as `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` so in-container `git commit` works out of the box with your real identity — no `git -c user.email=...` dance, no wrong-author commits. Not gated by a flag: identity is already public on every commit you've made. Signing keys, credential helpers, aliases, and hooks are NOT forwarded — those are host-specific (keychains, absolute paths) and would misfire inside the container.
@@ -127,11 +138,12 @@ Token alternative: instead of (or in addition to) the credentials file, export `
 The container narrows blast radius vs. running `claude --yolo` on the host, but it is **not** a full sandbox:
 
 - **Protected:** host filesystem outside your passed workspaces, host `~/.aws/credentials` (long-lived keys), host AWS/glab config dirs are read-only from inside (container can't persist changes back).
-- **Exposed:** your passed workspaces are read-write; short-lived AWS SSO bearer tokens (`~/.aws/sso/cache`) and the glab config token are readable inside the container; `gh`/`GITLAB_TOKEN` env vars are readable; full outbound network.
+- **Exposed (per session):** your passed workspaces are read-write (unless `--ro`); host credentials when opted in — short-lived AWS SSO bearer tokens (`~/.aws/sso/cache`), the glab config token, `~/.terraform.d/credentials.tfrc.json`, and `GH_TOKEN` / `GITLAB_TOKEN` / `TF_TOKEN_app_terraform_io` / `AWS_*` env vars are all readable inside the container; full outbound network with no egress filtering.
+- **Exposed (cross-session):** the persistent `claude-code-root` and `claude-code-home` named volumes hold the Claude OAuth token, in-container `gh` / `glab` / `terraform login` state, shell history, and conversation history. `claude --resume` can replay sessions from **any** past workspace — see [Resuming sessions across workspaces](#resuming-sessions-across-workspaces). Skipped under `--ephemeral`.
 - **Runtime code-fetch:** `npx`, `pnpm dlx`, `uvx`, and `tfenv install` fetch and execute arbitrary code from public sources on first use — npm and PyPI for the package managers, `releases.hashicorp.com` for `tfenv install`. Under `--yolo`, a prompt-injected workspace can trigger these. `pnpm dlx` adds zero marginal blast radius vs the already-reachable `npx`; `uvx` is a *new* PyPI execution primitive (no Python runtime existed in the image before); `tfenv install` is a *new* HashiCorp release-channel execution primitive whose downloaded `terraform` binary is intentionally **not** sha256-pinned in the image (versions are project-pinned via `.terraform-version`, so the image stays neutral on version policy). Build-time installs of the CLIs themselves are pinned by version + sha256 where the ecosystem supports it (uv binary, glab .deb, AWS CLI, tfenv source archive), and by version only for npm-backed packages (claude-code, openspec, pnpm) — `--ignore-scripts` blocks lifecycle scripts at install time but does not protect against a compromised registry serving a malicious tarball at the pinned version.
-- **Implication:** a prompt-injected file in any mounted workspace can exfiltrate those tokens and read/write any workspace. Don't mount repos you don't trust. Rotate tokens if the container is compromised.
+- **If a session is compromised:** assume exfiltration already happened (full network egress). Then: rotate the host sessions for every flag that was passed (`gh auth refresh` / re-login, `glab auth login`, `aws sso login`, `terraform login`), revoke the Claude OAuth credential, and clear the named volumes (`docker volume rm claude-code-root claude-code-home`) to flush in-container auth state and cross-workspace conversation history that `claude --resume` could otherwise replay.
 
-Hardening applied: `--cap-drop ALL`, `--security-opt no-new-privileges`, pinned base image + app versions with sha256 verification on downloaded artifacts.
+Hardening applied at runtime: `--cap-drop ALL`, `--security-opt no-new-privileges`, scoped workspace bind-mounts, tmpfs masks over non-opted-in credential paths. Build-time: pinned base image digest, sha256-verified downloads where the ecosystem supports it (uv, glab, AWS CLI, tfenv source); npm packages (claude-code, openspec, pnpm) are version-pinned with `--ignore-scripts` but not sha256-verified — a compromised npm registry serving a malicious tarball at the pinned version would not be caught at build time. **Not** applied: read-only root filesystem, non-root user (container runs as root by design — see Dockerfile), custom seccomp profile, network egress filtering, resource limits.
 
 ## Git worktrees
 
