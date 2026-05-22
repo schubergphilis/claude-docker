@@ -1,8 +1,8 @@
 # claude-docker
 
-Hardened Docker container for running Claude Code. Filesystem access is scoped to the directories you pass in; your host statusline, skills, agents, and commands come along via read-only bind-mounts.
+Run Claude Code in a container that inherits your setup but not your filesystem. Workspace access is scoped to the directories you pass in; your statusline, skills, agents, and slash commands ride along as read-only bind-mounts. CLI tools are preinstalled (`gh`, `glab`, `aws`, `openspec`, `uv`, `pnpm`, `tfenv`) — language runtimes are not: `tfenv` and `uv` fetch your project-pinned Terraform / Python on demand. Host credentials (`gh`, `glab`, `aws`, `tfe`) are opt-in per flag; nothing leaks in by default.
 
-Bundled CLIs on the default PATH: `claude`, `gh`, `glab`, `aws` (v2), `openspec`, `uv`, `uvx`, `pnpm`, `pnpx`, `tfenv`. See [Credential opt-in](#credential-opt-in) for `gh` / `glab` / `aws` / `tfe`; `openspec`, the package managers (`uv`/`uvx`/`pnpm`/`pnpx`), and `tfenv` itself need no flags.
+The VCS and cloud CLIs (`gh`, `glab`, `aws`) need a flag to see host credentials — see [Credential opt-in](#credential-opt-in). The rest work out of the box.
 
 ## Install
 
