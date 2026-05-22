@@ -43,18 +43,16 @@ Combine as needed: `claude-docker --aws --gh ~/repo`.
 
 | Flag            | Effect |
 |-----------------|--------|
-| `--ephemeral`   | Skip the `claude-code-root` and `claude-code-home` named volumes. No in-container auth state (Claude OAuth, `gh` / `glab` / `terraform login`), shell history, or conversation history persists across runs. Use for one-shot sessions on untrusted workspaces. |
-| `--ro`          | Mount every workspace read-only. Prevents the agent from modifying your code, but does **not** block credential flags or restrict network egress — combine with `--ephemeral` and omit `--gh` / `--glab` / `--aws` / `--tfe` for an isolated review session. |
+| `--ephemeral`   | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
+| `--ro`          | Mount every workspace read-only. Prevents the agent from modifying your code. |
 
-For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](#split-pane-agent-teams).
-
-Example — review-only session on an untrusted repo, zero creds, no persistence:
+`--ro` does **not** block credential flags or restrict network egress — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
 
 ```bash
 claude-docker --ephemeral --ro ~/untrusted-repo
 ```
 
-In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](#threat-model) for what it does and doesn't protect.
+For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](#threat-model) for what it does and doesn't protect.
 
 ### Resuming sessions across workspaces
 
