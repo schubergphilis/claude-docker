@@ -1,8 +1,8 @@
 # claude-docker
 
-Hardened Docker container for running Claude Code. Filesystem access is scoped to the directories you pass in; your host statusline, skills, agents, and commands come along via read-only bind-mounts.
+Run Claude Code in a container that inherits your setup but not your filesystem. Workspace access is scoped to the directories you pass in; your statusline, skills, agents, and slash commands ride along as read-only bind-mounts. CLI tools are preinstalled (`gh`, `glab`, `aws`, `openspec`, `uv`, `pnpm`, `tfenv`) — language runtimes are not: `tfenv` and `uv` fetch your project-pinned Terraform / Python on demand. Host credentials (`gh`, `glab`, `aws`, `tfe`) are opt-in per flag; nothing leaks in by default.
 
-Bundled CLIs on the default PATH: `claude`, `gh`, `glab`, `aws` (v2), `openspec`, `uv`, `uvx`, `pnpm`, `pnpx`, `tfenv`. See [Credential opt-in](#credential-opt-in) for `gh` / `glab` / `aws` / `tfe`; `openspec`, the package managers (`uv`/`uvx`/`pnpm`/`pnpx`), and `tfenv` itself need no flags.
+The VCS and cloud CLIs (`gh`, `glab`, `aws`) need a flag to see host credentials — see [Credential opt-in](#credential-opt-in). The rest work out of the box.
 
 ## Install
 
@@ -28,33 +28,31 @@ claude-docker ~/repo -- --resume          # any claude flag after --
 
 ### Credential opt-in
 
-**Credentials are off by default.** No AWS / GitHub / GitLab config, tokens, or env vars reach the container unless you explicitly opt in:
+**Credentials are off by default.** No AWS / GitHub / GitLab / Terraform Cloud config, tokens, or env vars reach the container unless you explicitly opt in:
 
 | Flag         | Effect |
 |--------------|--------|
-| `--aws`      | Mount `~/.aws/config` + `~/.aws/sso` (:ro) and forward `AWS_PROFILE`/`AWS_REGION`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN`. |
-| `--gh`       | Forward `GH_TOKEN`/`GITHUB_TOKEN` **and** unmask in-container `gh auth login` state persisted in `claude-code-root`. Without this flag, `/root/.config/gh/` is hidden by a tmpfs overlay so a prior login can't leak into a non-opted-in session. |
-| `--glab`     | Mount the platform-appropriate `glab-cli` config dir (:ro) and forward `GITLAB_TOKEN`. Also unmasks any in-container `glab auth login` state; without the flag, `/root/.config/glab-cli/` is hidden by a tmpfs overlay. |
-| `--tfe`      | Mount `~/.terraform.d/credentials.tfrc.json` (:ro) when present and forward `TF_TOKEN_app_terraform_io`. Targets `app.terraform.io` (HCP Terraform) only — self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are out of scope. Without the flag, `/root/.terraform.d/` is hidden by a tmpfs overlay so a prior in-container `terraform login` can't leak. See [Terraform Cloud workflow](#terraform-cloud-workflow). |
+| `--aws`      | Mount `~/.aws/config` and `~/.aws/sso/` read-only and forward `AWS_PROFILE` / `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_SESSION_TOKEN`. `~/.aws/credentials` (long-lived keys) and `~/.aws/cli/cache/` are **not** mounted. |
+| `--gh`       | Forward `GH_TOKEN` / `GITHUB_TOKEN`; if neither is set on the host, the wrapper extracts a token via `gh auth token` (host keychain) and forwards that. Unmasks in-container `gh auth login` state persisted in `claude-code-root` — without this flag, `/root/.config/gh/` is hidden by a tmpfs overlay so a prior login can't leak into a non-opted-in session. |
+| `--glab`     | Mount the platform-appropriate `glab-cli` config dir read-only (macOS: `~/Library/Application Support/glab-cli`, Linux: `~/.config/glab-cli`) and forward `GITLAB_TOKEN`. Unmasks in-container `glab auth login` state — without the flag, `/root/.config/glab-cli/` is hidden by a tmpfs overlay. |
+| `--tfe`      | Mount `~/.terraform.d/credentials.tfrc.json` read-only when present and forward `TF_TOKEN_app_terraform_io`. Targets `app.terraform.io` (HCP Terraform) only — self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are not forwarded. Unmasks in-container `terraform login` state — without the flag, `/root/.terraform.d/` is hidden by a tmpfs overlay. See [Terraform Cloud workflow](#terraform-cloud-workflow). |
 
 Combine as needed: `claude-docker --aws --gh ~/repo`.
 
-### Other hardening flags
+### Session flags
 
 | Flag            | Effect |
 |-----------------|--------|
-| `--ephemeral`   | Skip the `claude-code-root` and `claude-code-home` named volumes. No Claude OAuth token, `gh` login, or conversation history persists across runs. Use for one-shot sessions on untrusted workspaces. |
-| `--ro`          | Mount every workspace read-only. Code review / audit mode. |
-| `--iterm`       | Wrap `claude` in `tmux -CC` for native iTerm2 split-pane teammates (macOS + iTerm2). See [Split-pane agent teams](#split-pane-agent-teams). |
-| `--tmux`        | Wrap `claude` in plain tmux. Teammates render as tmux splits in one terminal tab. Works anywhere. |
+| `--ephemeral`   | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
+| `--ro`          | Mount every workspace read-only. Prevents the agent from modifying your code. |
 
-Example — review-only session on an untrusted repo, zero creds, no persistence:
+`--ro` does **not** block credential flags or restrict network egress — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
 
 ```bash
 claude-docker --ephemeral --ro ~/untrusted-repo
 ```
 
-In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](#threat-model) for what it does and doesn't protect.
+For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](#threat-model) for what it does and doesn't protect.
 
 ### Resuming sessions across workspaces
 
@@ -74,26 +72,30 @@ On every run, these items are dereferenced (symlinks resolved) and bind-mounted 
 
 For `settings.json`, maintain a dedicated `~/.claude/settings.docker.json` (any valid Claude `settings.json` schema) — it's bind-mounted at `/root/.claude/settings.json` when present. Keeping it separate from your host `settings.json` avoids dragging macOS-only keys (`sandbox`, `env.SSL_CERT_FILE`, `enabledPlugins`) or host-filesystem `hooks` into the container. See [`examples/settings.docker.json`](examples/settings.docker.json) for a starting point.
 
+### Alternate Claude config dirs (`--claude-dir`)
+
+If you keep more than one host Claude config (e.g. a personal `~/.claude/` and a work-only `~/.claude-work/`), point the wrapper at the one you want with `--claude-dir=PATH` or the `CLAUDE_DOCKER_CONFIG_DIR` env var:
+
+```bash
+claude-docker --claude-dir=~/.claude-work ~/repo
+CLAUDE_DOCKER_CONFIG_DIR=~/.claude-work claude-docker ~/repo
+```
+
+The chosen dir takes the place of `~/.claude` for every item in the parity table above (agents, skills, commands, `CLAUDE.md`, statusline, `settings.docker.json`).
+
 ### Git identity
 
 `user.name` and `user.email` from your global git config (`~/.gitconfig`) are forwarded automatically as `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` so in-container `git commit` works out of the box with your real identity — no `git -c user.email=...` dance, no wrong-author commits. Not gated by a flag: identity is already public on every commit you've made. Signing keys, credential helpers, aliases, and hooks are NOT forwarded — those are host-specific (keychains, absolute paths) and would misfire inside the container.
 
 ### Statusline tag for active opt-ins
 
-`run.sh` exports `CLAUDE_DOCKER_FLAGS` into the container with the comma-separated list of active opt-ins (`gh`, `aws`, `glab`, `ephemeral`, `ro`) and wraps the host statusline script so a yellow `docker:<flags>` tag is prepended to whatever your personal statusline renders. `--yolo` / `--dangerously-skip-permissions` is not surfaced here — Claude Code's own mode indicator already makes it obvious. The wrapper is a no-op passthrough when no opt-ins are active, so your statusline looks unchanged on a plain `claude-docker ~/repo`.
+`run.sh` exports `CLAUDE_DOCKER_FLAGS` into the container with the comma-separated list of active opt-ins (`gh`, `aws`, `glab`, `tfe`, `ephemeral`, `ro`) and wraps the host statusline script so a yellow `docker:<flags>` tag is prepended to whatever your personal statusline renders. The variable is set by the wrapper for the statusline to read — not a user-tunable knob. `--yolo` / `--dangerously-skip-permissions` is not surfaced here — Claude Code's own mode indicator already makes it obvious. The wrapper is a no-op passthrough when no opt-ins are active, so your statusline looks unchanged on a plain `claude-docker ~/repo`.
 
-The image sets `IS_SANDBOX=1` so `--yolo` / `--dangerously-skip-permissions` works despite running as root. See [Threat model](#threat-model) below.
+The image sets `IS_SANDBOX=1` — this is a Claude-Code-internal assertion that tells `claude` the surrounding environment is acceptably isolated so `--yolo` / `--dangerously-skip-permissions` works despite running as root. It does **not** provide any OS-level sandboxing itself; the runtime hardening comes from `--cap-drop ALL`, `--security-opt no-new-privileges`, and the bind-mount layout. See [Threat model](#threat-model) below.
 
 ## Auth model
 
-Credentials are opt-in per run (see [Credential opt-in](#credential-opt-in) above). When enabled:
-
-| Flag         | Source                                                      |
-|--------------|-------------------------------------------------------------|
-| `--gh`       | In-container `gh auth login` persists via `claude-code-root` volume (host macOS Keychain is not reachable), but is only visible when `--gh` is passed — otherwise `/root/.config/gh/` is masked by a tmpfs. Host `GH_TOKEN`/`GITHUB_TOKEN` env vars are forwarded when set. |
-| `--glab`     | Read-only bind-mount of `~/Library/Application Support/glab-cli` (macOS) or `~/.config/glab-cli` (Linux). Any in-container `glab auth login` state is likewise only visible under `--glab`; without the flag `/root/.config/glab-cli/` is masked by a tmpfs. Host `GITLAB_TOKEN` env var forwarded when set. |
-| `--aws`      | Read-only bind-mount of `~/.aws/config` and `~/.aws/sso/` only. `~/.aws/credentials` (long-lived keys) and `~/.aws/cli/cache/` are **not** exposed. Host `AWS_PROFILE`/`AWS_REGION`/`AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY`/`AWS_SESSION_TOKEN` forwarded when set. |
-| `--tfe`      | Read-only bind-mount of `~/.terraform.d/credentials.tfrc.json` when present (the file `terraform login` writes). Host `TF_TOKEN_app_terraform_io` forwarded when set. Any in-container `terraform login` state is likewise only visible under `--tfe`; without the flag `/root/.terraform.d/` is masked by a tmpfs. |
+Credentials are opt-in per run — see [Credential opt-in](#credential-opt-in) above for the per-flag effect, mounts, and env-var forwarding. The subsections below cover the two workflows that need more than a one-line table cell.
 
 ### AWS SSO flow (`--aws`)
 
@@ -134,11 +136,12 @@ Token alternative: instead of (or in addition to) the credentials file, export `
 The container narrows blast radius vs. running `claude --yolo` on the host, but it is **not** a full sandbox:
 
 - **Protected:** host filesystem outside your passed workspaces, host `~/.aws/credentials` (long-lived keys), host AWS/glab config dirs are read-only from inside (container can't persist changes back).
-- **Exposed:** your passed workspaces are read-write; short-lived AWS SSO bearer tokens (`~/.aws/sso/cache`) and the glab config token are readable inside the container; `gh`/`GITLAB_TOKEN` env vars are readable; full outbound network.
+- **Exposed (per session):** your passed workspaces are read-write (unless `--ro`); host credentials when opted in — short-lived AWS SSO bearer tokens (`~/.aws/sso/cache`), the glab config token, `~/.terraform.d/credentials.tfrc.json`, and `GH_TOKEN` / `GITLAB_TOKEN` / `TF_TOKEN_app_terraform_io` / `AWS_*` env vars are all readable inside the container; full outbound network with no egress filtering.
+- **Exposed (cross-session):** the persistent `claude-code-root` and `claude-code-home` named volumes hold the Claude OAuth token, in-container `gh` / `glab` / `terraform login` state, shell history, and conversation history. `claude --resume` can replay sessions from **any** past workspace — see [Resuming sessions across workspaces](#resuming-sessions-across-workspaces). Skipped under `--ephemeral`.
 - **Runtime code-fetch:** `npx`, `pnpm dlx`, `uvx`, and `tfenv install` fetch and execute arbitrary code from public sources on first use — npm and PyPI for the package managers, `releases.hashicorp.com` for `tfenv install`. Under `--yolo`, a prompt-injected workspace can trigger these. `pnpm dlx` adds zero marginal blast radius vs the already-reachable `npx`; `uvx` is a *new* PyPI execution primitive (no Python runtime existed in the image before); `tfenv install` is a *new* HashiCorp release-channel execution primitive whose downloaded `terraform` binary is intentionally **not** sha256-pinned in the image (versions are project-pinned via `.terraform-version`, so the image stays neutral on version policy). Build-time installs of the CLIs themselves are pinned by version + sha256 where the ecosystem supports it (uv binary, glab .deb, AWS CLI, tfenv source archive), and by version only for npm-backed packages (claude-code, openspec, pnpm) — `--ignore-scripts` blocks lifecycle scripts at install time but does not protect against a compromised registry serving a malicious tarball at the pinned version.
-- **Implication:** a prompt-injected file in any mounted workspace can exfiltrate those tokens and read/write any workspace. Don't mount repos you don't trust. Rotate tokens if the container is compromised.
+- **If a session is compromised:** assume exfiltration already happened (full network egress). Then: rotate the host sessions for every flag that was passed (`gh auth refresh` / re-login, `glab auth login`, `aws sso login`, `terraform login`), revoke the Claude OAuth credential, and clear the named volumes (`docker volume rm claude-code-root claude-code-home`) to flush in-container auth state and cross-workspace conversation history that `claude --resume` could otherwise replay.
 
-Hardening applied: `--cap-drop ALL`, `--security-opt no-new-privileges`, pinned base image + app versions with sha256 verification on downloaded artifacts.
+Hardening applied at runtime: `--cap-drop ALL`, `--security-opt no-new-privileges`, scoped workspace bind-mounts, tmpfs masks over non-opted-in credential paths. Build-time: pinned base image digest, sha256-verified downloads where the ecosystem supports it (uv, glab, AWS CLI, tfenv source); npm packages (claude-code, openspec, pnpm) are version-pinned with `--ignore-scripts` but not sha256-verified — a compromised npm registry serving a malicious tarball at the pinned version would not be caught at build time. **Not** applied: read-only root filesystem, non-root user (container runs as root by design — see Dockerfile), custom seccomp profile, network egress filtering, resource limits.
 
 ## Git worktrees
 
