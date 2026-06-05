@@ -379,9 +379,14 @@ if [ "$EPHEMERAL" = "0" ]; then
   MOUNT_ARGS=(-v claude-code-root:/root -v claude-code-home:/root/.claude "${MOUNT_ARGS[@]}")
 fi
 
+# CHOWN/SETUID/SETGID are needed by entrypoint.sh to chown /root and then
+# exec runuser. DAC_OVERRIDE lets the chown step traverse a HOST_UID-owned
+# /root on warm volumes (mode 0700). All four caps are released when
+# runuser transitions UID 0 → host UID; claude itself runs cap-less.
 docker run --rm -it \
   --security-opt no-new-privileges \
-  --cap-drop ALL \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE \
+  -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
   "${MOUNT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \
   -w "$CWD" \

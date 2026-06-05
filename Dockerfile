@@ -177,10 +177,17 @@ ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
-# Container runs as root by design: IS_SANDBOX=1 + --cap-drop ALL + no-new-privileges
-# make the container itself the security boundary. Do not add a USER directive
-# without reworking the host-config bind-mount layout.
+# Container starts as root so the entrypoint can chown /root to the host
+# UID, then drops privileges via runuser. Steady-state, claude runs as the
+# host user with an empty capability set — the kernel clears all caps on
+# the UID→non-zero transition. Do not add a `USER` directive here: the
+# entrypoint expects to start as root so it can perform the chown.
+# See entrypoint.sh and run.sh's --cap-add lines for the full picture.
 
 WORKDIR /workspaces
 
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["claude"]
