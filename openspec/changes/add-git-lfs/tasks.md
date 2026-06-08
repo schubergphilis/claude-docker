@@ -2,11 +2,13 @@
 
 - [x] 1.1 Add `git-lfs` to the `apt-get install --no-install-recommends` list next to `git` in `Dockerfile:59` (unpinned, same as `git`/`tmux`/`jq`)
 - [x] 1.2 In the same `RUN` (after the install, before `rm -rf /var/lib/apt/lists/*`), add `git lfs install --system --skip-repo` so the LFS filters are registered in the system gitconfig baked into the image
-- [ ] 1.3 Build to a **disposable** tag so your working `claude-code:local` is never touched — the smoke tests below all run against this throwaway tag and it gets deleted in 2.4:
+- [x] 1.3 Build to a **disposable** tag so your working `claude-code:local` is never touched — the smoke tests below all run against this throwaway tag and it gets deleted in 2.4:
 
   ```bash
   docker build -t claude-code:git-lfs-test ./claude-docker   # succeeds on local arch
   ```
+
+  Verified in CI (PR #37, "Docker build (validate, no push)"): `git-lfs 3.7.1-1` installed and `git lfs install --system --skip-repo` printed "Git LFS initialized."
 
 ## 2. Verify the fix (host with Docker — disposable image, isolated from `claude-code:local`)
 
@@ -63,4 +65,4 @@ All checks run via plain `docker run` against `claude-code:git-lfs-test`, so nei
 ## 4. Validation
 
 - [x] 4.1 `openspec validate add-git-lfs --strict` exits 0
-- [ ] 4.2 `hadolint` (or the project's lint step) passes on the modified `Dockerfile`
+- [x] 4.2 `hadolint` (or the project's lint step) passes on the modified `Dockerfile` (verified in CI, PR #37 "Lint" job: success)
