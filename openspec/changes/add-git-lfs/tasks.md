@@ -14,7 +14,7 @@
 
 All checks run via plain `docker run` against `claude-code:git-lfs-test`, so neither your `claude-code:local` image nor your real repos are involved.
 
-- [ ] 2.1 Presence: git-lfs is on PATH and the filters are registered system-wide:
+- [x] 2.1 Presence: git-lfs is on PATH and the filters are registered system-wide:
 
   ```bash
   docker run --rm claude-code:git-lfs-test git lfs version
@@ -22,7 +22,7 @@ All checks run via plain `docker run` against `claude-code:git-lfs-test`, so nei
   # expect: a version string, then `git-lfs filter-process`
   ```
 
-- [ ] 2.2 Worktree regression (the actual bug). Build a throwaway LFS fixture on the host (needs host git-lfs — you have it), then do the checkout that used to fail, inside the container:
+- [x] 2.2 Worktree regression (the actual bug). Build a throwaway LFS fixture on the host (needs host git-lfs — you have it), then do the checkout that used to fail, inside the container:
 
   ```bash
   fix=$(mktemp -d)/lfs-fixture && git init -q "$fix" && ( cd "$fix" \
@@ -40,7 +40,7 @@ All checks run via plain `docker run` against `claude-code:git-lfs-test`, so nei
   #   "git: 'lfs' is not a git command" / "external filter 'git-lfs filter-process' failed".
   ```
 
-- [ ] 2.3 Non-LFS unaffected: the same worktree checkout on a plain repo still works:
+- [x] 2.3 Non-LFS unaffected: the same worktree checkout on a plain repo still works:
 
   ```bash
   plain=$(mktemp -d)/plain && git init -q "$plain" && ( cd "$plain" \
@@ -51,7 +51,7 @@ All checks run via plain `docker run` against `claude-code:git-lfs-test`, so nei
   # PASS: behaves exactly as before; no LFS filter involved.
   ```
 
-- [ ] 2.4 Clean up — remove the disposable image and fixtures (`claude-code:local` was never modified):
+- [x] 2.4 Clean up — remove the disposable image and fixtures (`claude-code:local` was never modified):
 
   ```bash
   docker rmi claude-code:git-lfs-test
