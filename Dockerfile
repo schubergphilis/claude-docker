@@ -57,12 +57,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && apt-get install -y --no-install-recommends \
       "nodejs=${NODE_VERSION}" \
       git \
+      git-lfs \
       tmux \
       ncurses-term \
       jq \
       less \
       openssh-client \
       unzip \
+ && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
 
 # GitHub CLI (keyring fetched at build; TODO: commit the keyring to the repo)
