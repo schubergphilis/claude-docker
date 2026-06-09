@@ -380,12 +380,17 @@ if [ "$EPHEMERAL" = "0" ]; then
 fi
 
 # CHOWN/SETUID/SETGID are needed by entrypoint.sh to chown /root and then
-# exec runuser. DAC_OVERRIDE lets the chown step traverse a HOST_UID-owned
-# /root on warm volumes (mode 0700). All four caps are released when
-# runuser transitions UID 0 → host UID; claude itself runs cap-less.
-docker run --rm -it \
+# exec runuser. DAC_READ_SEARCH lets the chown step traverse HOST_UID-owned
+# directories on warm volumes (mode 0700) — narrower than DAC_OVERRIDE
+# since we only need search/read, not write override. All four caps are
+# cleared from the effective/permitted/ambient sets when runuser
+# transitions UID 0 → host UID; the bounding set keeps them but is inert
+# under no-new-privileges, so claude itself runs with no usable caps.
+# --init wraps the process tree under tini so claude's bash/MCP children
+# get reaped — runuser would otherwise be PID 1 and wouldn't reap zombies.
+docker run --rm -it --init \
   --security-opt no-new-privileges \
-  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_OVERRIDE \
+  --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
   -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
   "${MOUNT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \

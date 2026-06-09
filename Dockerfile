@@ -42,6 +42,16 @@ ARG TFENV_SHA256=463132e45a211fa3faf85e62fdfaa9bb746343ff1954ccbad91cae743df3b64
 RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
  && chown root:root /var/cache/apt/archives/partial
 
+# Free UID/GID 1000. Ubuntu's base image ships a default `ubuntu` user at
+# 1000:1000 — i.e. exactly the typical host UID. The entrypoint creates a
+# fresh `claude` user mapped to HOST_UID; without this step its `useradd`
+# is skipped on collision and `runuser -u claude` then fails. Reusing the
+# baked-in `ubuntu` account would also silently inherit its supplementary
+# groups (sudo, adm, plugdev, …). Guarded so a future base image without
+# the default user doesn't break the build.
+RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
+ && if getent group  ubuntu >/dev/null; then groupdel  ubuntu; fi
+
 # NodeSource ships Node 20 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
 # NodeSource's distro-independent codename (works on any Debian/Ubuntu).
@@ -179,9 +189,11 @@ ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
 
 # Container starts as root so the entrypoint can chown /root to the host
 # UID, then drops privileges via runuser. Steady-state, claude runs as the
-# host user with an empty capability set — the kernel clears all caps on
-# the UID→non-zero transition. Do not add a `USER` directive here: the
-# entrypoint expects to start as root so it can perform the chown.
+# host user with no effective / permitted / ambient capabilities — the
+# kernel clears those on the UID→non-zero transition; the bounding set
+# retains the setup caps but is inert under `no-new-privileges`. Do not
+# add a `USER` directive here: the entrypoint expects to start as root so
+# it can perform the chown.
 # See entrypoint.sh and run.sh's --cap-add lines for the full picture.
 
 WORKDIR /workspaces

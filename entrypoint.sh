@@ -24,18 +24,23 @@ useradd -o -u "$HOST_UID" -g "$HOST_GID" -d /root -s /bin/bash -M -N claude
 fi
 
 # Chown the persistent /root volumes (claude-code-root, claude-code-home) so
-# the dropped-privilege user can write its own HOME. On warm volumes most
-# files already match — chown -R still walks the tree but each call is a
-# no-op, which is fast enough that the conditional-skip optimization isn't
-# worth the edge-case complexity (host-UID change between runs, etc.).
-# Requires CAP_CHOWN. Requires CAP_DAC_OVERRIDE on warm runs to traverse
+# the dropped-privilege user can write its own HOME. -xdev stops at each
+# nested mount — critical so we don't try to chown the :ro credential and
+# config bind-mounts that sit under /root (chown on a ro mount returns
+# EROFS, which would abort the entrypoint under set -e; EROFS fires before
+# any same-owner short-circuit, so we can't rely on that either). Two
+# start points because /root and /root/.claude are separate volumes — a
+# single -xdev walk would cover only one. Requires CAP_CHOWN to chown to
+# a different UID, and CAP_DAC_READ_SEARCH on warm runs to traverse
 # directories now owned by HOST_UID with mode 0700.
-chown -R "$HOST_UID:$HOST_GID" /root
+find /root /root/.claude -xdev -print0 \
+  | xargs -0 --no-run-if-empty chown -h "$HOST_UID:$HOST_GID"
 
 # runuser uses setresuid()/setresgid() — needs CAP_SETUID and CAP_SETGID
-# at this point (we're still UID 0). The kernel clears all capabilities on
-# the UID→non-zero transition, so claude itself runs fully cap-less
-# downstream — a stricter posture than the previous "root + DAC_OVERRIDE
-# for the entire session" model where claude held DAC_OVERRIDE for its
-# whole lifetime.
+# at this point (we're still UID 0). The kernel clears effective,
+# permitted, and ambient caps on the UID→non-zero transition; the bounding
+# set retains the setup caps but is inert under `no-new-privileges`. So
+# claude itself runs with no usable capabilities downstream — a stricter
+# posture than the previous "root + DAC_OVERRIDE for the entire session"
+# model where claude held DAC_OVERRIDE for its whole lifetime.
 exec runuser -u claude -- "$@"
