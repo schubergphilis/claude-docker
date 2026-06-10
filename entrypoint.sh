@@ -23,18 +23,24 @@ getent group "$HOST_GID" >/dev/null 2>&1 \
 useradd -o -u "$HOST_UID" -g "$HOST_GID" -d /root -s /bin/bash -M -N claude
 fi
 
-# Chown the persistent /root volumes (claude-code-root, claude-code-home) so
-# the dropped-privilege user can write its own HOME. -xdev stops at each
-# nested mount — critical so we don't try to chown the :ro credential and
-# config bind-mounts that sit under /root (chown on a ro mount returns
-# EROFS, which would abort the entrypoint under set -e; EROFS fires before
-# any same-owner short-circuit, so we can't rely on that either). Two
-# start points because /root and /root/.claude are separate volumes — a
-# single -xdev walk would cover only one. Requires CAP_CHOWN to chown to
-# a different UID, and CAP_DAC_READ_SEARCH on warm runs to traverse
-# directories now owned by HOST_UID with mode 0700.
-find /root /root/.claude -xdev -print0 \
-  | xargs -0 --no-run-if-empty chown -h "$HOST_UID:$HOST_GID"
+# Chown the persistent /root volumes (claude-code-root, claude-code-home)
+# so the dropped-privilege user can write its own HOME. -xdev prunes the
+# :ro credential and config bind-mounts under /root on Linux (they have
+# distinct st_dev), but Docker Desktop's virtiofs on macOS collapses
+# st_dev across bind mounts so the walk descends into them anyway. chown
+# on a :ro mount returns EROFS, which would abort the entrypoint under
+# set -e — so we capture stderr, drop the expected EROFS lines, and
+# surface anything else as a warning. Pruning by /proc/self/mountinfo
+# would also skip the *writable* tmpfs masks (which we do want to chown),
+# so the post-hoc filter is the simpler-correct option. Two start points
+# because /root and /root/.claude are separate volumes. Requires
+# CAP_CHOWN to chown to a different UID, and CAP_DAC_READ_SEARCH so
+# container root can traverse HOST_UID-owned, mode-0700 directories
+# under /root.
+chown_errs="$(find /root /root/.claude -xdev -print0 \
+  | xargs -0 --no-run-if-empty chown -h "$HOST_UID:$HOST_GID" 2>&1 >/dev/null || true)"
+chown_errs="$(grep -v 'Read-only file system' <<<"$chown_errs" || true)"
+[ -n "$chown_errs" ] && printf 'entrypoint: WARN chown: %s\n' "$chown_errs" >&2 || true
 
 # runuser uses setresuid()/setresgid() — needs CAP_SETUID and CAP_SETGID
 # at this point (we're still UID 0). The kernel clears effective,
