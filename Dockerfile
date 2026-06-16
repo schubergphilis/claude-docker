@@ -13,7 +13,7 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_20.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
 ARG NODE_VERSION=20.20.2-1nodesource1
-ARG CLAUDE_CODE_VERSION=2.1.156
+ARG CLAUDE_CODE_VERSION=2.1.170
 # Policy: only pin versions ≥ 5 days old (loud supply-chain attacks usually get
 # yanked within hours; the soak catches those, not quiet/targeted compromises).
 ARG OPENSPEC_VERSION=1.3.0
