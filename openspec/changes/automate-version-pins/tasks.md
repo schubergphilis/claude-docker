@@ -27,6 +27,7 @@
 ## 4. Tests
 
 - [x] 4.1 `tests/test_update_pins.py` (stdlib `unittest`): date parsing, semver selection, within-major selection, major-bump detection, and `--pin` arg validation (unknown tool / duplicate / missing version)
+- [x] 4.2 Extract the soak / `held` / `--block-major-bumps` decision into a pure, network-free seam (`select_version`) and table-test it against the spec scenarios (newest-soaked, held, no-op, major-cross-by-default, major-blocked, within-major fallback, prerelease exclusion, nothing-soaked)
 
 ## 5. CI
 

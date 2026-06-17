@@ -208,6 +208,41 @@ def _age_days(now: datetime, iso: str) -> str:
         return "?"
 
 
+def select_version(cand, current, soak, now, block_major=False) -> Result:
+    """Pure soak/selection decision over a candidate list of (version, iso8601)
+    pairs — the security-relevant core, split out so it is unit-testable without
+    network. `soak` is a timedelta; `now` a tz-aware datetime.
+
+    Picks the highest stable version already older than the soak window; records
+    a `held` version when a newer stable release exists but is still inside the
+    window; and, under block_major, stays within the current major and records
+    the crossed major as blocked. Raises if nothing has soaked yet."""
+    soaked = [v for v, iso in cand if now - parse_dt(iso) >= soak]
+    in_soak = [v for v, iso in cand if now - parse_dt(iso) < soak]
+    iso_of = {v: iso for v, iso in cand}
+
+    r = Result()
+    max_all = max_stable(soaked)
+    if not max_all:
+        raise RuntimeError("no soaked version (all candidates are inside the soak window)")
+    chosen = max_all
+
+    if block_major and current and major_of(max_all) != major_of(current):
+        chosen = newest_within_major(soaked, major_of(current)) or current
+        r.blocked_major = max_all
+
+    r.version = chosen
+    r.age = _age_days(now, iso_of.get(chosen, ""))
+
+    # held = highest in-soak stable version newer than the pick (soak visibly at work)
+    held = max_stable(in_soak + [chosen])
+    if held and held != chosen:
+        r.held, r.held_age = held, _age_days(now, iso_of.get(held, ""))
+
+    r.status = "NOCHANGE" if chosen == current else "UPDATE"
+    return r
+
+
 def resolve(name, kind, ref, current, soak_days, block_major, overrides) -> Result:
     r = Result()
     if name in overrides:
@@ -221,34 +256,10 @@ def resolve(name, kind, ref, current, soak_days, block_major, overrides) -> Resu
     if kind == "awscli":
         return resolve_awscli(current, soak_days)
 
-    now, soak = now_utc(), timedelta(days=soak_days)
     cand = candidates(kind, ref)
     if not cand:
         raise RuntimeError(f"no candidate versions for {name}")
-
-    soaked = [v for v, iso in cand if now - parse_dt(iso) >= soak]
-    in_soak = [v for v, iso in cand if now - parse_dt(iso) < soak]
-    iso_of = {v: iso for v, iso in cand}
-
-    max_all = max_stable(soaked)
-    if not max_all:
-        raise RuntimeError(f"no soaked version for {name}")
-    chosen = max_all
-
-    if block_major and current and major_of(max_all) != major_of(current):
-        chosen = newest_within_major(soaked, major_of(current)) or current
-        r.blocked_major = max_all
-
-    r.version = chosen
-    r.age = _age_days(now, iso_of.get(chosen, ""))
-
-    # held = highest in-soak version newer than the pick (soak visibly at work)
-    held = max_stable(in_soak + [chosen])
-    if held and held != chosen:
-        r.held, r.held_age = held, _age_days(now, iso_of.get(held, ""))
-
-    r.status = "NOCHANGE" if chosen == current else "UPDATE"
-    return r
+    return select_version(cand, current, timedelta(days=soak_days), now_utc(), block_major)
 
 
 def resolve_awscli(current, soak_days) -> Result:

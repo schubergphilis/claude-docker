@@ -85,5 +85,76 @@ class TestParseArgsPin(unittest.TestCase):
         self._expect_exit(["--pin", "uv="])
 
 
+class TestSelectVersion(unittest.TestCase):
+    """The soak / held / --block-major-bumps decision core, fed synthetic
+    candidate lists (no network) against a fixed `now`."""
+
+    NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    SOAK = timedelta(days=7)
+
+    def _iso(self, days_ago):
+        return (self.NOW - timedelta(days=days_ago)).isoformat()
+
+    def _select(self, cand_days, current, block_major=False):
+        cand = [(v, self._iso(d)) for v, d in cand_days]
+        return up.select_version(cand, current, self.SOAK, self.NOW, block_major)
+
+    def test_newest_soaked_version_selected(self):
+        r = self._select([("1.2.0", 20), ("1.3.0", 10)], current="1.2.0")
+        self.assertEqual(r.version, "1.3.0")
+        self.assertEqual(r.status, "UPDATE")
+        self.assertEqual(r.held, "")
+        self.assertEqual(r.blocked_major, "")
+        self.assertEqual(r.age, "10d")
+
+    def test_too_new_version_is_held(self):
+        r = self._select([("1.3.0", 10), ("1.4.0", 3)], current="1.3.0")
+        self.assertEqual(r.version, "1.3.0")
+        self.assertEqual(r.status, "NOCHANGE")
+        self.assertEqual(r.held, "1.4.0")
+
+    def test_no_newer_version_is_nochange(self):
+        r = self._select([("1.2.0", 20), ("1.3.0", 10)], current="1.3.0")
+        self.assertEqual(r.version, "1.3.0")
+        self.assertEqual(r.status, "NOCHANGE")
+        self.assertEqual(r.held, "")
+
+    def test_major_crossed_by_default(self):
+        r = self._select([("10.33.2", 30), ("11.5.3", 9)], current="10.33.2")
+        self.assertEqual(r.version, "11.5.3")
+        self.assertEqual(r.status, "UPDATE")
+        self.assertEqual(r.blocked_major, "")
+        self.assertTrue(up.is_major_bump("10.33.2", r.version))
+
+    def test_block_major_stays_within_current_major(self):
+        r = self._select(
+            [("10.33.2", 30), ("10.34.1", 15), ("11.5.3", 9)],
+            current="10.33.2", block_major=True,
+        )
+        self.assertEqual(r.version, "10.34.1")
+        self.assertEqual(r.status, "UPDATE")
+        self.assertEqual(r.blocked_major, "11.5.3")
+
+    def test_block_major_with_nothing_newer_in_major_keeps_current(self):
+        r = self._select([("11.5.3", 9)], current="10.33.2", block_major=True)
+        self.assertEqual(r.version, "10.33.2")
+        self.assertEqual(r.status, "NOCHANGE")
+        self.assertEqual(r.blocked_major, "11.5.3")
+
+    def test_prereleases_excluded_from_selection(self):
+        r = self._select([("1.9.0", 20), ("2.0.0-rc1", 10)], current="1.9.0")
+        self.assertEqual(r.version, "1.9.0")
+        self.assertEqual(r.status, "NOCHANGE")
+
+    def test_prerelease_never_reported_as_held(self):
+        r = self._select([("1.9.0", 20), ("2.0.0-rc1", 2)], current="1.9.0")
+        self.assertEqual(r.version, "1.9.0")
+        self.assertEqual(r.held, "")
+
+    def test_nothing_soaked_raises(self):
+        with self.assertRaises(RuntimeError):
+            self._select([("1.0.0", 2)], current="")
+
+
 if __name__ == "__main__":
     unittest.main()
