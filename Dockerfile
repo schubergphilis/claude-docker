@@ -49,12 +49,8 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
 # baked-in `ubuntu` account would also silently inherit its supplementary
 # groups (sudo, adm, plugdev, …). Guarded so a future base image without
 # the default user doesn't break the build.
-# Lower UID_MIN to 1 so useradd doesn't warn when HOST_UID is a macOS-style
-# UID (≥501, below Ubuntu's default floor of 1000). This container is
-# single-purpose; the UID range policy has no security meaning here.
 RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
- && if getent group  ubuntu >/dev/null; then groupdel  ubuntu; fi \
- && sed -i 's/^UID_MIN\b.*/UID_MIN\t\t\t1/' /etc/login.defs
+ && if getent group  ubuntu >/dev/null; then groupdel  ubuntu; fi
 
 # NodeSource ships Node 20 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
