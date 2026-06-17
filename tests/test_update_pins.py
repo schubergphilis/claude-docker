@@ -86,6 +86,16 @@ class TestParseArgsPin(unittest.TestCase):
     def test_pin_without_version_rejected(self):
         self._expect_exit(["--pin", "uv="])
 
+    def test_pin_accepts_non_semver_versions(self):
+        # the escape hatch must still allow calver / prereleases / build metadata
+        for ver in ("2024.10.1", "0.12.0-rc.1", "1.2.3+build.5"):
+            _, overrides = up.parse_args(["--pin", f"uv={ver}"])
+            self.assertEqual(overrides, {"uv": ver})
+
+    def test_pin_rejects_shell_or_url_metacharacters(self):
+        for ver in ("1.2.3; rm -rf /", "1.2.3 4", "`id`", "1.2.3/../x", "a$(id)"):
+            self._expect_exit(["--pin", f"uv={ver}"])
+
 
 class TestSelectVersion(unittest.TestCase):
     """The soak / held / --block-major-bumps decision core, fed synthetic

@@ -48,6 +48,12 @@ PINS_DIR = REPO_DIR / "pins"
 DOCKERFILE = REPO_DIR / "Dockerfile"
 USER_AGENT = "update_pins.py (claude-docker)"
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# An operator-supplied --pin value is written into a sourced .env fragment and
+# interpolated into a download URL, so it must be a shell- and URL-inert token.
+# This is deliberately permissive (not SEMVER_RE): it accepts semver,
+# prereleases (1.2.3-rc.1), build metadata (1.2.3+x), and calver (2024.10.1) —
+# only shell/URL metacharacters (space, ; $ ` ' " / newline …) are rejected.
+PIN_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]*")
 
 # tool registry: (name, kind, ref). ref meaning is kind-specific:
 #   npm    -> npm package name        github -> owner/repo (releases)
@@ -503,6 +509,9 @@ def parse_args(argv):
             p.error(f"--pin: unknown tool '{k}' (choose from: {', '.join(sorted(tool_names))})")
         if k in overrides:
             p.error(f"--pin: '{k}' given more than once")
+        if not PIN_VERSION_RE.fullmatch(v):
+            p.error(f"--pin: version '{v}' for '{k}' has unexpected characters "
+                    f"(expected e.g. 1.2.3, 1.2.3-rc.1, 2024.10.1)")
         overrides[k] = v
     return args, overrides
 

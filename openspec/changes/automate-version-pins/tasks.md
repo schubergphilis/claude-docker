@@ -6,7 +6,7 @@
 
 ## 2. Refresh tool (`update_pins.py`)
 
-- [x] 2.1 Single stdlib-only Python file with a PEP 723 uv header (`requires-python`, `dependencies = []`), run via `uv`; `argparse` CLI (`--soak`, `--block-major-bumps`, `--pin`, `--help`) with input validation (numeric soak; `--pin` must be `TOOL=VERSION`, name a known tool, appear at most once)
+- [x] 2.1 Single stdlib-only Python file with a PEP 723 uv header (`requires-python`, `dependencies = []`), run via `uv`; `argparse` CLI (`--soak`, `--block-major-bumps`, `--pin`, `--help`) with input validation (numeric soak; `--pin` must be `TOOL=VERSION`, name a known tool, appear at most once, and carry a shell/URL-inert version token — permissive enough for calver/prereleases, rejecting injection metacharacters)
 - [x] 2.2 Resolution per source: npm registry (claude-code, openspec, pnpm), GitHub releases (uv, glab, tfenv), aws-cli via dated `aws/aws-cli` tags (paginated). Select the newest stable version older than the soak window; exclude prereleases; filter npm candidates to `.versions` (drop yanked/unpublished)
 - [x] 2.3 `held` logic: when the only newer version is inside the soak window, retain the current pin and record it for the report
 - [x] 2.4 Major-version policy: cross majors once soaked by default; `--block-major-bumps` constrains a run to each tool's current major and reports the crossed major as blocked (aws-cli is implicitly v2-locked by its tag filter)
