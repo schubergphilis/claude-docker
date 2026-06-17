@@ -15,7 +15,7 @@
 - [x] 2.7 `--pin <tool>=<version>` override: re-resolve + re-hash a specific version, bypassing the soak (npm versions validated against the registry); mark it as an override in the report
 - [x] 2.8 Operator report: per-tool `old → new` with age, `⬆ MAJOR` marker, `held` lines, `⚠` reminders for the manual pins, and base-image digest drift
 - [x] 2.9 Fail-safe writes: stage fragments in a temp dir on the same filesystem as `pins/` and swap in via `os.replace` only on full success; a failed run leaves committed pins intact
-- [x] 2.10 Hardened HTTP: https-only across redirects with a bounded redirect chain; honors `GITHUB_TOKEN` / `GH_TOKEN`
+- [x] 2.10 Hardened HTTP: https-only across redirects with a bounded redirect chain; strips the `Authorization` header on a cross-origin redirect (a token only reaches the host we chose); honors `GITHUB_TOKEN` / `GH_TOKEN`
 - [x] 2.11 On an unchanged version, re-verify the committed artifact hash (re-download the recorded URL, compare) instead of rewriting it — fail loudly on mismatch (a re-published artifact at the pinned version) and leave the pin untouched; tolerate a download blip on a no-op run
 
 ## 3. Dockerfile integration

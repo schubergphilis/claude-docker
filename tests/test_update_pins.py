@@ -8,6 +8,8 @@ import contextlib
 import io
 import sys
 import unittest
+import urllib.error
+import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -154,6 +156,32 @@ class TestSelectVersion(unittest.TestCase):
     def test_nothing_soaked_raises(self):
         with self.assertRaises(RuntimeError):
             self._select([("1.0.0", 2)], current="")
+
+
+class TestRedirectAuthStrip(unittest.TestCase):
+    """The redirect handler must keep Authorization on a same-host redirect,
+    drop it when the host changes, and refuse a non-https redirect target."""
+
+    def _redirect(self, from_url, to_url):
+        req = urllib.request.Request(
+            from_url, headers={"Authorization": "Bearer t", "User-Agent": "x"}
+        )
+        return up._HTTPSOnlyRedirect().redirect_request(req, None, 302, "Found", {}, to_url)
+
+    def _has_auth(self, new_req):
+        return any(k.lower() == "authorization" for k in new_req.headers)
+
+    def test_authorization_dropped_on_cross_host_redirect(self):
+        new = self._redirect("https://api.github.com/x", "https://cdn.example.com/y")
+        self.assertFalse(self._has_auth(new))
+
+    def test_authorization_kept_on_same_host_redirect(self):
+        new = self._redirect("https://api.github.com/x", "https://api.github.com/y")
+        self.assertTrue(self._has_auth(new))
+
+    def test_non_https_redirect_rejected(self):
+        with self.assertRaises(urllib.error.URLError):
+            self._redirect("https://api.github.com/x", "http://cdn.example.com/y")
 
 
 if __name__ == "__main__":

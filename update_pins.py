@@ -38,6 +38,7 @@ import shutil
 import sys
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -64,15 +65,29 @@ TOOLS = [
 
 # ---- HTTP (https-only, bounded redirects) ---------------------------------
 class _HTTPSOnlyRedirect(urllib.request.HTTPRedirectHandler):
-    """Reject redirects to non-https targets and bound the chain — the urllib
-    analogue of curl --proto-redir '=https' --max-redirs 5."""
+    """Reject redirects to non-https targets, bound the chain, and drop the
+    Authorization header when a redirect crosses to a different host — the
+    urllib analogue of curl --proto-redir '=https' --max-redirs 5 plus its
+    default credential-stripping. A token must only reach the host we chose to
+    send it to, never wherever a response points us (e.g. a CDN). The hosts we
+    authenticate to don't cross-origin-redirect today; this keeps that invariant
+    unconditional. (GitHub's asset CDN uses signed URLs and would reject a
+    forwarded Authorization header anyway, so stripping is also the correct
+    behavior, not just the safe one.)"""
 
     max_redirections = 5
 
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         if not newurl.lower().startswith("https://"):
             raise urllib.error.URLError(f"refusing non-https redirect to {newurl}")
-        return super().redirect_request(req, fp, code, msg, headers, newurl)
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and (
+            urllib.parse.urlsplit(req.full_url).hostname
+            != urllib.parse.urlsplit(newurl).hostname
+        ):
+            for key in [k for k in new.headers if k.lower() == "authorization"]:
+                del new.headers[key]
+        return new
 
 
 _OPENER = urllib.request.build_opener(_HTTPSOnlyRedirect)
