@@ -137,6 +137,25 @@ If resolution, download, or hashing fails for any tool, the refresh tooling SHAL
 - **THEN** the script exits non-zero
 - **AND** the existing committed fragments are unchanged
 
+### Requirement: Unchanged pins are re-verified, not rewritten
+
+When a tool's resolved version equals its committed pin, the refresh tooling SHALL NOT recompute and overwrite the committed sha256(s). For a tool with hashed artifacts it SHALL instead re-download each committed artifact URL and compare against the committed sha256; on mismatch — the artifact was re-published with different bytes at the pinned version — it SHALL fail loudly and leave the committed pin unchanged, rather than silently re-pin to the new bytes. A download failure during this check SHALL NOT abort the run, since an unchanged tool has no work to do.
+
+#### Scenario: re-published artifact at a pinned version fails loudly
+
+- **GIVEN** a tool whose resolved version equals the committed pin
+- **AND** the artifact at the committed URL now hashes differently than the committed sha256
+- **WHEN** the operator runs the refresh script
+- **THEN** the script exits non-zero, reporting an integrity mismatch
+- **AND** the committed pin is left unchanged
+
+#### Scenario: unchanged, still-matching pin is not rewritten
+
+- **GIVEN** a tool whose resolved version equals the committed pin
+- **AND** the artifact still matches the committed sha256
+- **WHEN** the operator runs the refresh script
+- **THEN** the committed fragment is left unchanged (not rewritten)
+
 ### Requirement: Refresh tooling has no third-party runtime dependencies
 
 The refresh tooling SHALL run using only its language's standard library and ubiquitous system tooling already required by the build — it SHALL NOT require installing third-party packages from a language registry (PyPI, npm, etc.) to execute. This keeps the trusted base of a supply-chain tool minimal; adding a runtime dependency SHALL be a deliberate, reviewable change.

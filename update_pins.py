@@ -189,7 +189,7 @@ def aws_cli_tags():
 
 # ---- resolution ------------------------------------------------------------
 class Result:
-    __slots__ = ("status", "version", "age", "held", "held_age", "blocked_major")
+    __slots__ = ("status", "version", "age", "held", "held_age", "blocked_major", "note")
 
     def __init__(self):
         self.status = ""            # UPDATE | NOCHANGE | OVERRIDE | ERROR
@@ -198,6 +198,7 @@ class Result:
         self.held = ""
         self.held_age = ""
         self.blocked_major = ""
+        self.note = ""              # free-text annotation for the report
 
 
 def _age_days(now: datetime, iso: str) -> str:
@@ -350,6 +351,50 @@ def read_current(name: str) -> str:
     return ""
 
 
+def read_fragment(name: str) -> dict:
+    """Parse pins/<name>.env into a {VAR: value} dict (skipping comments)."""
+    out = {}
+    f = PINS_DIR / f"{name}.env"
+    if f.exists():
+        for line in f.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                k, val = line.split("=", 1)
+                out[k] = val
+    return out
+
+
+def verify_unchanged(name: str) -> str:
+    """Re-verify (do NOT rewrite) the committed pin for a tool whose resolved
+    version is unchanged.
+
+    Rewriting on a no-op run would recompute the sha from whatever the vendor
+    serves now and silently re-pin to it — turning a re-published artifact at an
+    already-pinned version (CDN re-pack, swapped release asset) into an accepted
+    change instead of the loud `sha256sum -c` failure the pins exist to provide.
+    So instead: download each committed URL and compare to the committed sha256.
+    A mismatch is a tamper signal — fail loudly and leave the pin untouched. A
+    download failure is tolerated (an unchanged tool has no work to do). npm
+    tools carry no hashed artifact, so there is nothing to verify."""
+    frag = read_fragment(name)
+    url_vars = [k for k in frag if "_URL" in k]
+    if not url_vars:
+        return ""
+    for uvar in url_vars:
+        expected = frag.get(uvar.replace("_URL", "_SHA256"), "")
+        try:
+            actual = sha256_of_download(frag[uvar])
+        except Exception:  # noqa: BLE001 — transient blip on a no-op run; skip
+            return "integrity check skipped (download unavailable)"
+        if actual != expected:
+            raise RuntimeError(
+                f"INTEGRITY MISMATCH at {frag[uvar]}: committed {expected[:12]}… "
+                f"but the artifact now hashes to {actual[:12]}… — refusing to "
+                f"re-pin (it was re-published with different bytes at the pinned version)"
+            )
+    return f"integrity re-verified ({len(url_vars)} artifact{'s' if len(url_vars) != 1 else ''})"
+
+
 # ---- reminders (manual pins) ----------------------------------------------
 def ubuntu_current_digest() -> str:
     """Current multi-arch index digest of ubuntu:26.04 from the registry (no
@@ -435,9 +480,18 @@ def main(argv=None) -> int:
             except Exception as e:  # noqa: BLE001 — any failure aborts, pins untouched
                 print(f"  ✗ {name}: {e} — aborting, pins/ left untouched", file=sys.stderr)
                 return 1
-            if r.status in ("UPDATE", "OVERRIDE", "NOCHANGE"):
+            if r.status in ("UPDATE", "OVERRIDE"):
                 try:
                     write_fragment(stage, name, r.version)
+                except Exception as e:  # noqa: BLE001
+                    print(f"  ✗ {name}: {e} — aborting, pins/ left untouched", file=sys.stderr)
+                    return 1
+            elif r.status == "NOCHANGE":
+                # Don't rewrite an unchanged pin; re-verify the committed hash
+                # instead, so a re-published artifact fails loudly here rather
+                # than being silently accepted (see verify_unchanged).
+                try:
+                    r.note = verify_unchanged(name)
                 except Exception as e:  # noqa: BLE001
                     print(f"  ✗ {name}: {e} — aborting, pins/ left untouched", file=sys.stderr)
                     return 1
@@ -458,7 +512,8 @@ def main(argv=None) -> int:
         elif r.status == "OVERRIDE":
             print(f"  ◆ {name:<12} {current} → {r.version}   (override, soak bypassed)")
         elif r.status == "NOCHANGE":
-            print(f"  • {name:<12} {current}   unchanged (already newest soaked)")
+            extra = f"; {r.note}" if r.note else ""
+            print(f"  • {name:<12} {current}   unchanged (already newest soaked){extra}")
         if r.held:
             print(f"      ↳ {r.held} available but inside soak ({r.held_age}) — held")
         if r.blocked_major:
