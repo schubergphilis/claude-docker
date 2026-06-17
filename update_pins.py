@@ -165,8 +165,18 @@ def candidates(kind: str, ref: str):
         ]
     if kind == "gitlab":
         enc = ref.replace("/", "%2F")
+        # GitLab returns releases newest-first (order_by=released_at, sort=desc),
+        # so the newest soaked release is within page 1 and per_page=100 is the
+        # bound. glab is near ~100 releases — if it ever crosses, this needs real
+        # pagination to avoid missing the newest. `upcoming_release` (a future-
+        # dated release) is excluded — the GitLab analogue of GitHub's
+        # draft/prerelease filter; SEMVER_RE drops any -rc/-beta tags at selection.
         rel = get_json(f"https://gitlab.com/api/v4/projects/{enc}/releases?per_page=100")
-        return [(r["tag_name"].lstrip("v"), r["released_at"]) for r in rel]
+        return [
+            (r["tag_name"].lstrip("v"), r["released_at"])
+            for r in rel
+            if not r.get("upcoming_release")
+        ]
     raise ValueError(f"unknown kind: {kind}")
 
 
@@ -275,6 +285,12 @@ def resolve_awscli(current, soak_days) -> Result:
     )
     for tag in tags:
         commit = get_json(f"https://api.github.com/repos/aws/aws-cli/commits/{tag}", gh_headers())
+        # KNOWN LIMITATION: the committer date is a best-effort soak proxy. It is
+        # not a publish date (a backported/re-tagged commit can carry a date that
+        # over- or under-states real availability) and it is git-author-settable,
+        # so it is weaker than the npm/GitHub/GitLab publish timestamps. There is
+        # no clean publish date for aws-cli tags via the API; a stronger signal
+        # (the PGP-signed installer) is the deferred attestation follow-up.
         dt = parse_dt(commit["commit"]["committer"]["date"])
         if now - dt >= soak:
             r.version, r.age = tag, f"{(now - dt).days}d"
