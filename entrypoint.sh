@@ -17,10 +17,12 @@ fi
 # happens to collide with a baked-in Ubuntu system user. HOME=/root is
 # deliberate — keeps the existing /root/.claude, /root/.aws, /root/.config
 # mount paths intact instead of forcing a layout migration.
+# -K UID_MIN=1 overrides the login.defs floor per-call so macOS UIDs (≥501,
+# below Ubuntu's default 1000) don't trigger a warning.
 if ! getent passwd "$HOST_UID" >/dev/null 2>&1; then
 getent group "$HOST_GID" >/dev/null 2>&1 \
     || groupadd -o -g "$HOST_GID" claude
-useradd -o -u "$HOST_UID" -g "$HOST_GID" -d /root -s /bin/bash -M -N claude
+useradd -o -K UID_MIN=1 -u "$HOST_UID" -g "$HOST_GID" -d /root -s /bin/bash -M -N claude
 fi
 
 # Chown the persistent /root volumes (claude-code-root, claude-code-home)
