@@ -360,7 +360,7 @@ done
 # stays readable: tmux tears the pane down the moment its command exits AND
 # always returns 0 itself, so without this hold the user sees neither the
 # error message nor a non-zero status — the wrapper just appears to no-op.
-HOLD_ON_ERR='"$@"; rc=$?; if [ $rc -ne 0 ]; then printf "\n[claude exited %d — press Enter to close] " "$rc" >&2; read -r _; fi; exit $rc'
+HOLD_ON_ERR='"$@"; rc=$?; if [ $rc -ne 0 ]; then printf "\n[%s exited %d — press Enter to close] " "$1" "$rc" >&2; read -r _; fi; exit $rc'
 case "${CLAUDE_DOCKER_TMUX:-0}" in
   cc|CC) CMD=(tmux -u -CC new-session -A -s claude sh -c "$HOLD_ON_ERR" _ "${CMD[@]}") ;;
   1)     CMD=(tmux -u     new-session -A -s claude sh -c "$HOLD_ON_ERR" _ "${CMD[@]}") ;;
