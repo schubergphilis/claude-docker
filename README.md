@@ -7,7 +7,7 @@ The VCS and cloud CLIs (`gh`, `glab`, `aws`) need a flag to see host credentials
 ## Install
 
 ```bash
-# Build the image from your checkout (one-time; rerun after Dockerfile changes)
+# Build the image from your checkout (one-time; rerun after Dockerfile or tool pins change)
 docker build -t claude-code:local ./claude-docker
 
 # Put on your PATH (create ~/bin if it doesn't exist)
@@ -146,6 +146,25 @@ The container narrows blast radius vs. running `claude --yolo` on the host, but 
 - **If a session is compromised:** assume exfiltration already happened (full network egress). Then: rotate the host sessions for every flag that was passed (`gh auth refresh` / re-login, `glab auth login`, `aws sso login`, `terraform login`), revoke the Claude OAuth credential, and clear the named volumes (`docker volume rm claude-code-root claude-code-home`) to flush in-container auth state and cross-workspace conversation history that `claude --resume` could otherwise replay.
 
 Hardening applied at runtime: `--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH` — the four added caps are held only during entrypoint setup and cleared from the effective / permitted / ambient sets by the kernel when the entrypoint drops UID 0 → host UID (the bounding set retains them but is inert under `no-new-privileges`), so claude itself runs with no usable capabilities; `--security-opt no-new-privileges`; `--init` (tini reaps subprocess zombies — `runuser` would otherwise be PID 1); container starts as root and drops to the host user before exec'ing claude (see [File ownership](#file-ownership)); the Docker default seccomp profile; scoped workspace bind-mounts; tmpfs masks over non-opted-in credential paths. Build-time: pinned base image digest, sha256-verified downloads where the ecosystem supports it (uv, glab, AWS CLI, tfenv source); npm packages (claude-code, openspec, pnpm) are version-pinned with `--ignore-scripts` but not sha256-verified — a compromised npm registry serving a malicious tarball at the pinned version would not be caught at build time. **Not** applied: read-only root filesystem, user-namespace remapping, custom seccomp profile (Docker's default is in use), network egress filtering, resource limits.
+
+## Updating pinned tool versions
+
+`uv`, `glab`, `aws-cli`, and `tfenv` are downloaded directly from GitHub/GitLab/vendor sites rather than from a language package registry, so nothing else verifies the bytes. Each is pinned to a version **and** a per-architecture sha256 that the Dockerfile checks (`sha256sum -c`) before installing. The npm-installed tools (`claude-code`, `openspec`, `pnpm`) are pinned by version only — `npm install` already verifies the tarball against the registry's `dist.integrity`, and CI additionally runs `npm audit signatures`.
+
+The pins live in version-controlled fragments under [`pins/`](pins/), one `pins/<tool>.env` per tool, which the Dockerfile `COPY`s and sources at build time — so `docker build` is reproducible from the committed files.
+
+Refresh them with [`update_pins.py`](update_pins.py) (a single stdlib-only Python file, run via `uv`):
+
+```bash
+uv run claude-docker/update_pins.py                      # refresh all tools (7-day soak)
+uv run claude-docker/update_pins.py --soak 14            # wider soak window
+uv run claude-docker/update_pins.py --block-major-bumps  # stay within each tool's current major
+uv run claude-docker/update_pins.py --pin uv=0.12.3      # pin one tool to a specific version
+```
+
+For each tool it selects the newest stable version at least 7 days old, downloads the `amd64` and `arm64` artifacts, computes their sha256s, and rewrites `pins/<tool>.env` — the soak window gives a release time to be vetted (and a bad one pulled) before it enters the image. The script prints a report — each `old → new` bump with its age, a `⬆ MAJOR` marker on major-version jumps, `held` lines for versions still inside the soak window, and `⚠` reminders for the manual pins — then review the diff, build to test, and commit. By default a major-version bump is taken once it has soaked; `--block-major-bumps` keeps a run within each tool's current major. Set `GITHUB_TOKEN` (or `GH_TOKEN`) to avoid GitHub's unauthenticated rate limit.
+
+`nodejs` (from NodeSource's signed apt repo) and the `ubuntu` base-image digest are pinned manually: the script reports base-digest drift but does not rewrite it, since moving the base OS is a deliberate, separately-reviewed change.
 
 ## Git worktrees
 

@@ -9,26 +9,20 @@ FROM ubuntu:26.04@sha256:5e275723f82c67e387ba9e3c24baa0abdcb268917f276a0561c97be
 # into tee/sha256sum silently succeeds and the build continues with bad data.
 SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 
-# When bumping a version ARG, also refresh any paired sha256 ARG in the same commit.
+# nodejs stays a MANUAL pin: NodeSource's apt repo is signed, and its publish
+# dates aren't cleanly machine-readable for the soak, so update_pins.py leaves
+# it alone and only reminds the operator to check it.
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_20.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
 ARG NODE_VERSION=20.20.2-1nodesource1
-ARG CLAUDE_CODE_VERSION=2.1.178
-# Policy: only pin versions ≥ 5 days old (loud supply-chain attacks usually get
-# yanked within hours; the soak catches those, not quiet/targeted compromises).
-ARG OPENSPEC_VERSION=1.3.0
-ARG PNPM_VERSION=10.33.2
-ARG GLAB_VERSION=1.92.1
-ARG GLAB_DEB_SHA256_AMD64=18048e5cb2cbc92eb31d4190852c6da32f6713633cfefc7b3fe00c18806c4f53
-ARG GLAB_DEB_SHA256_ARM64=f12a5e5e820b4c0b2803de4136884a90a64918bc3c7fd309f8c5a3ca9455fa8b
-ARG AWSCLI_VERSION=2.34.31
-ARG AWSCLI_SHA256_X86_64=d1540db414d48650c87cea7e2b585368b864d2be5fc4034f9af3b1e3dc2f678a
-ARG AWSCLI_SHA256_AARCH64=932ff651397d5c56f78987fcdf736dfc62c2a32ed2c0e9c9ae96e9a7ff1e85ea
-ARG UV_VERSION=0.11.8
-ARG UV_SHA256_X86_64=56dd1b66701ecb62fe896abb919444e4b83c5e8645cca953e6ddd496ff8a0feb
-ARG UV_SHA256_AARCH64=eee8dd658d20e5ac85fec9c2326b6cbc9d83a1eef09ef07433e58698ac849591
-ARG TFENV_VERSION=3.0.0
-ARG TFENV_SHA256=463132e45a211fa3faf85e62fdfaa9bb746343ff1954ccbad91cae743df3b648
+
+# Every other tool's version (and per-arch sha256) is a GENERATED pin under
+# pins/<tool>.env — NOT an ARG. Each install RUN below COPYs and sources its
+# fragment, so `docker build .` is reproducible from the committed lockfile with
+# no --build-arg. Refresh them with uv run update_pins.py (see README): it selects
+# the newest stable version already past a 7-day soak window and recomputes the
+# hashes. The soak policy that used to be hand-applied here now lives in that
+# script. To override a single tool: uv run update_pins.py --pin <tool>=<version>.
 
 # Make apt runnable under --cap-drop ALL at runtime. Two pieces:
 #  1. APT::Sandbox::User "root" stops the http method from setgroups()→_apt
@@ -88,50 +82,59 @@ RUN install -d -m 0755 /etc/apt/keyrings \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
-# GitLab CLI (glab) — pinned version + sha256 verify
-RUN ARCH=$(dpkg --print-architecture); \
+# GitLab CLI (glab) — version + download URL + sha256 from the generated
+# pins/glab.env. The URL is sourced from the fragment (not rebuilt here), so the
+# pinned sha256 provably covers the exact .deb update_pins.py hashed — the two
+# can't drift. COPY sits immediately before its RUN so a glab pin bump only
+# rebuilds this layer and those after it, not the apt/gh layers above.
+COPY pins/glab.env /tmp/glab.env
+RUN . /tmp/glab.env; set -e; ARCH=$(dpkg --print-architecture); \
     case "$ARCH" in \
-      amd64) SHA="${GLAB_DEB_SHA256_AMD64}" ;; \
-      arm64) SHA="${GLAB_DEB_SHA256_ARM64}" ;; \
+      amd64) URL="${GLAB_DEB_URL_AMD64}"; SHA="${GLAB_DEB_SHA256_AMD64}" ;; \
+      arm64) URL="${GLAB_DEB_URL_ARM64}"; SHA="${GLAB_DEB_SHA256_ARM64}" ;; \
       *) echo "Unsupported arch for glab: $ARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://gitlab.com/gitlab-org/cli/-/releases/v${GLAB_VERSION}/downloads/glab_${GLAB_VERSION}_linux_${ARCH}.deb" \
-      -o /tmp/glab.deb \
+    curl -fsSL "$URL" -o /tmp/glab.deb \
  && echo "${SHA}  /tmp/glab.deb" | sha256sum -c - \
  && apt-get install -y --no-install-recommends /tmp/glab.deb \
- && rm /tmp/glab.deb
+ && rm /tmp/glab.deb /tmp/glab.env
 
-# AWS CLI v2 — pinned version + sha256 verify
-RUN set -e; ARCH=$(uname -m); \
+# AWS CLI v2 — version + download URL + sha256 from the generated pins/awscli.env.
+# URL sourced from the fragment so the pinned sha256 covers exactly what is
+# fetched (the URL is single-sourced in update_pins.py, not rebuilt here).
+COPY pins/awscli.env /tmp/awscli.env
+RUN . /tmp/awscli.env; set -e; ARCH=$(uname -m); \
     case "$ARCH" in \
-      x86_64)  SHA="${AWSCLI_SHA256_X86_64}" ;; \
-      aarch64) SHA="${AWSCLI_SHA256_AARCH64}" ;; \
+      x86_64)  URL="${AWSCLI_URL_X86_64}";  SHA="${AWSCLI_SHA256_X86_64}" ;; \
+      aarch64) URL="${AWSCLI_URL_AARCH64}"; SHA="${AWSCLI_SHA256_AARCH64}" ;; \
       *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-${ARCH}-${AWSCLI_VERSION}.zip" -o /tmp/awscli.zip \
+    curl -fsSL "$URL" -o /tmp/awscli.zip \
  && echo "${SHA}  /tmp/awscli.zip" | sha256sum -c - \
  && unzip -q /tmp/awscli.zip -d /tmp \
  && /tmp/aws/install \
- && rm -rf /tmp/aws /tmp/awscli.zip
+ && rm -rf /tmp/aws /tmp/awscli.zip /tmp/awscli.env
 
 # uv (Astral) — pinned version + sha256 verify; uvx ships in the same archive.
 # gnu variant: ubuntu is glibc; musl would silently fail at runtime.
-# Hash pinned in ARG (not fetched from .sha256 sidecar) so a CDN swap is caught
-# at build time — same trust model as the AWS CLI block above.
-RUN set -e; ARCH=$(uname -m); \
+# URL + hash pinned in pins/uv.env (not fetched from a .sha256 sidecar) so a CDN
+# swap is caught at build time, and the hash provably covers the sourced URL —
+# same trust model as the AWS CLI block above. ARCH still drives the path *inside*
+# the archive (uv-<arch>-unknown-linux-gnu/), which is not a download URL.
+COPY pins/uv.env /tmp/uv.env
+RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
     case "$ARCH" in \
-      x86_64)  SHA="${UV_SHA256_X86_64}" ;; \
-      aarch64) SHA="${UV_SHA256_AARCH64}" ;; \
+      x86_64)  URL="${UV_URL_X86_64}";  SHA="${UV_SHA256_X86_64}" ;; \
+      aarch64) URL="${UV_URL_AARCH64}"; SHA="${UV_SHA256_AARCH64}" ;; \
       *) echo "Unsupported arch: $ARCH" >&2; exit 1 ;; \
     esac; \
-    curl -fsSL "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${ARCH}-unknown-linux-gnu.tar.gz" \
-      -o /tmp/uv.tar.gz \
+    curl -fsSL "$URL" -o /tmp/uv.tar.gz \
  && echo "${SHA}  /tmp/uv.tar.gz" | sha256sum -c - \
  && mkdir -p /tmp/uv \
  && tar -xzf /tmp/uv.tar.gz -C /tmp/uv \
  && install -m 0755 "/tmp/uv/uv-${ARCH}-unknown-linux-gnu/uv" /usr/local/bin/uv \
  && install -m 0755 "/tmp/uv/uv-${ARCH}-unknown-linux-gnu/uvx" /usr/local/bin/uvx \
- && rm -rf /tmp/uv /tmp/uv.tar.gz
+ && rm -rf /tmp/uv /tmp/uv.tar.gz /tmp/uv.env
 
 # npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
 # run `npm audit signatures <pkg>@<ver>` when bumping.
@@ -142,11 +145,17 @@ RUN set -e; ARCH=$(uname -m); \
 # exec. We invoke that one script ourselves — platform-detect + file copy,
 # no network/exec, audit-verified for 2.1.131; re-read on each bump.
 # `npm root -g` over a hardcoded path so we don't break on a different prefix.
-RUN npm install -g --ignore-scripts \
+# npm tools carry version-only pins (no sha256): npm install verifies the
+# registry-advertised dist.integrity (registry-integrity, not provenance; CI
+# runs `npm audit signatures`). All three share this layer, so they share a COPY.
+COPY pins/claude-code.env pins/openspec.env pins/pnpm.env /tmp/
+RUN . /tmp/claude-code.env && . /tmp/openspec.env && . /tmp/pnpm.env \
+ && npm install -g --ignore-scripts \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@fission-ai/openspec@${OPENSPEC_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
- && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs"
+ && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
+ && rm /tmp/claude-code.env /tmp/openspec.env /tmp/pnpm.env
 
 # tfenv — pure-bash terraform version manager. Arch-independent (just
 # bash scripts), so a single sha256 covers amd64 and arm64. We deliberately
@@ -158,14 +167,15 @@ RUN npm install -g --ignore-scripts \
 # Placed after the heavier npm install so a tfenv version bump doesn't
 # invalidate that layer's cache (tfenv pins move far less often than the
 # claude-code/openspec/pnpm pins above).
-RUN curl -fsSL "https://github.com/tfutils/tfenv/archive/refs/tags/v${TFENV_VERSION}.tar.gz" \
-      -o /tmp/tfenv.tar.gz \
+COPY pins/tfenv.env /tmp/tfenv.env
+RUN . /tmp/tfenv.env \
+ && curl -fsSL "$TFENV_URL" -o /tmp/tfenv.tar.gz \
  && echo "${TFENV_SHA256}  /tmp/tfenv.tar.gz" | sha256sum -c - \
  && mkdir -p /opt/tfenv \
  && tar -xzf /tmp/tfenv.tar.gz -C /opt/tfenv --strip-components=1 \
  && ln -s /opt/tfenv/bin/tfenv /usr/local/bin/tfenv \
  && ln -s /opt/tfenv/bin/terraform /usr/local/bin/terraform \
- && rm /tmp/tfenv.tar.gz
+ && rm /tmp/tfenv.tar.gz /tmp/tfenv.env
 
 # Plain `tmux` mode swallows Shift+Enter so Claude's prompt sees only Enter,
 # forcing users to type `\` for a literal newline. `always` is required
