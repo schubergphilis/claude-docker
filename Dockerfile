@@ -13,8 +13,8 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # dates aren't cleanly machine-readable for the soak, so update_pins.py leaves
 # it alone and only reminds the operator to check it.
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
-# Bump with: curl -fsSL https://deb.nodesource.com/node_20.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
-ARG NODE_VERSION=20.20.2-1nodesource1
+# Bump with: curl -fsSL https://deb.nodesource.com/node_24.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
+ARG NODE_VERSION=24.17.0-1nodesource1
 
 # Every other tool's version (and per-arch sha256) is a GENERATED pin under
 # pins/<tool>.env — NOT an ARG. Each install RUN below COPYs and sources its
@@ -46,7 +46,7 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
 RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
  && if getent group  ubuntu >/dev/null; then groupdel  ubuntu; fi
 
-# NodeSource ships Node 20 LTS pinned to upstream releases — Ubuntu's archive
+# NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
 # NodeSource's distro-independent codename (works on any Debian/Ubuntu).
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -55,7 +55,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
       | gpg --dearmor -o /etc/apt/keyrings/nodesource.gpg \
  && chmod go+r /etc/apt/keyrings/nodesource.gpg \
- && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_20.x nodistro main" \
+ && echo "deb [signed-by=/etc/apt/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main" \
       > /etc/apt/sources.list.d/nodesource.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
