@@ -389,6 +389,22 @@ class TestAudit(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("::error::", err_buf.getvalue())
 
+    def test_empty_pin_exits_nonzero_with_distinct_message(self):
+        """A tool with no pinned version → fail-closed with a 'no pinned
+        version' error (NOT a misleading yank/registry message), and without
+        ever calling candidates() for it."""
+        with unittest.mock.patch.object(up, "read_current", return_value=""), \
+             unittest.mock.patch.object(
+                 up, "candidates",
+                 side_effect=AssertionError("candidates() must not be called for an empty pin")), \
+             unittest.mock.patch.object(up, "now_utc", return_value=self.NOW):
+            err_buf = io.StringIO()
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err_buf):
+                rc = up.run_audit(self.SOAK_DAYS)
+        self.assertNotEqual(rc, 0)
+        self.assertIn("no pinned version", err_buf.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()
