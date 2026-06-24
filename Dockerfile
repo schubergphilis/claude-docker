@@ -210,8 +210,7 @@ ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
 
 WORKDIR /workspaces
 
-COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod 0755 /usr/local/bin/entrypoint.sh
+COPY --chmod=0755 entrypoint.sh /usr/local/bin/entrypoint.sh
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["claude"]
