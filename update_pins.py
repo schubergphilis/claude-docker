@@ -390,13 +390,7 @@ def write_fragment(stage: Path, name: str, version: str):
 
 
 def read_current(name: str) -> str:
-    f = PINS_DIR / f"{name}.env"
-    if not f.exists():
-        return ""
-    for line in f.read_text().splitlines():
-        if "_VERSION=" in line:
-            return line.split("=", 1)[1]
-    return ""
+    return next((v for k, v in read_fragment(name).items() if "_VERSION" in k), "")
 
 
 def read_fragment(name: str) -> dict:
@@ -502,9 +496,9 @@ def parse_args(argv):
     overrides = {}
     tool_names = {name for name, _, _ in TOOLS}
     for kv in args.pin:
-        if "=" not in kv or not kv.split("=", 1)[1]:
+        k, sep, v = kv.partition("=")
+        if not sep or not v:
             p.error(f"--pin expects TOOL=VERSION (got '{kv}')")
-        k, v = kv.split("=", 1)
         if k not in tool_names:
             p.error(f"--pin: unknown tool '{k}' (choose from: {', '.join(sorted(tool_names))})")
         if k in overrides:
