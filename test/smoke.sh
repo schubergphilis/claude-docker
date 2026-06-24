@@ -56,6 +56,14 @@ TMPROOT=$(mktemp -d)
 WORKSPACE_HOST="${TMPROOT}/workspace"
 CREDS_HOST="${TMPROOT}/creds"
 mkdir -p "${WORKSPACE_HOST}" "${CREDS_HOST}"
+# Make the workspace world-writable so a container running as a synthetic
+# HOST_UID (e.g. 501) that differs from the CI runner's UID can write into it —
+# in production the workspace is the user's own repo, owned by HOST_UID and
+# writable. Without this, the runner-owned (0755) dir blocks the non-runner UID
+# cells. Files the container creates are owned by HOST_UID; the host-side
+# ownership assertion below only runs when HOST_UID matches the runner so it
+# can read that ownership back.
+chmod 0777 "${WORKSPACE_HOST}"
 
 # Named volume used for warm-state testing.
 VOL_NAME=""
@@ -266,9 +274,12 @@ if [ "${RO}" = "0" ]; then
   fi
   log "host-side PASS: probe file exists and non-empty"
 
-  # 2. Probe file owned by HOST_UID on the host (only checkable when HOST_UID != 0
-  #    and the runner UID matches HOST_UID_ARG so stat reflects it).
-  if [ "${HOST_UID_ARG}" != "0" ] && [ "${HOST_UID_ARG}" = "$(id -u)" ]; then
+  # 2. Probe file owned by HOST_UID on the host. Bind mounts pass UIDs through
+  #    numerically, so a file the container wrote as HOST_UID is owned by that
+  #    same UID on the host — `stat` reads it back regardless of the runner's own
+  #    UID (so this covers the uid=501 cell too). Skipped only for HOST_UID=0,
+  #    where the file is root-owned and ownership round-trip is not the point.
+  if [ "${HOST_UID_ARG}" != "0" ]; then
     PROBE_OWNER=$(stat -c '%u' "${PROBE_FILE}" 2>/dev/null || stat -f '%u' "${PROBE_FILE}" 2>/dev/null)
     if [ "${PROBE_OWNER}" = "${HOST_UID_ARG}" ]; then
       log "host-side PASS: probe file owned by ${HOST_UID_ARG}"
