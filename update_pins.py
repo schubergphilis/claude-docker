@@ -22,6 +22,8 @@ Usage:
   uv run update_pins.py --block-major-bumps  stay within each tool's current major
   uv run update_pins.py --pin uv=0.12.3      force a specific version (bypasses soak)
   uv run update_pins.py --pin pnpm=11.5.3 --pin uv=0.12.3   multiple overrides
+  python3 update_pins.py --list-npm-tools    list npm tools as TSV (name/pkg/env/var/ver)
+  python3 update_pins.py --audit             soak-gate check against live npm registry
 
 Honors GITHUB_TOKEN / GH_TOKEN (raises the GitHub API rate limit) when set.
 Stdlib only — no third-party packages (a supply-chain tool keeps its own trusted
@@ -48,6 +50,10 @@ PINS_DIR = REPO_DIR / "pins"
 DOCKERFILE = REPO_DIR / "Dockerfile"
 USER_AGENT = "update_pins.py (claude-docker)"
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
+# Default soak window in days — kept as a module constant so --audit and the
+# normal refresh flow share the same default; update_pins.py is the single
+# source of truth for this policy (see design.md and GitHub issue #50).
+DEFAULT_SOAK_DAYS = 7
 # An operator-supplied --pin value is written into a sourced .env fragment and
 # interpolated into a download URL, so it must be a shell- and URL-inert token.
 # This is deliberately permissive (not SEMVER_RE): it accepts semver,
@@ -164,6 +170,46 @@ def major_of(v: str) -> str:
 
 def is_major_bump(old: str, new: str) -> bool:
     return bool(old) and major_of(old) != major_of(new)
+
+
+def version_var(name: str) -> str:
+    """Return the env-var name for a tool's version pin.
+    E.g. claude-code → CLAUDE_CODE_VERSION, pnpm → PNPM_VERSION."""
+    return name.upper().replace("-", "_") + "_VERSION"
+
+
+def soak_status(pinned: str, cand, soak: timedelta, now: datetime):
+    """Membership-and-age check on the PINNED version — NOT a selection.
+
+    pinned: str — the version string currently in pins/<name>.env
+    cand:   [(version, iso8601), ...] from candidates() — live registry versions
+    soak:   timedelta — required minimum age
+    now:    tz-aware datetime
+
+    Returns (ok: bool, age_days: int|None, reason: str).
+
+    Checks whether the PINNED version exists in the live registry AND has aged
+    past the soak window.  This is intentionally different from select_version():
+    that function picks the newest soaked version; this one checks only whether
+    the already-installed pinned version still passes the gate.  Checking a
+    different version's age than the one actually installed would be fail-open
+    (i.e. a new version could have soaked while the installed one was yanked).
+
+    Fail-closed: if the pinned version is absent from the live registry (yanked,
+    unpublished, or never published) it returns ok=False with age_days=None.
+
+    KNOWN LIMITATION: npm's `time[version]` field can be backdated when a
+    package is unpublished then republished.  The soak age is therefore a strong
+    signal but not tamper-proof — an adversary who controls the npm account could
+    backdate a republished version to appear older than it is.  This mirrors the
+    limitation noted for aws-cli's committer-date proxy (see the committer-date
+    KNOWN LIMITATION comment in resolve_awscli())."""
+    iso_of = dict(cand)
+    if pinned not in iso_of:
+        # yanked/unpublished/never-published — fail closed
+        return (False, None, "pinned version not in registry live versions")
+    age = now - parse_dt(iso_of[pinned])
+    return (age >= soak, age.days, "soaked" if age >= soak else "inside soak window")
 
 
 # ---- candidate listing: returns [(version, iso8601), ...] -----------------
@@ -479,17 +525,99 @@ def print_reminders():
         print(f"  ⚠ ubuntu base   pinned {base[:19]}…  (could not resolve current tag digest)")
 
 
+# ---- early-return modes (no pin refresh) -----------------------------------
+def run_list_npm_tools() -> int:
+    """Print one TSV row per npm-pinned tool (name, package, env_file, var, version).
+
+    Validates ALL tools first; if any has an empty version pin it emits a
+    GitHub Actions error annotation to stderr and exits non-zero WITHOUT having
+    printed any partial output (fail-closed producer). NOTE: the non-zero exit
+    only protects a consumer that actually checks it — capture the output via
+    `out=$(... --list-npm-tools)` (which aborts under `set -e`), NOT via a
+    `while ... done < <(...)` process substitution, whose exit code bash does
+    not propagate. See the CI audit step in .github/workflows/ci.yml.
+
+    Output columns (tab-separated, no header):
+        name   package   env_file   var   version
+    """
+    npm_tools = [(name, ref) for name, kind, ref in TOOLS if kind == "npm"]
+
+    # Validate all pins before emitting anything — fail-closed.
+    rows = []
+    for name, pkg in npm_tools:
+        ver = read_current(name)
+        if not ver:
+            print(f"::error::no pinned version for {name}", file=sys.stderr)
+            return 1
+        rows.append((name, pkg, f"{name}.env", version_var(name), ver))
+
+    # All present — emit the table.
+    for name, pkg, env_file, var, ver in rows:
+        print(f"{name}\t{pkg}\t{env_file}\t{var}\t{ver}")
+    return 0
+
+
+def run_audit(soak_days: int) -> int:
+    """Check each npm-pinned tool's installed version against the live npm
+    registry: (a) the version must still exist (not yanked), and (b) it must
+    have aged past the soak window (default 7 days, same default as the refresh
+    flow — GitHub issue #50 standardises on 7).
+
+    Any exception (network/registry error, or a malformed publish timestamp from
+    soak_status/parse_dt) is treated as a hard failure for that tool — never
+    continue past a tool whose soak status could not be determined (fail-closed).
+
+    Exits 0 only when every tool passes; exits non-zero on any failure."""
+    soak = timedelta(days=soak_days)
+    now = now_utc()
+    all_ok = True
+
+    for name, kind, ref in TOOLS:
+        if kind != "npm":
+            continue
+        pinned = read_current(name)
+        if not pinned:
+            # Distinguish a missing pin from a yanked version (which soak_status
+            # would otherwise report as "not in registry live versions").
+            print(f"::error::{name}: no pinned version in pins/{name}.env", file=sys.stderr)
+            all_ok = False
+            continue
+        try:
+            cand = candidates(kind, ref)
+            ok, age_days, reason = soak_status(pinned, cand, soak, now)
+        except Exception as exc:  # noqa: BLE001 — fail-closed: any error = audit failure
+            print(f"::error::{name}: could not determine soak status: {exc}", file=sys.stderr)
+            all_ok = False
+            continue
+
+        age_str = f"{age_days}d" if age_days is not None else "unknown"
+        if ok:
+            print(f"  PASS  {name:<14} {ref}@{pinned}  age={age_str}  ({reason})")
+        else:
+            print(f"  FAIL  {name:<14} {ref}@{pinned}  age={age_str}  ({reason})", file=sys.stderr)
+            print(f"::error::{name}: {ref}@{pinned} did not pass soak gate: {reason}", file=sys.stderr)
+            all_ok = False
+
+    return 0 if all_ok else 1
+
+
 # ---- main ------------------------------------------------------------------
 def parse_args(argv):
     p = argparse.ArgumentParser(
         prog="update_pins.py", description="Regenerate soak-aware version pins under pins/."
     )
-    p.add_argument("--soak", type=int, default=7, metavar="DAYS",
-                   help="soak window in days (default: 7)")
+    p.add_argument("--soak", type=int, default=DEFAULT_SOAK_DAYS, metavar="DAYS",
+                   help=f"soak window in days (default: {DEFAULT_SOAK_DAYS})")
     p.add_argument("--block-major-bumps", action="store_true",
                    help="stay within each tool's current major version")
     p.add_argument("--pin", action="append", default=[], metavar="TOOL=VERSION",
                    help="force a specific version (bypasses soak); repeatable")
+    p.add_argument("--list-npm-tools", action="store_true",
+                   help="print one TSV row per npm-pinned tool (name, package, env_file, var,"
+                        " version) then exit; no pin refresh; exits non-zero if any pin is missing")
+    p.add_argument("--audit", action="store_true",
+                   help="verify each npm-pinned tool's installed version passes the soak gate"
+                        " (requires network); no pin refresh; exits non-zero if any tool fails")
     args = p.parse_args(argv)
     if args.soak < 0:
         p.error("--soak must be a non-negative integer")
@@ -512,6 +640,20 @@ def parse_args(argv):
 
 def main(argv=None) -> int:
     args, overrides = parse_args(sys.argv[1:] if argv is None else argv)
+
+    # Early-return modes — run before the normal refresh flow (no pin writes).
+    # If both --list-npm-tools and --audit are passed, run list first then audit;
+    # a non-zero exit from list short-circuits (audit would have no useful input).
+    if args.list_npm_tools:
+        rc = run_list_npm_tools()
+        if rc != 0:
+            return rc
+        if not args.audit:
+            return 0
+
+    if args.audit:
+        return run_audit(args.soak)
+
     print(f"update_pins  (soak window: {args.soak} days)")
     print("  resolving ──────────────────────────────────────────────────")
 
