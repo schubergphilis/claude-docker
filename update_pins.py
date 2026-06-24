@@ -202,7 +202,8 @@ def soak_status(pinned: str, cand, soak: timedelta, now: datetime):
     package is unpublished then republished.  The soak age is therefore a strong
     signal but not tamper-proof — an adversary who controls the npm account could
     backdate a republished version to appear older than it is.  This mirrors the
-    limitation noted for aws-cli's committer-date proxy (see :309-314 above)."""
+    limitation noted for aws-cli's committer-date proxy (see the committer-date
+    KNOWN LIMITATION comment in resolve_awscli())."""
     iso_of = dict(cand)
     if pinned not in iso_of:
         # yanked/unpublished/never-published — fail closed
@@ -562,9 +563,9 @@ def run_audit(soak_days: int) -> int:
     have aged past the soak window (default 7 days, same default as the refresh
     flow — GitHub issue #50 standardises on 7).
 
-    Calls candidates() for each tool; any exception (network failure, registry
-    error) is treated as a hard failure for that tool — never continue past a
-    tool whose publish time could not be fetched (fail-closed on network errors).
+    Any exception (network/registry error, or a malformed publish timestamp from
+    soak_status/parse_dt) is treated as a hard failure for that tool — never
+    continue past a tool whose soak status could not be determined (fail-closed).
 
     Exits 0 only when every tool passes; exits non-zero on any failure."""
     soak = timedelta(days=soak_days)
@@ -575,14 +576,20 @@ def run_audit(soak_days: int) -> int:
         if kind != "npm":
             continue
         pinned = read_current(name)
+        if not pinned:
+            # Distinguish a missing pin from a yanked version (which soak_status
+            # would otherwise report as "not in registry live versions").
+            print(f"::error::{name}: no pinned version in pins/{name}.env", file=sys.stderr)
+            all_ok = False
+            continue
         try:
             cand = candidates(kind, ref)
-        except Exception as exc:  # noqa: BLE001 — fail-closed: any registry error = audit failure
-            print(f"::error::{name}: could not fetch candidate list: {exc}", file=sys.stderr)
+            ok, age_days, reason = soak_status(pinned, cand, soak, now)
+        except Exception as exc:  # noqa: BLE001 — fail-closed: any error = audit failure
+            print(f"::error::{name}: could not determine soak status: {exc}", file=sys.stderr)
             all_ok = False
             continue
 
-        ok, age_days, reason = soak_status(pinned, cand, soak, now)
         age_str = f"{age_days}d" if age_days is not None else "unknown"
         if ok:
             print(f"  PASS  {name:<14} {ref}@{pinned}  age={age_str}  ({reason})")
