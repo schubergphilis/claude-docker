@@ -4,6 +4,7 @@
 #
 # Parameters (flags or env vars):
 #   --uid=N         HOST_UID to pass into the container (default: $(id -u))
+#   --gid=N         HOST_GID to pass into the container (default: $(id -g))
 #   --optins=CSV    comma-separated credential opt-ins: aws,glab,tfe (default: "")
 #   --volstate=S    cold|warm — cold=fresh volume, warm=run twice reusing a volume
 #   --ro=0|1        1 = mount workspace :ro (robustness cell)
@@ -27,9 +28,11 @@ IMAGE="${IMAGE:-claude-code:local}"
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
+HOST_GID_ARG="${HOST_GID:-$(id -g)}"
 for arg in "$@"; do
   case "$arg" in
     --uid=*)       HOST_UID_ARG="${arg#--uid=}" ;;
+    --gid=*)       HOST_GID_ARG="${arg#--gid=}" ;;
     --optins=*)    OPTINS="${arg#--optins=}" ;;
     --volstate=*)  VOLSTATE="${arg#--volstate=}" ;;
     --ro=*)        RO="${arg#--ro=}" ;;
@@ -38,8 +41,6 @@ for arg in "$@"; do
     *) echo "smoke.sh: unknown argument '$arg'" >&2; exit 1 ;;
   esac
 done
-
-HOST_GID_ARG="${HOST_GID:-$(id -g)}"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -81,7 +82,10 @@ trap cleanup EXIT
 # ---------------------------------------------------------------------------
 # Copy assert-in-container.sh into the workspace so the entrypoint can exec it.
 # ---------------------------------------------------------------------------
-ASSERT_SCRIPT="$(dirname "$(realpath "$0")")/assert-in-container.sh"
+# Resolve this script's dir portably — `realpath` is GNU coreutils and is not
+# on stock macOS (where the Phase 2b job runs smoke.sh on the host directly).
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ASSERT_SCRIPT="${SCRIPT_DIR}/assert-in-container.sh"
 if [ ! -f "${ASSERT_SCRIPT}" ]; then
   die "assert-in-container.sh not found at: ${ASSERT_SCRIPT}"
 fi
@@ -242,7 +246,7 @@ run_container() {
 # Execute
 # ---------------------------------------------------------------------------
 
-CELL_DESC="uid=${HOST_UID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL}"
+CELL_DESC="uid=${HOST_UID_ARG} gid=${HOST_GID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL}"
 log "Cell: ${CELL_DESC}"
 log "Image: ${IMAGE}"
 
@@ -289,12 +293,18 @@ if [ "${RO}" = "0" ]; then
   fi
 fi
 
-# 3. RO robustness: no spurious 'entrypoint: WARN' on stderr.
-if [ "${RO}" = "1" ]; then
-  if grep -q 'entrypoint: WARN' "${CONTAINER_STDERR}" 2>/dev/null; then
-    die "host-side (ro-robustness): unexpected 'entrypoint: WARN' on container stderr"
-  fi
-  log "host-side PASS (ro-robustness): no spurious entrypoint WARN on stderr"
+# 3. Robustness: no spurious 'entrypoint: WARN' on stderr — asserted for EVERY
+#    cell, not just RO. The entrypoint only chowns /root + /root/.claude
+#    (entrypoint.sh:42), so the :ro *workspace* mount never trips the chown→EROFS
+#    filter; the mounts that DO sit under /root are the credential opt-in mounts
+#    (--aws/--glab/--tfe), so the opt-in cells are what actually pin the
+#    WARN-suppression filter (entrypoint.sh:44). Checking every cell ensures a
+#    triggering condition is covered. NOTE: CONTAINER_STDERR is overwritten per
+#    run_container(), so for a warm cell this reflects only the last (warm) pass
+#    — acceptable here since both passes use the same mounts.
+if grep -q 'entrypoint: WARN' "${CONTAINER_STDERR}" 2>/dev/null; then
+  die "host-side: unexpected 'entrypoint: WARN' on container stderr"
 fi
+log "host-side PASS: no spurious entrypoint WARN on stderr"
 
 log "Cell PASS: ${CELL_DESC}"
