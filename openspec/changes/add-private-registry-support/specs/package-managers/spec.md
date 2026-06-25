@@ -3,23 +3,33 @@
 ### Requirement: Private registry passthrough via --registry
 
 `run.sh` SHALL provide a `--registry` opt-in flag that surfaces the host's
-native `uv` and `npm`/`pnpm` private-registry configuration into the container
-using the package managers' own discovery mechanisms, rather than any
-wrapper-specific configuration. When `--registry` is NOT passed, no registry
-configuration and no registry credentials SHALL reach the container, and the
-package managers SHALL fall back to their built-in public defaults (the npm
-registry and PyPI). The flag SHALL compose with all other flags and SHALL NOT
-require `--aws`.
+native `uv`, `npm`/`pnpm`, and pip-based (`pip`/`pipenv`) private-registry
+configuration into the container using the package managers' own discovery
+mechanisms, rather than any wrapper-specific configuration. When `--registry`
+is NOT passed, no registry configuration and no registry credentials SHALL
+reach the container, and the package managers SHALL fall back to their built-in
+public defaults (the npm registry and PyPI). The flag SHALL compose with all
+other flags and SHALL NOT require `--aws`.
+
+This requirement governs registry *configuration* only. The image SHALL NOT be
+required to ship `pip`, `pipenv`, or a Python runtime for this requirement to be
+met; the forwarded pip configuration applies to whatever pip executes inside the
+container (e.g. via `uvx pipenv` or a child image).
 
 When `--registry` is set, `run.sh`:
 
 - SHALL mount read-only, and only when present on the host (a missing file is a
   silent no-op), each of: `~/.npmrc` at `/root/.npmrc`, `~/.netrc` at
-  `/root/.netrc`, and `~/.config/uv/uv.toml` at `/root/.config/uv/uv.toml`.
+  `/root/.netrc`, `~/.config/uv/uv.toml` at `/root/.config/uv/uv.toml`, and the
+  platform-appropriate pip config — `~/.config/pip/pip.conf` on Linux or
+  `~/Library/Application Support/pip/pip.conf` on macOS — at
+  `/root/.config/pip/pip.conf`. The `~/.netrc` mount additionally serves as pip
+  and pipenv's native auth channel.
 - SHALL forward, only when set on the host, the native env vars
   `npm_config_registry`, `NPM_CONFIG_REGISTRY`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`,
   `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`,
-  `UV_NETRC`, and `UV_KEYRING_PROVIDER`.
+  `UV_NETRC`, `UV_KEYRING_PROVIDER`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`,
+  `PIP_TRUSTED_HOST`, and `PIPENV_PYPI_MIRROR`.
 - SHALL additionally forward every set host environment variable whose name
   matches `UV_INDEX_*_USERNAME` or `UV_INDEX_*_PASSWORD`, so uv's per-index
   credential variables (whose names derive from a user-chosen index name) reach
@@ -52,6 +62,15 @@ own native config.
 - **THEN** `/root/.npmrc` inside the container contains the host file's contents
 - **AND** `pnpm config get registry` returns the private registry URL
 - **AND** a write to `/root/.npmrc` from inside the container fails with EROFS
+
+#### Scenario: --registry mounts host pip config and forwards PIP_* env
+
+- **GIVEN** the host has a pip config (at its platform-appropriate user location) setting a private `index-url`, and exports `PIP_INDEX_URL`
+- **WHEN** the user runs `claude-docker --registry ~/repo`
+- **THEN** `/root/.config/pip/pip.conf` inside the container contains the host pip config
+- **AND** `echo $PIP_INDEX_URL` inside the container prints the host value
+- **AND** a pip-based install (e.g. via `uvx pipenv`) resolves against the private index
+- **AND** without `--registry`, `/root/.config/pip/pip.conf` is absent and `echo $PIP_INDEX_URL` is empty
 
 #### Scenario: --registry forwards uv index env vars including dynamic credential vars
 

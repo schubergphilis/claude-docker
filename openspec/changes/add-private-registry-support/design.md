@@ -16,10 +16,11 @@ move applied to package-manager registry config.
 
 **Goals:**
 
-- Make `uv` and `pnpm` resolve against a host-configured private registry from
-  inside the container, opt-in, matching the existing credential-flag pattern.
-- Stay as faithful as possible to native `uv`/`npm` behaviour — forward the
-  tools' own config channels rather than inventing wrapper config.
+- Make `uv`, `pnpm`, and pip-based tools (`pip`/`pipenv`) resolve against a
+  host-configured private registry from inside the container, opt-in, matching
+  the existing credential-flag pattern.
+- Stay as faithful as possible to native `uv`/`npm`/`pip` behaviour — forward
+  the tools' own config channels rather than inventing wrapper config.
 - No regression in the default (no-flag) posture: a user who does not pass
   `--registry` inherits no registry config and no registry credentials.
 
@@ -37,6 +38,9 @@ move applied to package-manager registry config.
 - Registry-specific support code. CodeArtifact, Artifactory, Nexus, etc. all
   speak the npm/PyPI dialect; the agnostic native-config passthrough covers
   them uniformly.
+- Bundling a Python runtime, `pip`, or `pipenv` in the base image. The image
+  deliberately ships no language runtime; `pip`/`pipenv` run via `uvx pipenv`
+  or a child image (see D8). This change forwards their registry *config* only.
 
 ## Decisions
 
@@ -63,10 +67,15 @@ managers the exact inputs they already read on the host:
   npm/pnpm channel.
 - uv is env-var-first (`UV_DEFAULT_INDEX` / `UV_INDEX_*`) and also reads
   `~/.netrc` and `~/.config/uv/uv.toml`.
+- pip reads `pip.conf` (platform-aware user location), the `PIP_*` env vars
+  (`PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` / `PIP_TRUSTED_HOST`), and `~/.netrc`
+  for auth. pipenv has its own `PIPENV_PYPI_MIRROR` override and otherwise
+  delegates resolution to pip, so the same channels cover it.
 
 So the wrapper mounts the files read-only and forwards the env vars — nothing
 invented, nothing translated. A host that already runs `aws codeartifact login`
-(which writes the token into `~/.npmrc`) works with zero extra steps.
+(which writes the token into `~/.npmrc` for npm and into `pip.conf` for pip)
+works with zero extra steps.
 
 **Alternatives considered:** Define `CLAUDE_DOCKER_NPM_REGISTRY` /
 `_NPM_TOKEN` / `_PYPI_INDEX` / … and materialise config inside the container.
@@ -112,7 +121,7 @@ configured (a curated allow-list rather than a proxying mirror), `uvx` /
 `pnpm dlx` of tooling that isn't mirrored will fail under that host config —
 because the host config locked resolution down, not because the wrapper did.
 
-### D6: No tmpfs masking for `--registry`
+### D6: No masking for `--registry`
 
 `--gh`/`--glab`/`--tfe` mask their persisted state when the flag is off because
 those tools support an in-container `login` that writes host-equivalent
@@ -128,12 +137,16 @@ session would otherwise inherit. `--registry` introduces no such vector:
 A user who manually runs `npm login` inside a no-flag session is acting on their
 own credentials, the same as any other state they write into the persistent
 volume — not a host-credential boundary crossing. So there is nothing for a
-mask to protect here, and the single-file target (`/root/.npmrc`) does not fit
-the directory-oriented `--tmpfs` mechanism the other masks use.
+mask to protect here. The decision rests solely on that absence, not on any
+claim about whether the target is a single file or a directory — masking a
+config *file* is feasible should a future credential-isolation need arise, so
+the door stays open. (Independent of masking, the read-only `~/.npmrc →
+/root/.npmrc` mount already shadows any pre-existing persisted copy, because a
+nested bind-mount takes precedence over the parent named-volume mount.)
 
 **Revisit if** real usage shows users relying on persisted in-container
-`npm login` across no-flag sessions — the likely fix is relocating npm's
-`userconfig` off the persisted volume rather than masking a file.
+`npm login` across no-flag sessions — the fix would be to mask the persisted
+config file or relocate npm's `userconfig` off the persisted volume.
 
 ### D7: Token freshness — freeze at launch, refresh by restart
 
@@ -141,6 +154,37 @@ A registry token captured at container start (notably a CodeArtifact token,
 ≤12h TTL) freezes for the life of the container. This matches the documented
 `--aws` SSO-cred behaviour: relaunch when it expires. No in-container refresh
 helper in v1.
+
+### D8: Forward pip/pipenv config, but do not bundle pip/pipenv
+
+The pip ecosystem matters for older projects (notably pipenv) that won't move to
+uv soon, and supporting it is the *same* native-passthrough move: mount the
+platform-aware `pip.conf` (`~/.config/pip/pip.conf` on Linux,
+`~/Library/Application Support/pip/pip.conf` on macOS) read-only at
+`/root/.config/pip/pip.conf`, and forward `PIP_INDEX_URL` /
+`PIP_EXTRA_INDEX_URL` / `PIP_TRUSTED_HOST` / `PIPENV_PYPI_MIRROR`. The `~/.netrc`
+mount already added for uv doubles as pip's and pipenv's native auth channel, so
+nothing new is needed there.
+
+What this change does **not** do is install `pip`/`pipenv` or a Python runtime.
+The image ships none by design (uv fetches its own Python; project runtimes live
+in child images). So `--registry` makes the *config* available; the tool runs
+via either:
+
+- **`uvx pipenv …`** — an ephemeral uv-managed env; pipenv shells out to pip,
+  which reads the forwarded `PIP_*` / `pip.conf` / `~/.netrc`. Zero extra image
+  content. (If the private feed has no public upstream, `pipenv` itself must be
+  mirrored there for `uvx` to fetch it — the D5 lock-down consequence, applied
+  to the bootstrap tool.)
+- **a child image** (`FROM claude-code:local` + Python + pipenv) — the existing
+  extension path; the forwarded config flows straight through.
+
+**Alternatives considered:** bundle Python + pip + pipenv in the base image.
+Rejected — it contradicts the established "no language runtimes in the base"
+principle, bloats the image for one ecosystem, and forces a Python-version
+choice that would drift against real projects exactly as a bundled terraform
+would (the same reasoning that put `tfenv`, not a `terraform` binary, in the
+image).
 
 ## Risks / Trade-offs
 
@@ -179,3 +223,16 @@ side-effect free outside its own opt-in path.
   on the host and injects the result, for the common CodeArtifact case? Kept out
   of v1 to preserve registry-agnosticism; a documented host-side recipe covers
   it for now.
+- Should the *image build* be able to resolve its own npm tooling
+  (claude-code/openspec/pnpm) and any future Python tooling through a private
+  registry — e.g. for an air-gapped or mirror-mandated build environment?
+  Deliberately **out of scope** here: `--registry` is a runtime concern, whereas
+  build-time resolution is a separate provenance/supply-chain question. The
+  current build is isolated from host registry config (host `~/.npmrc` is not in
+  the build context; host env is not inherited by `RUN` steps), which is what
+  makes it "reproducible from the committed files." Wiring a build-time private
+  registry would interact with the existing version-pin + `dist.integrity` +
+  `npm audit signatures` hardening (does the mirror preserve those guarantees?),
+  so it warrants its own proposal rather than riding along here. Mechanically it
+  is additive later (a build `ARG` + conditional `ENV npm_config_registry`), so
+  nothing in this change forecloses it.
