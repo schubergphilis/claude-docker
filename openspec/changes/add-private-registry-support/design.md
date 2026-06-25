@@ -46,9 +46,10 @@ move applied to package-manager registry config.
 
 ### D1: Opt-in `--registry` flag, not always-on
 
-`~/.npmrc` / `~/.netrc` routinely carry long-lived auth tokens. Mounting them
+`~/.npmrc` and `pip.conf` routinely carry long-lived auth tokens. Mounting them
 is the same exposure class as `--gh`/`--glab`, so it must be default-deny and
-explicit, consistent with every other credential surface in the wrapper.
+explicit, consistent with every other credential surface in the wrapper. (`~/.netrc`
+is excluded entirely — see D9.)
 
 **Alternatives considered:** Always mount `~/.npmrc` when present. Rejected —
 silently shipping registry tokens into a sandbox the user did not opt into
@@ -65,12 +66,16 @@ managers the exact inputs they already read on the host:
   host (`//host/:_authToken`), a name containing `/` and `:` that cannot be a
   normal shell variable — which is exactly why the file, not an env var, is the
   npm/pnpm channel.
-- uv is env-var-first (`UV_DEFAULT_INDEX` / `UV_INDEX_*`) and also reads
-  `~/.netrc` and `~/.config/uv/uv.toml`.
-- pip reads `pip.conf` (platform-aware user location), the `PIP_*` env vars
-  (`PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` / `PIP_TRUSTED_HOST`), and `~/.netrc`
-  for auth. pipenv has its own `PIPENV_PYPI_MIRROR` override and otherwise
-  delegates resolution to pip, so the same channels cover it.
+- uv is env-var-first (`UV_DEFAULT_INDEX` / `UV_INDEX_*`, incl. per-index
+  `UV_INDEX_<NAME>_USERNAME` / `_PASSWORD`) and also reads `~/.config/uv/uv.toml`.
+- pip reads `pip.conf` (platform-aware user location) and the `PIP_*` env vars
+  (`PIP_INDEX_URL` / `PIP_EXTRA_INDEX_URL` / `PIP_TRUSTED_HOST`). pipenv has its
+  own `PIPENV_PYPI_MIRROR` override and otherwise delegates resolution to pip,
+  so the same channels cover it.
+
+`~/.netrc` is a native auth channel for all three, but is deliberately not
+forwarded (see D9) — registry auth is expected to live in the registry-specific
+config (`~/.npmrc` / `pip.conf`), the index URL, or `UV_INDEX_*_PASSWORD`.
 
 So the wrapper mounts the files read-only and forwards the env vars — nothing
 invented, nothing translated. A host that already runs `aws codeartifact login`
@@ -104,7 +109,9 @@ purpose: a host `UV_CACHE_DIR=/Users/you/...` (or similar path-valued uv var)
 would point at a path that does not exist in the container and break installs.
 Only the index/auth-relevant vars are forwarded; the rest of uv's static index
 vars are an explicit allow-list (`UV_INDEX_URL`, `UV_DEFAULT_INDEX`,
-`UV_EXTRA_INDEX_URL`, `UV_INDEX`, `UV_NETRC`, `UV_KEYRING_PROVIDER`).
+`UV_EXTRA_INDEX_URL`, `UV_INDEX`, `UV_KEYRING_PROVIDER`). `UV_NETRC` is
+deliberately excluded from the list — it points uv at a netrc file we no longer
+mount (see D9), so forwarding it would only dangle at an absent host path.
 
 ### D5: Resolution policy is the host config's job — no wrapper lockdown flag
 
@@ -162,9 +169,9 @@ uv soon, and supporting it is the *same* native-passthrough move: mount the
 platform-aware `pip.conf` (`~/.config/pip/pip.conf` on Linux,
 `~/Library/Application Support/pip/pip.conf` on macOS) read-only at
 `/root/.config/pip/pip.conf`, and forward `PIP_INDEX_URL` /
-`PIP_EXTRA_INDEX_URL` / `PIP_TRUSTED_HOST` / `PIPENV_PYPI_MIRROR`. The `~/.netrc`
-mount already added for uv doubles as pip's and pipenv's native auth channel, so
-nothing new is needed there.
+`PIP_EXTRA_INDEX_URL` / `PIP_TRUSTED_HOST` / `PIPENV_PYPI_MIRROR`. (netrc would
+be pip/pipenv's other native auth channel, but it is not mounted — see D9;
+registry auth belongs in `pip.conf` or the index URL.)
 
 What this change does **not** do is install `pip`/`pipenv` or a Python runtime.
 The image ships none by design (uv fetches its own Python; project runtimes live
@@ -172,7 +179,7 @@ in child images). So `--registry` makes the *config* available; the tool runs
 via either:
 
 - **`uvx pipenv …`** — an ephemeral uv-managed env; pipenv shells out to pip,
-  which reads the forwarded `PIP_*` / `pip.conf` / `~/.netrc`. Zero extra image
+  which reads the forwarded `PIP_*` / `pip.conf`. Zero extra image
   content. (If the private feed has no public upstream, `pipenv` itself must be
   mirrored there for `uvx` to fetch it — the D5 lock-down consequence, applied
   to the bootstrap tool.)
@@ -186,14 +193,42 @@ choice that would drift against real projects exactly as a bundled terraform
 would (the same reasoning that put `tfenv`, not a `terraform` binary, in the
 image).
 
+### D9: Do not mount `~/.netrc`
+
+`~/.netrc` is a native auth channel for uv, pip, and pipenv, so the obvious move
+is to mount it alongside the registry config files. We deliberately do **not**.
+netrc is a *machine-keyed* credential store: a single file holding logins for
+arbitrary hosts (git remotes, FTP, internal services, any netrc-aware tool).
+Forwarding the whole file into a `--yolo`-capable, full-egress container hands
+the agent credentials for hosts that have nothing to do with the package feed —
+a much broader surface than a flag named `--registry` implies.
+
+Consequently `run.sh` mounts neither `~/.netrc` nor forwards `UV_NETRC` (which
+would only point uv at the now-absent file). Registry auth is expected to live
+in the registry-specific config the flag *does* surface — `~/.npmrc` /
+`pip.conf` (where `aws codeartifact login` writes it), the index URL, or
+`UV_INDEX_*_PASSWORD`.
+
+**Alternatives considered:**
+- *Mount `~/.netrc` with a documented caution* (the original v1). Rejected on
+  review — documentation doesn't shrink the blast radius, and an unscoped netrc
+  is the kind of thing prompt injection under `--yolo` would target.
+- *Gate netrc behind a separate `--registry-netrc` opt-in.* Reasonable, but adds
+  flag surface for a channel that the dominant CodeArtifact flow doesn't use
+  (its tokens land in `~/.npmrc` / `pip.conf`, not netrc). Dropping it outright
+  is simpler and loses little.
+- *Per-line filtering into a derived registry-only netrc.* The precise fix, but
+  the most complex (parse netrc, stage a filtered copy). Deferred as the future
+  escalation if a real netrc-only auth workflow appears.
+
 ## Risks / Trade-offs
 
-- **Risk:** `~/.npmrc` / `~/.netrc` may carry tokens for registries beyond the
-  one the user has in mind (both files are multi-entry).
-  → **Mitigation:** Document the exposure in the opt-in table and threat model;
-  read-only mount; default-deny without the flag. Users who want isolation can
-  scope their host files. Same trade-off already accepted for `--tfe`'s
-  multi-host credentials file.
+- **Risk:** `~/.npmrc` / `pip.conf` may carry tokens for registries beyond the
+  one the user has in mind (both are multi-entry, whole-file mounts).
+  → **Mitigation:** Document the exposure in the opt-in table and threat model
+  (the ⚠️ caution in README § Private package registries); read-only mount;
+  default-deny without the flag. Users who want isolation can scope those files.
+  `~/.netrc` — the worst over-share — is not mounted at all (D9).
 
 - **Risk:** A templated `~/.npmrc` (`_authToken=${SOME_VAR}`) needs the
   referenced env var forwarded too; arbitrary names won't be caught by the

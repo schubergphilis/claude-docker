@@ -46,10 +46,12 @@ Wrapper flags:
   --registry          Opt in to private package registries: surface host-
                       native uv/npm/pnpm/pip config so in-container installs
                       resolve against a private feed. Mounts ~/.npmrc,
-                      ~/.netrc, ~/.config/uv/uv.toml, and pip.conf (:ro) when
-                      present and forwards UV_INDEX_* / npm_config_registry /
-                      PIP_* env when set. Runtime only; the image build is
-                      unaffected.
+                      ~/.config/uv/uv.toml, and pip.conf (:ro) when present and
+                      forwards UV_INDEX_* / npm_config_registry / PIP_* env
+                      when set. Runtime only; the image build is unaffected.
+                      ~/.netrc is NOT mounted (too broad — see README); npmrc
+                      and pip.conf are whole-file mounts, so scope them to the
+                      registry. See README "Private package registries".
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -196,13 +198,21 @@ fi
 # Private package registries: surface the host's native uv/npm/pnpm/pip registry
 # config read-only so in-container installs resolve against a private feed
 # (CodeArtifact / Artifactory / Nexus / …). Each mount is a silent no-op when the
-# host file is absent. ~/.netrc is the shared auth channel for uv, pip, and
-# pipenv. The pip user config dir is platform-specific (macOS keeps it under
-# Application Support, Linux under XDG ~/.config); both map to the container's
-# Linux path /root/.config/pip/pip.conf. Read-only, like every other cred mount.
+# host file is absent. The pip user config dir is platform-specific (macOS keeps
+# it under Application Support, Linux under XDG ~/.config); both map to the
+# container's Linux path /root/.config/pip/pip.conf. Read-only, like every other
+# cred mount. NOTE: ~/.netrc is deliberately NOT mounted — it is a machine-keyed
+# store that routinely holds credentials for hosts unrelated to the registry, so
+# forwarding the whole file into a full-egress container is too broad. Use
+# registry auth that lives in npmrc/pip.conf, the URL, or UV_INDEX_*_PASSWORD.
 if [ "$WITH_REGISTRY" = "1" ]; then
-  [ -f "$HOME/.npmrc" ]             && MOUNT_ARGS+=("-v" "$HOME/.npmrc:/root/.npmrc:ro")
-  [ -f "$HOME/.netrc" ]             && MOUNT_ARGS+=("-v" "$HOME/.netrc:/root/.netrc:ro")
+  # npm/pnpm read ~/.npmrc by default, but honour a relocated userconfig
+  # (npm_config_userconfig / NPM_CONFIG_USERCONFIG) so a host that moved its
+  # npmrc doesn't silently fall through to the public registry. Whatever the
+  # host source, mount it at the container's default /root/.npmrc — and we do
+  # NOT forward npm_config_userconfig, so the in-container npm keeps that path.
+  npmrc_src="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}}"
+  [ -f "$npmrc_src" ]               && MOUNT_ARGS+=("-v" "$npmrc_src:/root/.npmrc:ro")
   [ -f "$HOME/.config/uv/uv.toml" ] && MOUNT_ARGS+=("-v" "$HOME/.config/uv/uv.toml:/root/.config/uv/uv.toml:ro")
   pip_conf=""
   if [ -f "$HOME/Library/Application Support/pip/pip.conf" ]; then
@@ -221,7 +231,9 @@ ENV_VARS=()
 # --registry: forward the native registry-config env vars uv/npm/pnpm/pip read.
 # Static, fixed-name vars here; uv's dynamic per-index credential vars (whose
 # names embed a user-chosen index name) are handled by the scan below.
-[ "$WITH_REGISTRY" = "1" ] && ENV_VARS+=(npm_config_registry NPM_CONFIG_REGISTRY NODE_AUTH_TOKEN NPM_TOKEN UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX UV_NETRC UV_KEYRING_PROVIDER PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIPENV_PYPI_MIRROR)
+# UV_NETRC is intentionally omitted: it points uv at a netrc file we no longer
+# mount, so forwarding it would dangle at a host path absent in the container.
+[ "$WITH_REGISTRY" = "1" ] && ENV_VARS+=(npm_config_registry NPM_CONFIG_REGISTRY NODE_AUTH_TOKEN NPM_TOKEN UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX UV_KEYRING_PROVIDER PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIPENV_PYPI_MIRROR)
 # Guarded: bash 3.2 under `set -u` errors on empty-array expansion.
 if [ "${#ENV_VARS[@]}" -gt 0 ]; then
   for v in "${ENV_VARS[@]}"; do

@@ -10,9 +10,9 @@ URLs and tokens into the container by hand each session.
 
 The image already ships `uv`, `uvx`, `pnpm`, and `pnpx`, and every ecosystem
 already knows how to talk to a private registry through its own native
-configuration — `~/.npmrc` for npm/pnpm; `UV_INDEX_*` env vars + `~/.netrc` for
-uv; `pip.conf` + `PIP_*` env vars + `~/.netrc` for pip, with pipenv delegating
-to pip. The missing piece is purely a wrapper concern: surfacing that host-side
+configuration — `~/.npmrc` for npm/pnpm; `UV_INDEX_*` env vars for uv;
+`pip.conf` + `PIP_*` env vars for pip, with pipenv delegating to pip. The
+missing piece is purely a wrapper concern: surfacing that host-side
 native config into the container under an explicit opt-in, the same way
 `--aws` / `--gh` / `--glab` / `--tfe` already surface other host credentials.
 (The image ships no Python runtime, so `pip`/`pipenv` themselves run via
@@ -27,17 +27,21 @@ through to whichever pip executes.)
   container; the package managers use their public defaults. Same explicit-
   consent posture as the existing credential flags.
 - **Mount native config files read-only** when present on the host (silent
-  no-op otherwise): `~/.npmrc` → `/root/.npmrc`, `~/.netrc` → `/root/.netrc`,
-  `~/.config/uv/uv.toml` → `/root/.config/uv/uv.toml`, and the platform-aware
-  pip config — `~/.config/pip/pip.conf` (Linux) or
+  no-op otherwise): the host npm config (`~/.npmrc`, or the `npm_config_userconfig`
+  target when relocated) → `/root/.npmrc`, `~/.config/uv/uv.toml` →
+  `/root/.config/uv/uv.toml`, and the platform-aware pip config —
+  `~/.config/pip/pip.conf` (Linux) or
   `~/Library/Application Support/pip/pip.conf` (macOS) → `/root/.config/pip/pip.conf`.
-  (`~/.netrc`, already mounted for uv, is also pip's and pipenv's native auth
-  channel, so it is shared, not duplicated.)
+  **`~/.netrc` is deliberately NOT mounted** — as a machine-keyed store of
+  credentials for arbitrary unrelated hosts it is too broad to forward whole;
+  registry auth belongs in `~/.npmrc` / `pip.conf` / the index URL /
+  `UV_INDEX_*_PASSWORD`.
 - **Forward native env vars** when set on the host: `npm_config_registry`,
   `NPM_CONFIG_REGISTRY`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`, `UV_INDEX_URL`,
-  `UV_DEFAULT_INDEX`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`, `UV_NETRC`,
+  `UV_DEFAULT_INDEX`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`,
   `UV_KEYRING_PROVIDER`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`,
-  `PIP_TRUSTED_HOST`, `PIPENV_PYPI_MIRROR` — plus every host variable matching
+  `PIP_TRUSTED_HOST`, `PIPENV_PYPI_MIRROR` (not `UV_NETRC` — its netrc target
+  isn't mounted) — plus every host variable matching
   `UV_INDEX_*_USERNAME` / `UV_INDEX_*_PASSWORD` (uv derives these names from a
   user-chosen index name, so they can't be enumerated by a fixed list).
 - **Surface the opt-in in the statusline** by appending `registry` to the
@@ -82,11 +86,12 @@ introducing a new one.
 
 ## Impact
 
-- **Code**: `claude-docker/run.sh` (parse `--registry`; mount `~/.npmrc` /
-  `~/.netrc` / `~/.config/uv/uv.toml` and the platform-aware pip config
-  read-only when present; forward the static native env vars — npm, uv, and
-  `PIP_*` / `PIPENV_PYPI_MIRROR` — and the dynamic `UV_INDEX_*_USERNAME/_PASSWORD`
-  vars; append `registry` to the statusline tag; add a `--help` row).
+- **Code**: `claude-docker/run.sh` (parse `--registry`; mount the host npm
+  config / `~/.config/uv/uv.toml` and the platform-aware pip config read-only
+  when present — `~/.netrc` deliberately excluded; forward the static native env
+  vars — npm, uv, and `PIP_*` / `PIPENV_PYPI_MIRROR` — and the dynamic
+  `UV_INDEX_*_USERNAME/_PASSWORD` vars; append `registry` to the statusline tag;
+  add a `--help` row).
 - **Docs**: `claude-docker/README.md` (opt-in table row, auth-model entry,
   usage section with the CodeArtifact recipe, threat-model note).
 - **Specs**: one delta to `package-managers`.

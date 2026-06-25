@@ -19,17 +19,23 @@ container (e.g. via `uvx pipenv` or a child image).
 When `--registry` is set, `run.sh`:
 
 - SHALL mount read-only, and only when present on the host (a missing file is a
-  silent no-op), each of: `~/.npmrc` at `/root/.npmrc`, `~/.netrc` at
-  `/root/.netrc`, `~/.config/uv/uv.toml` at `/root/.config/uv/uv.toml`, and the
+  silent no-op), each of: the host npm config (`~/.npmrc`, or the file named by
+  `npm_config_userconfig` / `NPM_CONFIG_USERCONFIG` when set) at `/root/.npmrc`,
+  `~/.config/uv/uv.toml` at `/root/.config/uv/uv.toml`, and the
   platform-appropriate pip config — `~/.config/pip/pip.conf` on Linux or
   `~/Library/Application Support/pip/pip.conf` on macOS — at
-  `/root/.config/pip/pip.conf`. The `~/.netrc` mount additionally serves as pip
-  and pipenv's native auth channel.
+  `/root/.config/pip/pip.conf`.
+- SHALL NOT mount `~/.netrc`. Because netrc is a machine-keyed store that
+  commonly holds credentials for hosts unrelated to the package registry,
+  forwarding the whole file into a full-egress container is too broad; netrc-
+  based registry auth is intentionally not supported by this flag (registry
+  auth belongs in npmrc/pip.conf, the index URL, or `UV_INDEX_*_PASSWORD`).
 - SHALL forward, only when set on the host, the native env vars
   `npm_config_registry`, `NPM_CONFIG_REGISTRY`, `NODE_AUTH_TOKEN`, `NPM_TOKEN`,
   `UV_INDEX_URL`, `UV_DEFAULT_INDEX`, `UV_EXTRA_INDEX_URL`, `UV_INDEX`,
-  `UV_NETRC`, `UV_KEYRING_PROVIDER`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`,
-  `PIP_TRUSTED_HOST`, and `PIPENV_PYPI_MIRROR`.
+  `UV_KEYRING_PROVIDER`, `PIP_INDEX_URL`, `PIP_EXTRA_INDEX_URL`,
+  `PIP_TRUSTED_HOST`, and `PIPENV_PYPI_MIRROR`. It SHALL NOT forward `UV_NETRC`
+  (it points uv at a netrc file that is no longer mounted).
 - SHALL additionally forward every set host environment variable whose name
   matches `UV_INDEX_*_USERNAME` or `UV_INDEX_*_PASSWORD`, so uv's per-index
   credential variables (whose names derive from a user-chosen index name) reach
