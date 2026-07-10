@@ -7,6 +7,9 @@
 #   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe), or empty
 #   WORKSPACE         path to the bind-mounted workspace inside the container
 #   EXPECT_RO         1 = workspace is :ro (skip write probe, only test entrypoint startup)
+#   EXPECT_SETTINGS   1 = a settings fixture was mounted at the seed path; assert the
+#                     entrypoint copied it to /root/.claude/settings.json and the copy
+#                     is atomically replaceable. 0 = no seed; assert nothing was seeded.
 # Accumulates per-check PASS/FAIL and exits non-zero at the end if any failed
 # (so one regression doesn't hide the rest of the report).
 set -euo pipefail
@@ -296,7 +299,51 @@ check_credentials() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Robustness — entrypoint reached here, so it did not abort
+# 5. Seeded settings — must be a writable copy, not a mount
+# ---------------------------------------------------------------------------
+
+check_settings() {
+  local settings="/root/.claude/settings.json"
+
+  if [ "${EXPECT_SETTINGS:-0}" != "1" ]; then
+    # No seed mounted: the entrypoint must start cleanly without creating one.
+    # (Anything a previous run persisted in a warm volume would be left as-is,
+    # but the no-seed cell runs on fresh volumes, so absence is asserted.)
+    if [ -e "$settings" ]; then
+      fail "settings-absent: $settings exists but no seed was mounted"
+    else
+      pass "settings-absent: no settings file without a seed"
+    fi
+    return
+  fi
+
+  if [ ! -f "$settings" ]; then
+    fail "settings-seeded: $settings missing (entrypoint seed copy did not run)"
+    return
+  fi
+  pass "settings-seeded: $settings exists"
+
+  # Content must come from OUR fixture, not some other file.
+  if grep -q "SMOKE-SENTINEL-SETTINGS" "$settings" 2>/dev/null; then
+    pass "settings-content: seeded copy carries the smoke sentinel"
+  else
+    fail "settings-content: SMOKE-SENTINEL-SETTINGS not found in $settings"
+  fi
+
+  # The reason settings are copied instead of bind-mounted: Claude Code saves
+  # settings by renaming a tmp file over settings.json, and rename() over a
+  # mountpoint fails with EBUSY. Prove the rename path works.
+  local tmp="${settings}.tmp.smoke"
+  if cp "$settings" "$tmp" 2>/dev/null && mv "$tmp" "$settings" 2>/dev/null; then
+    pass "settings-rename: tmp-file rename over settings.json succeeds"
+  else
+    rm -f "$tmp"
+    fail "settings-rename: cannot atomically replace $settings (mountpoint or ownership regression)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 6. Robustness — entrypoint reached here, so it did not abort
 # ---------------------------------------------------------------------------
 
 check_entrypoint_reached() {
@@ -315,6 +362,7 @@ check_identity
 check_security
 check_workspace_write
 check_credentials
+check_settings
 
 echo "==="
 echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"

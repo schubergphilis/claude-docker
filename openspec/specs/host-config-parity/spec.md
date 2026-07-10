@@ -55,25 +55,33 @@ Host `hooks/` and the `hooks` settings key are intentionally NOT carried over �
 
 ### Requirement: Container-specific settings file
 
-When `$CLAUDE_CONFIG_DIR/settings.docker.json` exists, `run.sh` SHALL bind-mount it read-only at `/root/.claude/settings.json`. When absent, no host-derived settings file is mounted and Claude uses its built-in defaults. The regular `settings.json` is never forwarded automatically — users maintain `settings.docker.json` explicitly to prevent silent drift between host and container behaviour.
+When `$CLAUDE_CONFIG_DIR/settings.docker.json` exists, `run.sh` SHALL bind-mount it read-only at the seed path `/run/claude-docker/settings.json`, and `entrypoint.sh` SHALL copy the seed to `/root/.claude/settings.json` at container start. The container-side `settings.json` MUST be a regular file, not a mountpoint: Claude Code persists settings by renaming a tmp file over `settings.json`, and `rename()` over a mountpoint fails with `EBUSY`, which would break every in-session settings change. In-session changes therefore save successfully, last for that container run, and are overwritten from the host file on the next start; nothing is ever written back to the host. When absent, no settings file is seeded and any `settings.json` already in the persistent home volume is left as-is. The regular `settings.json` is never forwarded automatically — users maintain `settings.docker.json` explicitly to prevent silent drift between host and container behaviour.
 
 #### Scenario: Container uses dedicated settings file
 
 - **GIVEN** `~/.claude/settings.docker.json` contains `{"effortLevel": "high"}`
 - **WHEN** user runs `claude-docker`
-- **THEN** `/root/.claude/settings.json` in the container is that file
+- **THEN** `/root/.claude/settings.json` in the container is a writable copy of that file
+
+#### Scenario: In-session settings change saves without EBUSY
+
+- **GIVEN** the container started with a seeded `/root/.claude/settings.json`
+- **WHEN** Claude Code renames a tmp file over `/root/.claude/settings.json` (e.g. the user changes effort or model in-session)
+- **THEN** the rename succeeds and the change applies for the rest of the run
+- **AND** the host `settings.docker.json` is unchanged
+- **AND** the next container start re-seeds `settings.json` from the host file
 
 #### Scenario: Alternate config dir with settings.docker.json
 
 - **GIVEN** `~/.claude-anthropic/settings.docker.json` exists
 - **WHEN** user runs `claude-docker --claude-dir=~/.claude-anthropic ~/repo`
-- **THEN** `/root/.claude/settings.json` in the container is `~/.claude-anthropic/settings.docker.json`
+- **THEN** `/root/.claude/settings.json` in the container is a copy of `~/.claude-anthropic/settings.docker.json`
 
 #### Scenario: No settings file
 
 - **GIVEN** `settings.docker.json` does not exist in the config dir
 - **WHEN** user runs `claude-docker`
-- **THEN** the container starts without a host-derived `settings.json` and Claude uses defaults
+- **THEN** the container starts without a host-derived `settings.json` seed and Claude uses defaults (or whatever a previous run persisted in the home volume)
 
 ### Requirement: IS_SANDBOX env for root + dangerous-skip-permissions
 

@@ -8,6 +8,26 @@ set -euo pipefail
 HOST_UID="${HOST_UID:-0}"
 HOST_GID="${HOST_GID:-0}"
 
+# Seed /root/.claude/settings.json from the host settings.docker.json that
+# run.sh forwards at the seed path. A copy, not a bind mount at the real path:
+# Claude Code persists settings by renaming a tmp file over settings.json, and
+# rename() over a mountpoint fails with EBUSY — a direct single-file mount
+# breaks every in-session settings change. The copy lives on the container
+# filesystem, so those writes work; they last for this run only and are
+# overwritten from the host file on the next start.
+# Ownership dance: on a warm volume the dir/file are HOST_UID-owned from a
+# prior run's chown walk, and container root has no CAP_DAC_OVERRIDE — take
+# ownership (CAP_CHOWN) before writing; the chown walk below hands everything
+# back to HOST_UID. rm+cp instead of cp -f for the same reason: overwriting a
+# HOST_UID-owned 0600 file in place would be denied.
+if [ -f /run/claude-docker/settings.json ]; then
+mkdir -p /root/.claude
+chown root /root/.claude
+rm -f /root/.claude/settings.json
+cp /run/claude-docker/settings.json /root/.claude/settings.json
+chmod 600 /root/.claude/settings.json
+fi
+
 if [ "$HOST_UID" = 0 ]; then
 exec "$@"
 fi

@@ -9,6 +9,10 @@
 #   --volstate=S    cold|warm — cold=fresh volume, warm=run twice reusing a volume
 #   --ro=0|1        1 = mount workspace :ro (robustness cell)
 #   --ephemeral=0|1 1 = skip named volumes (--ephemeral mode)
+#   --settings=0|1  1 = mount a settings.docker.json fixture at the seed path
+#                   (entrypoint copies it to /root/.claude/settings.json);
+#                   0 = no seed, asserts the entrypoint copes without one
+#                   (default: 1)
 #   --image=TAG     Docker image to run (default: claude-code:local)
 #   IMAGE=TAG       env var override for --image (checked if --image absent)
 #
@@ -23,6 +27,7 @@ OPTINS=""
 VOLSTATE="cold"
 RO="0"
 EPHEMERAL="0"
+SETTINGS="1"
 IMAGE="${IMAGE:-claude-code:local}"
 
 # ---------------------------------------------------------------------------
@@ -37,6 +42,7 @@ for arg in "$@"; do
     --volstate=*)  VOLSTATE="${arg#--volstate=}" ;;
     --ro=*)        RO="${arg#--ro=}" ;;
     --ephemeral=*) EPHEMERAL="${arg#--ephemeral=}" ;;
+    --settings=*)  SETTINGS="${arg#--settings=}" ;;
     --image=*)     IMAGE="${arg#--image=}" ;;
     *) echo "smoke.sh: unknown argument '$arg'" >&2; exit 1 ;;
   esac
@@ -119,6 +125,7 @@ ENV_ARGS=(
   "-e" "EXPECT_GID=${HOST_GID_ARG}"
   "-e" "EXPECT_OPTINS=${OPTINS}"
   "-e" "EXPECT_RO=${RO}"
+  "-e" "EXPECT_SETTINGS=${SETTINGS}"
   "-e" "WORKSPACE=${CONTAINER_WORKSPACE}"
 )
 
@@ -128,6 +135,18 @@ WS_SUFFIX=""
 MOUNT_ARGS=(
   "-v" "${WORKSPACE_HOST}:${CONTAINER_WORKSPACE}${WS_SUFFIX}"
 )
+
+# Settings fixture — mirrors run.sh's settings.docker.json forwarding: mounted
+# :ro at the seed path, entrypoint copies it to /root/.claude/settings.json.
+# The sentinel proves the seeded copy came from OUR fixture; the in-container
+# check also renames a tmp file over the copy — the regression that motivated
+# the seed-copy design (rename() over a single-file bind mount → EBUSY).
+if [ "${SETTINGS}" = "1" ]; then
+  printf '{"env":{"SMOKE_SENTINEL":"SMOKE-SENTINEL-SETTINGS"}}\n' > "${TMPROOT}/settings.docker.json"
+  MOUNT_ARGS+=(
+    "-v" "${TMPROOT}/settings.docker.json:/run/claude-docker/settings.json:ro"
+  )
+fi
 
 # ---------------------------------------------------------------------------
 # Credential opt-in mounts (mirror run.sh mount targets)
@@ -246,7 +265,7 @@ run_container() {
 # Execute
 # ---------------------------------------------------------------------------
 
-CELL_DESC="uid=${HOST_UID_ARG} gid=${HOST_GID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL}"
+CELL_DESC="uid=${HOST_UID_ARG} gid=${HOST_GID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL} settings=${SETTINGS}"
 log "Cell: ${CELL_DESC}"
 log "Image: ${IMAGE}"
 
