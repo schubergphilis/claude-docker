@@ -12,7 +12,10 @@
 #   --settings=0|1  1 = mount a settings.docker.json fixture at the seed path
 #                   (entrypoint copies it to /root/.claude/settings.json);
 #                   0 = no seed, asserts the entrypoint copes without one
-#                   (default: 1)
+#                   (default: 1). With --volstate=warm, the warm pass reruns
+#                   against a rewritten fixture (V2 sentinel) to prove the
+#                   entrypoint re-seeds, then a final no-seed pass proves a
+#                   persisted settings.json is left as-is.
 #   --image=TAG     Docker image to run (default: claude-code:local)
 #   IMAGE=TAG       env var override for --image (checked if --image absent)
 #
@@ -117,7 +120,8 @@ SECURITY_ARGS=(
   "--cap-add" "DAC_READ_SEARCH"
 )
 
-# Core env.
+# Core env. EXPECT_SETTINGS / EXPECT_SETTINGS_SENTINEL are injected per pass
+# in run_container — the warm cell varies them between passes.
 ENV_ARGS=(
   "-e" "HOST_UID=${HOST_UID_ARG}"
   "-e" "HOST_GID=${HOST_GID_ARG}"
@@ -125,7 +129,6 @@ ENV_ARGS=(
   "-e" "EXPECT_GID=${HOST_GID_ARG}"
   "-e" "EXPECT_OPTINS=${OPTINS}"
   "-e" "EXPECT_RO=${RO}"
-  "-e" "EXPECT_SETTINGS=${SETTINGS}"
   "-e" "WORKSPACE=${CONTAINER_WORKSPACE}"
 )
 
@@ -141,10 +144,17 @@ MOUNT_ARGS=(
 # The sentinel proves the seeded copy came from OUR fixture; the in-container
 # check also renames a tmp file over the copy — the regression that motivated
 # the seed-copy design (rename() over a single-file bind mount → EBUSY).
+# These three are mutable across warm-cell passes (see the warm branch below),
+# so the mount lives in its own array and run_container reads the current
+# values instead of baking them into ENV_ARGS.
+SETTINGS_FIXTURE="${TMPROOT}/settings.docker.json"
+SETTINGS_SENTINEL="SMOKE-SENTINEL-SETTINGS"
+EXPECT_SETTINGS_MODE="${SETTINGS}"
+SETTINGS_MOUNT_ARGS=()
 if [ "${SETTINGS}" = "1" ]; then
-  printf '{"env":{"SMOKE_SENTINEL":"SMOKE-SENTINEL-SETTINGS"}}\n' > "${TMPROOT}/settings.docker.json"
-  MOUNT_ARGS+=(
-    "-v" "${TMPROOT}/settings.docker.json:/run/claude-docker/settings.json:ro"
+  printf '{"env":{"SMOKE_SENTINEL":"%s"}}\n' "${SETTINGS_SENTINEL}" > "${SETTINGS_FIXTURE}"
+  SETTINGS_MOUNT_ARGS=(
+    "-v" "${SETTINGS_FIXTURE}:/run/claude-docker/settings.json:ro"
   )
 fi
 
@@ -252,7 +262,10 @@ run_container() {
     "${SECURITY_ARGS[@]}" \
     "${VOLUME_ARGS[@]+"${VOLUME_ARGS[@]}"}" \
     "${MOUNT_ARGS[@]}" \
+    "${SETTINGS_MOUNT_ARGS[@]+"${SETTINGS_MOUNT_ARGS[@]}"}" \
     "${ENV_ARGS[@]}" \
+    -e "EXPECT_SETTINGS=${EXPECT_SETTINGS_MODE}" \
+    -e "EXPECT_SETTINGS_SENTINEL=${SETTINGS_SENTINEL}" \
     "${IMAGE}" \
     "${CONTAINER_ASSERT}" \
     2>"${CONTAINER_STDERR}" || rc=$?
@@ -273,8 +286,29 @@ if [ "${VOLSTATE}" = "warm" ]; then
   # First run: cold — populates the named volume.
   log "Warm cell: running cold pass first..."
   run_container
+  if [ "${SETTINGS}" = "1" ]; then
+    # Rewrite the fixture IN PLACE with a second sentinel (truncate keeps the
+    # inode, so the :ro bind mount sees the new content). The warm pass must
+    # find V2, proving the entrypoint RE-SEEDED — overwrote the copy pass 1
+    # left in the volume — which is the spec's "next container start re-seeds
+    # settings.json from the host file" contract. Rerunning with the same
+    # content would let a `[ -f ] || cp` re-implementation pass on pass 1's
+    # leftovers.
+    SETTINGS_SENTINEL="SMOKE-SENTINEL-SETTINGS-V2"
+    printf '{"env":{"SMOKE_SENTINEL":"%s"}}\n' "${SETTINGS_SENTINEL}" > "${SETTINGS_FIXTURE}"
+  fi
   log "Warm cell: cold pass done; running warm pass..."
   run_container
+  if [ "${SETTINGS}" = "1" ]; then
+    # Final pass with NO seed mounted: a warm volume holding a previously
+    # persisted settings.json must be left as-is (spec: "No settings file" —
+    # "whatever a previous run persisted in the home volume"). The V2
+    # sentinel from the warm pass must survive untouched.
+    SETTINGS_MOUNT_ARGS=()
+    EXPECT_SETTINGS_MODE="keep"
+    log "Warm cell: warm pass done; running no-seed pass (persisted settings kept)..."
+    run_container
+  fi
 else
   run_container
 fi
@@ -319,8 +353,9 @@ fi
 #    (--aws/--glab/--tfe), so the opt-in cells are what actually pin the
 #    WARN-suppression filter (entrypoint.sh:44). Checking every cell ensures a
 #    triggering condition is covered. NOTE: CONTAINER_STDERR is overwritten per
-#    run_container(), so for a warm cell this reflects only the last (warm) pass
-#    — acceptable here since both passes use the same mounts.
+#    run_container(), so for a warm cell this reflects only the last pass —
+#    acceptable here since the passes differ only in the settings seed mount
+#    at /run, which the chown walk (the WARN source) never touches.
 if grep -q 'entrypoint: WARN' "${CONTAINER_STDERR}" 2>/dev/null; then
   die "host-side: unexpected 'entrypoint: WARN' on container stderr"
 fi
