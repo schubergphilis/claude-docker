@@ -7,6 +7,15 @@
 #   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe), or empty
 #   WORKSPACE         path to the bind-mounted workspace inside the container
 #   EXPECT_RO         1 = workspace is :ro (skip write probe, only test entrypoint startup)
+#   EXPECT_SETTINGS   1 = a settings fixture was mounted at the seed path; assert the
+#                     entrypoint copied it to /root/.claude/settings.json and the copy
+#                     is atomically replaceable. 0 = no seed on fresh volumes; assert
+#                     nothing was seeded. keep = no seed this run, but a previous run
+#                     persisted a settings.json in the warm volume; assert it survived.
+#   EXPECT_SETTINGS_SENTINEL
+#                     sentinel string the settings.json content must carry. Passed by
+#                     smoke.sh rather than hardcoded here: the warm cell changes it
+#                     between passes to prove re-seeding overwrites the previous copy.
 # Accumulates per-check PASS/FAIL and exits non-zero at the end if any failed
 # (so one regression doesn't hide the rest of the report).
 set -euo pipefail
@@ -296,7 +305,70 @@ check_credentials() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Robustness — entrypoint reached here, so it did not abort
+# 5. Seeded settings — must be a writable copy, not a mount
+# ---------------------------------------------------------------------------
+
+check_settings() {
+  local settings="/root/.claude/settings.json"
+  local mode="${EXPECT_SETTINGS:-0}"
+
+  if [ "$mode" = "0" ]; then
+    # No seed mounted, fresh volumes: the entrypoint must start cleanly
+    # without creating one. (The warm no-seed path — a previously persisted
+    # settings.json left as-is — is mode=keep below.)
+    if [ -e "$settings" ]; then
+      fail "settings-absent: $settings exists but no seed was mounted"
+    else
+      pass "settings-absent: no settings file without a seed"
+    fi
+    return
+  fi
+
+  if [ "$mode" = "keep" ]; then
+    # Warm volume, no seed this run: the entrypoint's seed block must not
+    # touch the settings.json a previous run persisted. The shared checks
+    # below assert it survived with the previous pass's sentinel and is
+    # still atomically replaceable.
+    if [ -e /run/claude-docker/settings.json ]; then
+      fail "settings-keep: seed present at /run/claude-docker/settings.json but this pass expects none"
+    else
+      pass "settings-keep: no seed mounted this run"
+    fi
+  fi
+
+  if [ ! -f "$settings" ]; then
+    fail "settings-present: $settings missing (mode=$mode: seed copy did not run, or a persisted file was lost)"
+    return
+  fi
+  pass "settings-present: $settings exists"
+
+  # Content must carry the sentinel smoke.sh expects for THIS pass. The warm
+  # cell reruns with a rewritten fixture, so matching the pass-specific
+  # sentinel proves the entrypoint re-seeded (mode=1) or left the persisted
+  # copy alone (mode=keep) — not merely that some settings.json exists.
+  local sentinel="${EXPECT_SETTINGS_SENTINEL:-}"
+  if [ -z "$sentinel" ]; then
+    fail "settings-content: EXPECT_SETTINGS_SENTINEL not set (smoke.sh plumbing regression)"
+  elif grep -q "$sentinel" "$settings" 2>/dev/null; then
+    pass "settings-content: settings.json carries expected sentinel '$sentinel'"
+  else
+    fail "settings-content: '$sentinel' not found in $settings (content: $(cat "$settings" 2>/dev/null || echo '<unreadable>'))"
+  fi
+
+  # The reason settings are copied instead of bind-mounted: Claude Code saves
+  # settings by renaming a tmp file over settings.json, and rename() over a
+  # mountpoint fails with EBUSY. Prove the rename path works.
+  local tmp="${settings}.tmp.smoke"
+  if cp "$settings" "$tmp" 2>/dev/null && mv "$tmp" "$settings" 2>/dev/null; then
+    pass "settings-rename: tmp-file rename over settings.json succeeds"
+  else
+    rm -f "$tmp"
+    fail "settings-rename: cannot atomically replace $settings (mountpoint or ownership regression)"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 6. Robustness — entrypoint reached here, so it did not abort
 # ---------------------------------------------------------------------------
 
 check_entrypoint_reached() {
@@ -315,6 +387,7 @@ check_identity
 check_security
 check_workspace_write
 check_credentials
+check_settings
 
 echo "==="
 echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"

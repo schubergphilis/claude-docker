@@ -74,8 +74,9 @@ in-container `git commit` works without a `-c user.email=...` override.
 Not gated: identity is already public on every commit you've ever made.
 Signing, credential helpers, and hooks are NOT forwarded.
 
-If <config-dir>/settings.docker.json exists it is mounted as settings.json
-in the container; the regular settings.json is never forwarded automatically.
+If <config-dir>/settings.docker.json exists it is copied to settings.json in
+the container at startup — writable in-session, re-seeded from the host file
+on every run; the regular settings.json is never forwarded automatically.
 EOF
 }
 
@@ -301,8 +302,15 @@ WRAP
     "-v" "$stage/statusline-command.sh:/root/.claude/statusline-command.sh:ro"
   )
 fi
+# Settings are forwarded via a seed path + entrypoint copy, NOT bind-mounted
+# at /root/.claude/settings.json directly: Claude Code persists settings by
+# renaming a tmp file over settings.json, and rename() over a mountpoint fails
+# with EBUSY (regardless of :ro), so a direct mount breaks every in-session
+# settings change (effort, model, theme). The entrypoint copies the seed onto
+# the container filesystem so those writes work; changes last for the run and
+# are overwritten from the host file on the next start — never written back.
 [ -f "$CLAUDE_CONFIG_DIR/settings.docker.json" ] \
-  && MOUNT_ARGS+=("-v" "$CLAUDE_CONFIG_DIR/settings.docker.json:/root/.claude/settings.json:ro")
+  && MOUNT_ARGS+=("-v" "$CLAUDE_CONFIG_DIR/settings.docker.json:/run/claude-docker/settings.json:ro")
 
 # Container-only .git/config overlay: enable relative-path worktrees inside the
 # container without touching the host's on-disk repo config. The host file
