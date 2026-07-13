@@ -8,11 +8,11 @@ The VCS and cloud CLIs (`gh`, `glab`, `aws`) need a flag to see host credentials
 
 ```bash
 # Build the image from your checkout (one-time; rerun after Dockerfile or tool pins change)
-docker build -t claude-code:local ./claude-docker
+docker build -t claude-code:local .
 
 # Put on your PATH (create ~/bin if it doesn't exist)
 mkdir -p ~/bin
-ln -s "$(pwd)/claude-docker/run.sh" ~/bin/claude-docker
+ln -s "$(pwd)/run.sh" ~/bin/claude-docker
 ```
 
 The build needs BuildKit (the Dockerfile uses `COPY --chmod`). Docker Desktop ships it by default. A Homebrew `docker` CLI with Colima does **not**: the buildx plugin is a separate formula, and without it `docker build` silently falls back to the legacy builder and dies at the `COPY --chmod` step with `the --chmod option requires BuildKit`. One-time fix:
@@ -210,10 +210,10 @@ The pins live in version-controlled fragments under [`pins/`](pins/), one `pins/
 Refresh them with [`update_pins.py`](update_pins.py) (a single stdlib-only Python file, run via `uv`):
 
 ```bash
-uv run claude-docker/update_pins.py                      # refresh all tools (7-day soak)
-uv run claude-docker/update_pins.py --soak 14            # wider soak window
-uv run claude-docker/update_pins.py --block-major-bumps  # stay within each tool's current major
-uv run claude-docker/update_pins.py --pin uv=0.12.3      # pin one tool to a specific version
+uv run update_pins.py                      # refresh all tools (7-day soak)
+uv run update_pins.py --soak 14            # wider soak window
+uv run update_pins.py --block-major-bumps  # stay within each tool's current major
+uv run update_pins.py --pin uv=0.12.3      # pin one tool to a specific version
 ```
 
 For each tool it selects the newest stable version at least 7 days old, downloads the `amd64` and `arm64` artifacts, computes their sha256s, and rewrites `pins/<tool>.env` — the soak window gives a release time to be vetted (and a bad one pulled) before it enters the image. The script prints a report — each `old → new` bump with its age, a `⬆ MAJOR` marker on major-version jumps, `held` lines for versions still inside the soak window, and `⚠` reminders for the manual pins — then review the diff, build to test, and commit. By default a major-version bump is taken once it has soaked; `--block-major-bumps` keeps a run within each tool's current major. Set `GITHUB_TOKEN` (or `GH_TOKEN`) to avoid GitHub's unauthenticated rate limit.
@@ -299,7 +299,7 @@ Any extra package managers a child image installs (rustup, go, ruby, etc.) *add*
 The container's runtime behaviour — privilege-drop, capability set, credential
 isolation, file ownership — is exercised by a smoke harness
 ([`smoke/smoke.sh`](smoke/smoke.sh) + [`smoke/assert-in-container.sh`](smoke/assert-in-container.sh)).
-It runs in CI on **Linux** on every change to `claude-docker/**` (in the
+It runs in CI on **Linux** on every change (in the
 `docker-build` job, reusing the built image), across a matrix of cells: host UID
 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` opt-ins
 (singly and combined), `--ephemeral`, and `--ro`. Most of the container's
@@ -309,7 +309,7 @@ so Linux CI covers the bulk of it.
 Run a cell locally against a built image:
 
 ```bash
-IMAGE=claude-code:local bash claude-docker/smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe
+IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe
 ```
 
 ### Manual fallback checklist (macOS)
@@ -324,7 +324,7 @@ macOS is **virtiofs collapsing `st_dev` across bind mounts**, which changes how
 (see `entrypoint.sh:30-45`). Verify it by hand on a real Mac with Docker Desktop
 before shipping changes to `entrypoint.sh` / `run.sh` / `Dockerfile`:
 
-- Run the smoke cells on macOS: `IMAGE=claude-code:local bash claude-docker/smoke/smoke.sh --uid="$(id -u)" --volstate=warm` and `… --ro=1` and `… --optins=aws,glab,tfe` — the entrypoint must reach the dropped process with **no spurious `entrypoint: WARN`** despite the `:ro` mounts under `/root`.
+- Run the smoke cells on macOS: `IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --volstate=warm` and `… --ro=1` and `… --optins=aws,glab,tfe` — the entrypoint must reach the dropped process with **no spurious `entrypoint: WARN`** despite the `:ro` mounts under `/root`.
 - File ownership round-trips to the host user and is editable without `sudo` on a real `~/repo` bind mount.
 - macOS Keychain `gh` flow: `--gh` with no `GH_TOKEN`/`GITHUB_TOKEN` exported falls back to `gh auth token`; in-container `gh` is authenticated.
 - Real AWS SSO (`--aws`) and Terraform Cloud (`--tfe`) reach their endpoints from inside the container via the mounted config.

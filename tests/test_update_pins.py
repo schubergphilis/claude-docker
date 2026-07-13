@@ -2,7 +2,7 @@
 
 No network, no Docker. The parent directory is put on sys.path so the script
 imports as a normal module. Run with:
-    python3 -m unittest discover -s claude-docker/tests
+    python3 -m unittest discover -s tests
 """
 import contextlib
 import io
