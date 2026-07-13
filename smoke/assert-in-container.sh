@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Schuberg Philis
+#
 # assert-in-container.sh — runs INSIDE the container as the dropped user.
 # Invoked as the container command: entrypoint.sh calls
 #   exec runuser -u claude -- /workspaces/smoke/assert-in-container.sh

@@ -1,0 +1,11 @@
+claude-docker
+Copyright 2026 Schuberg Philis
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+claude-docker builds a container image that installs and runs third-party
+software which is downloaded at build or run time and remains under its own
+license. Notable components include Anthropic's Claude Code and the CLIs
+gh, glab, aws-cli, openspec, uv, pnpm, tfenv, and git-lfs. Anthropic, Claude,
+and Claude Code are trademarks of Anthropic, PBC; this project is not
+affiliated with or endorsed by Anthropic.

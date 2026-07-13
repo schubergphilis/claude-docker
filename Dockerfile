@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Schuberg Philis
+#
 # Pinned base image (digest pins all arches via the multi-arch index).
 # Bump with: docker buildx imagetools inspect ubuntu:26.04 --format '{{.Manifest.Digest}}'
 # Ubuntu (not Debian): only ubuntu:26.04 ships git ≥ 2.48 in its main archive,
