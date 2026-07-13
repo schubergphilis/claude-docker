@@ -1,0 +1,179 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Cancel superseded PR builds, but never cancel a run on main —
+  # main runs validate merged code and must complete.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Validate
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+
+      - name: ShellCheck shell scripts
+        uses: ludeeus/action-shellcheck@00cae500b08a931fb5698e11e79bfbd38e612a38  # 2.0.0
+        with:
+          severity: warning
+          scandir: .
+          version: v0.11.0
+
+      - name: Unit tests — update_pins.py helpers
+        # stdlib unittest on the runner's preinstalled python3 — no install,
+        # no third-party action (the suite imports only the standard library).
+        run: python3 -m unittest discover -s tests -p 'test_*.py' -v
+
+      - name: Hadolint Dockerfile
+        uses: hadolint/hadolint-action@2332a7b74a6de0dda2e2221d575162eba76ba5e5  # v3.3.0
+        with:
+          dockerfile: Dockerfile
+          config: .hadolint.yaml
+          failure-threshold: warning
+
+      - name: npm-pinned tools supply-chain audit
+        # For EVERY npm-pinned tool enforce two policies: (1) tarball signed by
+        # npm's keyring over dist.integrity (`npm audit signatures`), (2) soak
+        # since publish (default 7 days) so loud supply-chain attacks get yanked
+        # before we ingest.  The soak gate is enforced by update_pins.py --audit,
+        # which is the single source of truth for soak logic (including the window
+        # default — see stefanwb/claude-shared#50 and stefanwb/claude-shared#51).
+        # The tool list is provided by update_pins.py --list-npm-tools so CI never
+        # re-implements generator logic.
+        run: |
+          set -euo pipefail
+          python3 update_pins.py --audit
+          # Capture the tool list into a variable BEFORE looping: a process
+          # substitution `done < <(cmd)` does NOT propagate cmd's non-zero exit
+          # under `set -e`, so a fail-closed --list-npm-tools (e.g. a missing pin)
+          # would silently yield an empty loop and skip every signature check
+          # (fail-open). `$(...)` assignment, by contrast, DOES abort the step
+          # under `set -e`, so the here-string consumer below is fail-closed.
+          tools=$(python3 update_pins.py --list-npm-tools)
+          while IFS=$'\t' read -r name pkg env var ver; do
+            [ -n "$ver" ] || { echo "::error::no pinned version for $name"; exit 1; }
+            scratch=$(mktemp -d)
+            ( cd "$scratch" && npm init -y >/dev/null \
+              && npm install --ignore-scripts --no-audit --no-fund --silent "${pkg}@${ver}" \
+              && npm audit signatures )
+          done <<< "$tools"
+
+      - name: Markdown lint (advisory)
+        uses: DavidAnson/markdownlint-cli2-action@ce4853d43830c74c1753b39f3cf40f71c2031eb9  # v23.0.0
+        continue-on-error: true
+        with:
+          globs: '**/*.md'
+
+      - name: Broken relative links (advisory, offline)
+        uses: lycheeverse/lychee-action@8646ba30535128ac92d33dfc9133794bfdd9b411  # v2.8.0
+        continue-on-error: true
+        with:
+          args: --offline --include-fragments --no-progress .
+
+  docker-build:
+    name: Docker build (validate, no push)
+    needs: [validate]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
+      - uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4.0.0
+      - name: Build (amd64, no push)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7.1.0
+        with:
+          context: .
+          # Load into the local daemon so the smoke test below can run the
+          # image. Build is amd64-only (single-arch load is fine); arm64
+          # coverage relies on the maintainers' local builds for now.
+          load: true
+          tags: claude-docker:ci
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=min
+
+      - name: Smoke test — claude --version matches Dockerfile pin
+        # Catches the 2.1.x failure mode where the JS launcher is installed
+        # but the native-binary postinstall isn't run, leaving `claude` as a
+        # stub that errors at exec time. Asserts the actual reported version
+        # matches the CLAUDE_CODE_VERSION pin in pins/claude-code.env.
+        run: |
+          set -euo pipefail
+          EXPECTED=$(python3 update_pins.py --list-npm-tools | awk -F'\t' '$1=="claude-code"{print $5}')
+          ACTUAL=$(docker run --rm claude-docker:ci claude --version)
+          echo "Expected: ${EXPECTED}  Actual: ${ACTUAL}"
+          [[ "$ACTUAL" == "${EXPECTED} (Claude Code)" ]]
+
+      - name: Cross-platform smoke (Linux)
+        # Drives smoke.sh across a matrix of cells, all reusing the already-loaded
+        # claude-docker:ci image from the build step above.  Do NOT move this to a
+        # separate job — a separate job gets a blank local daemon and cannot reuse
+        # the image loaded by the build step.
+        #
+        # Cell inventory:
+        #   1. runner-uid/cold/no-optins     — baseline privilege-drop to runner UID
+        #   2. runner-uid/cold/aws           — AWS credential opt-in
+        #   3. runner-uid/cold/glab          — GitLab credential opt-in
+        #   4. runner-uid/cold/aws+glab+tfe  — all three opt-ins combined
+        #   5. runner-uid/warm               — warm volume (HOST_UID-owned /root traversal)
+        #   6. uid-501/cold/no-optins        — macOS-style UID (<1000, below Ubuntu floor)
+        #   7. uid-0/cold/no-optins          — root-legacy path (HOST_UID=0 → exec directly)
+        #   8. runner-uid/ephemeral          — --ephemeral mode (no named volumes)
+        #   9. runner-uid/ro/no-optins       — read-only workspace (EROFS robustness)
+        run: |
+          set -euo pipefail
+          export IMAGE=claude-docker:ci
+          RUNNER_UID=$(id -u)
+
+          run_cell() {
+            echo "--- Cell: $* ---"
+            IMAGE=claude-docker:ci bash smoke/smoke.sh "$@"
+          }
+
+          # 1. Baseline: runner UID, cold volume, no opt-ins.
+          run_cell --uid="${RUNNER_UID}" --volstate=cold --ephemeral=0
+
+          # 2. AWS opt-in.
+          run_cell --uid="${RUNNER_UID}" --optins=aws --volstate=cold --ephemeral=0
+
+          # 3. GitLab opt-in.
+          run_cell --uid="${RUNNER_UID}" --optins=glab --volstate=cold --ephemeral=0
+
+          # 4. All three opt-ins combined.
+          run_cell --uid="${RUNNER_UID}" --optins=aws,glab,tfe --volstate=cold --ephemeral=0
+
+          # 5. Warm volume: first run populates the named volume, second run
+          #    traverses the now HOST_UID-owned 0700 /root (exercises CAP_DAC_READ_SEARCH).
+          run_cell --uid="${RUNNER_UID}" --volstate=warm --ephemeral=0
+
+          # 6. macOS-style UID 501 (below Ubuntu's default UID_MIN=1000).
+          run_cell --uid=501 --volstate=cold --ephemeral=0
+
+          # 7. Root-legacy path: HOST_UID=0 → entrypoint skips useradd+runuser and
+          #    exec's claude directly as container root.
+          run_cell --uid=0 --volstate=cold --ephemeral=0
+
+          # 8. Ephemeral mode: no named volumes.
+          run_cell --uid="${RUNNER_UID}" --ephemeral=1
+
+          # 9. Read-only workspace: EROFS robustness — chown on :ro mounts must not
+          #    abort the entrypoint; assert no spurious WARN on stderr.
+          run_cell --uid="${RUNNER_UID}" --volstate=cold --ro=1 --ephemeral=0
+
+          # 10. Non-runner GID: exercises the entrypoint's `useradd -g $HOST_GID`
+          #     path with a GID that differs from the runner's (asserts the
+          #     dropped process lands in exactly that primary group).
+          run_cell --uid=501 --gid=501 --volstate=cold --ephemeral=0

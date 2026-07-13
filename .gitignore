@@ -1,0 +1,7 @@
+.DS_Store
+.claude
+# transient staging dir from update_pins.py (cleaned on exit)
+.pins-stage.*
+# Python bytecode cache (from update_pins.py / its tests)
+__pycache__/
+*.pyc

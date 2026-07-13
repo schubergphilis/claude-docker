@@ -1,0 +1,13 @@
+offline = true
+include_fragments = true
+
+include = [
+    "*.md",
+    "**/*.md",
+]
+
+exclude_path = [
+    ".git",
+    "node_modules",
+    "openspec/changes/archive",
+]
