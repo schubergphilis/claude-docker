@@ -43,6 +43,15 @@ Wrapper flags:
                       ~/.terraform.d/credentials.tfrc.json (:ro) when
                       present and forward TF_TOKEN_app_terraform_io;
                       unmask in-container `terraform login` state.
+  --registry          Opt in to private package registries: surface host-
+                      native uv/npm/pnpm/pip config so in-container installs
+                      resolve against a private feed. Mounts ~/.npmrc,
+                      ~/.config/uv/uv.toml, and pip.conf (:ro) when present and
+                      forwards UV_INDEX_* / npm_config_registry / PIP_* env
+                      when set. Runtime only; the image build is unaffected.
+                      ~/.netrc is NOT mounted (too broad — see README); npmrc
+                      and pip.conf are whole-file mounts, so scope them to the
+                      registry. See README "Private package registries".
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -90,6 +99,7 @@ WITH_AWS=0
 WITH_GH=0
 WITH_GLAB=0
 WITH_TFE=0
+WITH_REGISTRY=0
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
@@ -106,6 +116,7 @@ for arg in "$@"; do
     --gh)           WITH_GH=1 ;;
     --glab)         WITH_GLAB=1 ;;
     --tfe)          WITH_TFE=1 ;;
+    --registry)     WITH_REGISTRY=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
     --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
     --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -185,16 +196,63 @@ if [ "$WITH_TFE" = "1" ]; then
     && MOUNT_ARGS+=("-v" "$HOME/.terraform.d/credentials.tfrc.json:/root/.terraform.d/credentials.tfrc.json:ro")
 fi
 
+# Private package registries: surface the host's native uv/npm/pnpm/pip registry
+# config read-only so in-container installs resolve against a private feed
+# (CodeArtifact / Artifactory / Nexus / …). Each mount is a silent no-op when the
+# host file is absent. The pip user config dir is platform-specific (macOS keeps
+# it under Application Support, Linux under XDG ~/.config); both map to the
+# container's Linux path /root/.config/pip/pip.conf. Read-only, like every other
+# cred mount. NOTE: ~/.netrc is deliberately NOT mounted — it is a machine-keyed
+# store that routinely holds credentials for hosts unrelated to the registry, so
+# forwarding the whole file into a full-egress container is too broad. Use
+# registry auth that lives in npmrc/pip.conf, the URL, or UV_INDEX_*_PASSWORD.
+if [ "$WITH_REGISTRY" = "1" ]; then
+  # npm/pnpm read ~/.npmrc by default, but honour a relocated userconfig
+  # (npm_config_userconfig / NPM_CONFIG_USERCONFIG) so a host that moved its
+  # npmrc doesn't silently fall through to the public registry. Whatever the
+  # host source, mount it at the container's default /root/.npmrc — and we do
+  # NOT forward npm_config_userconfig, so the in-container npm keeps that path.
+  npmrc_src="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}}"
+  [ -f "$npmrc_src" ]               && MOUNT_ARGS+=("-v" "$npmrc_src:/root/.npmrc:ro")
+  [ -f "$HOME/.config/uv/uv.toml" ] && MOUNT_ARGS+=("-v" "$HOME/.config/uv/uv.toml:/root/.config/uv/uv.toml:ro")
+  pip_conf=""
+  if [ -f "$HOME/Library/Application Support/pip/pip.conf" ]; then
+    pip_conf="$HOME/Library/Application Support/pip/pip.conf"
+  elif [ -f "$HOME/.config/pip/pip.conf" ]; then
+    pip_conf="$HOME/.config/pip/pip.conf"
+  fi
+  [ -n "$pip_conf" ] && MOUNT_ARGS+=("-v" "$pip_conf:/root/.config/pip/pip.conf:ro")
+fi
+
 ENV_VARS=()
 [ "$WITH_GH" = "1" ]   && ENV_VARS+=(GH_TOKEN GITHUB_TOKEN)
 [ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
 [ "$WITH_TFE" = "1" ]  && ENV_VARS+=(TF_TOKEN_app_terraform_io)
+# --registry: forward the native registry-config env vars uv/npm/pnpm/pip read.
+# Static, fixed-name vars here; uv's dynamic per-index credential vars (whose
+# names embed a user-chosen index name) are handled by the scan below.
+# UV_NETRC is intentionally omitted: it points uv at a netrc file we no longer
+# mount, so forwarding it would dangle at a host path absent in the container.
+[ "$WITH_REGISTRY" = "1" ] && ENV_VARS+=(npm_config_registry NPM_CONFIG_REGISTRY NODE_AUTH_TOKEN NPM_TOKEN UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX UV_KEYRING_PROVIDER PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIPENV_PYPI_MIRROR)
 # Guarded: bash 3.2 under `set -u` errors on empty-array expansion.
 if [ "${#ENV_VARS[@]}" -gt 0 ]; then
   for v in "${ENV_VARS[@]}"; do
     [ -n "${!v:-}" ] && ENV_ARGS+=("-e" "$v")
   done
+fi
+# uv's per-index credentials are UV_INDEX_<NAME>_USERNAME / _PASSWORD, where
+# <NAME> is a user-chosen index name — a fixed list can't enumerate them. Scan
+# the exported host vars and forward matches, scoped STRICTLY to those two
+# suffixes: a blanket UV_* would drag in path-valued vars like UV_CACHE_DIR that
+# point at host paths absent in the container. Safe under set -u (read assigns).
+if [ "$WITH_REGISTRY" = "1" ]; then
+  while IFS= read -r _name; do
+    case "$_name" in
+      UV_INDEX_*_USERNAME|UV_INDEX_*_PASSWORD)
+        [ -n "${!_name:-}" ] && ENV_ARGS+=("-e" "$_name") ;;
+    esac
+  done < <(compgen -e)
 fi
 # --gh fallback: if neither GH_TOKEN nor GITHUB_TOKEN was forwarded, try the
 # gh CLI's active token so users authenticated via `gh auth login` don't have
@@ -236,6 +294,7 @@ DOCKER_FLAGS=()
 [ "$WITH_AWS" = "1" ]      && DOCKER_FLAGS+=("aws")
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
 [ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
+[ "$WITH_REGISTRY" = "1" ] && DOCKER_FLAGS+=("registry")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
 [ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
 if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
