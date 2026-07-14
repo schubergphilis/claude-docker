@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Schuberg Philis
 set -euo pipefail
 
 # Override via CLAUDE_DOCKER_IMAGE so child images (FROM claude-code:local) can

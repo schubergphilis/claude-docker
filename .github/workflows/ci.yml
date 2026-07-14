@@ -50,7 +50,7 @@ jobs:
         # since publish (default 7 days) so loud supply-chain attacks get yanked
         # before we ingest.  The soak gate is enforced by update_pins.py --audit,
         # which is the single source of truth for soak logic (including the window
-        # default — see stefanwb/claude-shared#50 and stefanwb/claude-shared#51).
+        # default).
         # The tool list is provided by update_pins.py --list-npm-tools so CI never
         # re-implements generator logic.
         run: |

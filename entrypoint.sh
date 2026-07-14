@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Schuberg Philis
+#
 # Drop from container root to the host user's UID/GID before exec'ing claude
 # so that files written through bind-mounts match host ownership. With
 # HOST_UID unset or 0, falls through to the legacy "run as root" behavior so

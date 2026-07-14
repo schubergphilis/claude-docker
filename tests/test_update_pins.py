@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Schuberg Philis
 """Unit tests for the pure helpers in update_pins.py.
 
 No network, no Docker. The parent directory is put on sys.path so the script

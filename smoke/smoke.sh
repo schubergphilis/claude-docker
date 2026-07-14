@@ -1,4 +1,7 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Schuberg Philis
+#
 # smoke.sh — parameterized smoke-test driver for the claude-docker entrypoint.
 # Each invocation exercises one cell of the test matrix.
 #

@@ -37,7 +37,7 @@ Host `hooks/` and the `hooks` settings key are intentionally NOT carried over â€
 
 #### Scenario: Skills via symlinks resolve in container
 
-- **GIVEN** `~/.claude/skills/create-team` is a symlink to `~/git-work/stefanwb/claude-shared/skills/create-team`
+- **GIVEN** `~/.claude/skills/create-team` is a symlink to `~/repos/shared-config/skills/create-team`
 - **WHEN** user runs `claude-docker`
 - **THEN** `/root/.claude/skills/create-team/` in the container contains the skill files (not a dangling symlink)
 

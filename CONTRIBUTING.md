@@ -1,18 +1,20 @@
 # Contributing
 
-`claude-docker` is developed inner-source: contributions from anyone in the
-organization are welcome.
+Contributions to `claude-docker` are welcome from anyone.
 
 ## Workflow
 
-1. Create a branch off `main` for your change.
+1. Fork the repository and create a branch off `main` for your change.
 2. Make your change. Keep the container's security posture intact — the
    privilege-drop, capability set, and credential opt-in model are load-bearing
    (see [Threat model](README.md#threat-model)).
 3. Non-trivial behaviour changes are tracked with OpenSpec change proposals
    under [`openspec/changes/`](openspec/); follow the existing ones as a
    template.
-4. Open a PR against `main` and get a review from a colleague before merging.
+4. Open a PR against `main`; a maintainer will review before it is merged.
+
+By submitting a contribution, you agree that it is licensed under the
+[Apache License 2.0](LICENSE), the same license as the project.
 
 ## Local checks before opening a PR
 
