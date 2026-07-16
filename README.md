@@ -25,6 +25,26 @@ ln -sfn "$(brew --prefix)/opt/docker-buildx/bin/docker-buildx" ~/.docker/cli-plu
 
 Verify with `docker buildx version`, then rerun the same `docker build` — with the plugin present, plain `docker build` uses BuildKit automatically.
 
+## Container runtime
+
+`claude-docker` runs on **docker or podman**. With no configuration it auto-detects the engine, preferring `docker` and falling back to `podman` — so a podman-only host (including Windows via `podman machine` + WSL backend, and podman-as-docker Linux setups) works with zero setup and never hits `docker: command not found`.
+
+To force an engine, set `CLAUDE_DOCKER_RUNTIME`:
+
+```bash
+CLAUDE_DOCKER_RUNTIME=podman claude-docker ~/repo
+```
+
+The env var is the canonical mechanism: it works everywhere — scripts, CI, editor "run" integrations, and non-interactive shells all inherit it. If you want a shorter interactive spelling, an alias is optional sugar (not a substitute — an alias only resolves at an interactive prompt, so scripts and editors still need the env var):
+
+```bash
+alias claude-podman='CLAUDE_DOCKER_RUNTIME=podman claude-docker'
+```
+
+Only `docker` and `podman` are accepted; any other value is rejected before anything runs. The image build is the engine's own command — `podman build -t claude-code:local .` on a podman host, mirroring the `docker build` line above.
+
+**Windows / Git Bash:** run `claude-docker` from Git Bash (MSYS/MINGW). The wrapper disables MSYS's automatic POSIX→Windows path rewriting for the engine's argv and translates host mount paths itself, so container-side paths reach `podman.exe`/`docker.exe` intact — no more `invalid option type "\Program Files\Git\workspaces\..."`.
+
 ## Usage
 
 ```bash

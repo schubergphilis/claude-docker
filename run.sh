@@ -75,6 +75,10 @@ Environment:
                            reuse this wrapper.
   CLAUDE_DOCKER_CONFIG_DIR Override the host Claude config dir (same as
                            --claude-dir=PATH).
+  CLAUDE_DOCKER_RUNTIME    Container engine to invoke: docker or podman. Unset
+                           (default) auto-detects, preferring docker then
+                           podman. This is the canonical way to force an engine
+                           and works in scripts, CI, and non-interactive shells.
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -127,6 +131,55 @@ for arg in "$@"; do
   esac
 done
 [ "${#WORKSPACES[@]}" -eq 0 ] && WORKSPACES=("$PWD")
+
+# Select the container runtime AFTER flag parsing: `-h`/`--help` is handled in
+# the loop above and has already exited 0 by now, so this never blocks help on
+# an engine-less host; and a real run on such a host fails here — before any
+# mktemp/cp staging below. CLAUDE_DOCKER_RUNTIME is the canonical override (works
+# in scripts/CI/editors/non-interactive shells); empty means auto-detect.
+RUNTIME="${CLAUDE_DOCKER_RUNTIME:-}"
+# Allowlist the override — it names the binary invoked as `"$RUNTIME" run` at the
+# end of this script, so we must never hand `run …` to an arbitrary on-PATH
+# binary. Empty is allowed and means "auto-detect".
+case "$RUNTIME" in
+  ""|docker|podman) ;;
+  *) echo "claude-docker: CLAUDE_DOCKER_RUNTIME must be 'docker' or 'podman', got '$RUNTIME'" >&2; exit 1 ;;
+esac
+if [ -z "$RUNTIME" ]; then
+  if   command -v docker >/dev/null 2>&1; then RUNTIME=docker
+  elif command -v podman >/dev/null 2>&1; then RUNTIME=podman
+  else echo "claude-docker: no container runtime found — install docker or podman, or set CLAUDE_DOCKER_RUNTIME" >&2; exit 1
+  fi
+elif ! command -v "$RUNTIME" >/dev/null 2>&1; then
+  echo "claude-docker: requested runtime '$RUNTIME' not found on PATH" >&2; exit 1
+fi
+
+# Git Bash / MSYS / Cygwin on Windows rewrites POSIX-looking argv into Windows
+# paths before the native docker.exe/podman.exe sees them, corrupting the
+# container-side paths we pass verbatim (/workspaces/<name>, -w, --add-dir,
+# /root/..., /run/...) into e.g. "\Program Files\Git\workspaces\...". Disable
+# that argv conversion; the host bind-mount *sources* that legitimately need
+# Windows form are translated by hostpath() below, since the shell no longer will.
+IS_MSYS=0
+case "$(uname -s 2>/dev/null)" in
+  MINGW*|MSYS*|CYGWIN*) IS_MSYS=1 ;;
+esac
+if [ "$IS_MSYS" = "1" ]; then
+  export MSYS2_ARG_CONV_EXCL='*'   # MSYS2 / newer Git Bash
+  export MSYS_NO_PATHCONV=1        # older Git-for-Windows
+fi
+# Translate a host path to the form the native engine accepts as a bind-mount
+# source. Under MSYS, cygpath -m turns /c/Users/foo into C:/Users/foo (drive
+# letter + forward slashes, which docker/podman parse correctly). Off-MSYS (or
+# if cygpath is somehow absent) it is the identity function, so the Linux/macOS
+# argv is byte-for-byte unchanged from the hardcoded-docker behaviour.
+hostpath() {
+  if [ "$IS_MSYS" = "1" ] && command -v cygpath >/dev/null 2>&1; then
+    cygpath -m "$1"
+  else
+    printf '%s' "$1"
+  fi
+}
 # Expand a leading ~/ in CLAUDE_CONFIG_DIR — needed when set via env var, where
 # the shell does not perform tilde expansion. Pattern is "~/" not "~" so a
 # user-tilde form like "~alice/path" is not silently misresolved as "$HOME/alice/path".
@@ -163,7 +216,7 @@ for ws in "${WORKSPACES[@]}"; do
   done
   SEEN_NAMES+=("$name")
   SEEN_PATHS+=("$abs")
-  MOUNT_ARGS+=("-v" "$abs:/workspaces/$name$ws_suffix")
+  MOUNT_ARGS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
   CONTAINER_PATHS+=("/workspaces/$name")
 done
 CWD="${CONTAINER_PATHS[0]}"
@@ -177,7 +230,7 @@ if [ "$WITH_GLAB" = "1" ]; then
   elif [ -d "$HOME/.config/glab-cli" ]; then
     glab_src="$HOME/.config/glab-cli"
   fi
-  [ -n "$glab_src" ] && MOUNT_ARGS+=("-v" "$glab_src:/root/.config/glab-cli:ro")
+  [ -n "$glab_src" ] && MOUNT_ARGS+=("-v" "$(hostpath "$glab_src"):/root/.config/glab-cli:ro")
 fi
 
 # Scoped AWS mount: only non-secret config + short-lived SSO bearer cache.
@@ -185,8 +238,8 @@ fi
 # (cached assume-role STS). Env-var flow (AWS_ACCESS_KEY_ID/...) still forwards
 # below for users who flatten creds with `aws configure export-credentials`.
 if [ "$WITH_AWS" = "1" ]; then
-  [ -f "$HOME/.aws/config" ] && MOUNT_ARGS+=("-v" "$HOME/.aws/config:/root/.aws/config:ro")
-  [ -d "$HOME/.aws/sso" ]    && MOUNT_ARGS+=("-v" "$HOME/.aws/sso:/root/.aws/sso:ro")
+  [ -f "$HOME/.aws/config" ] && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.aws/config"):/root/.aws/config:ro")
+  [ -d "$HOME/.aws/sso" ]    && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.aws/sso"):/root/.aws/sso:ro")
 fi
 
 # Terraform Cloud credentials file written by `terraform login`. Standard
@@ -195,7 +248,7 @@ fi
 # but mounting them is intentional and out of scope for --tfe.
 if [ "$WITH_TFE" = "1" ]; then
   [ -f "$HOME/.terraform.d/credentials.tfrc.json" ] \
-    && MOUNT_ARGS+=("-v" "$HOME/.terraform.d/credentials.tfrc.json:/root/.terraform.d/credentials.tfrc.json:ro")
+    && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.terraform.d/credentials.tfrc.json"):/root/.terraform.d/credentials.tfrc.json:ro")
 fi
 
 # Private package registries: surface the host's native uv/npm/pnpm/pip registry
@@ -215,15 +268,15 @@ if [ "$WITH_REGISTRY" = "1" ]; then
   # host source, mount it at the container's default /root/.npmrc — and we do
   # NOT forward npm_config_userconfig, so the in-container npm keeps that path.
   npmrc_src="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}}"
-  [ -f "$npmrc_src" ]               && MOUNT_ARGS+=("-v" "$npmrc_src:/root/.npmrc:ro")
-  [ -f "$HOME/.config/uv/uv.toml" ] && MOUNT_ARGS+=("-v" "$HOME/.config/uv/uv.toml:/root/.config/uv/uv.toml:ro")
+  [ -f "$npmrc_src" ]               && MOUNT_ARGS+=("-v" "$(hostpath "$npmrc_src"):/root/.npmrc:ro")
+  [ -f "$HOME/.config/uv/uv.toml" ] && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.config/uv/uv.toml"):/root/.config/uv/uv.toml:ro")
   pip_conf=""
   if [ -f "$HOME/Library/Application Support/pip/pip.conf" ]; then
     pip_conf="$HOME/Library/Application Support/pip/pip.conf"
   elif [ -f "$HOME/.config/pip/pip.conf" ]; then
     pip_conf="$HOME/.config/pip/pip.conf"
   fi
-  [ -n "$pip_conf" ] && MOUNT_ARGS+=("-v" "$pip_conf:/root/.config/pip/pip.conf:ro")
+  [ -n "$pip_conf" ] && MOUNT_ARGS+=("-v" "$(hostpath "$pip_conf"):/root/.config/pip/pip.conf:ro")
 fi
 
 ENV_VARS=()
@@ -334,11 +387,11 @@ for item in agents commands skills; do
     # cp -RL dereferences all symlinks within the tree so internal symlinks
     # (e.g. skills/foo -> ~/git/repo/skills/foo) resolve inside the container.
     cp -RL "$src" "$stage/$item"
-    MOUNT_ARGS+=("-v" "$stage/$item:/root/.claude/$item:ro")
+    MOUNT_ARGS+=("-v" "$(hostpath "$stage/$item"):/root/.claude/$item:ro")
   fi
 done
 if [ -f "$CLAUDE_CONFIG_DIR/CLAUDE.md" ]; then
-  MOUNT_ARGS+=("-v" "$CLAUDE_CONFIG_DIR/CLAUDE.md:/root/.claude/CLAUDE.md:ro")
+  MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_CONFIG_DIR/CLAUDE.md"):/root/.claude/CLAUDE.md:ro")
 fi
 
 # Statusline: mount the host script as-is, plus a thin wrapper at the canonical
@@ -359,8 +412,8 @@ fi
 WRAP
   chmod +x "$stage/statusline-command.sh"
   MOUNT_ARGS+=(
-    "-v" "$CLAUDE_CONFIG_DIR/statusline-command.sh:/root/.claude/statusline-command.original.sh:ro"
-    "-v" "$stage/statusline-command.sh:/root/.claude/statusline-command.sh:ro"
+    "-v" "$(hostpath "$CLAUDE_CONFIG_DIR/statusline-command.sh"):/root/.claude/statusline-command.original.sh:ro"
+    "-v" "$(hostpath "$stage/statusline-command.sh"):/root/.claude/statusline-command.sh:ro"
   )
 fi
 # Settings are forwarded via a seed path + entrypoint copy, NOT bind-mounted
@@ -371,7 +424,7 @@ fi
 # the container filesystem so those writes work; changes last for the run and
 # are overwritten from the host file on the next start — never written back.
 [ -f "$CLAUDE_CONFIG_DIR/settings.docker.json" ] \
-  && MOUNT_ARGS+=("-v" "$CLAUDE_CONFIG_DIR/settings.docker.json:/run/claude-docker/settings.json:ro")
+  && MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_CONFIG_DIR/settings.docker.json"):/run/claude-docker/settings.json:ro")
 
 # Container-only .git/config overlay: enable relative-path worktrees inside the
 # container without touching the host's on-disk repo config. The host file
@@ -405,7 +458,7 @@ while [ "$i" -lt "$n" ]; do
 [worktree]
 	useRelativePaths = true
 EOF
-    MOUNT_ARGS+=("-v" "$stage/git-config-$ws_name:/workspaces/$ws_name/.git/config")
+    MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config")
   fi
   i=$((i + 1))
 done
@@ -457,7 +510,7 @@ fi
 # under no-new-privileges, so claude itself runs with no usable caps.
 # --init wraps the process tree under tini so claude's bash/MCP children
 # get reaped — runuser would otherwise be PID 1 and wouldn't reap zombies.
-docker run --rm -it --init \
+"$RUNTIME" run --rm -it --init \
   --security-opt no-new-privileges \
   --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
   -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
