@@ -8,6 +8,14 @@ set -euo pipefail
 # git-identity forwarding, host-config bind-mounts — without forking it.
 IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
 
+# GitHub auth-proxy sidecar image (Caddy), used only by --gh when a host
+# token is found (see gh-auth-proxy-sidecar). Digest-pinned and deliberately
+# excluded from update_pins.py: a Caddy upgrade can change Caddyfile
+# directive semantics — i.e. this security-critical config — so bumping it
+# is a reviewed change (changelog + config-compatibility check), not a
+# routine automated bump. run.sh cannot read pins/, so the pin lives here.
+PROXY_IMAGE="${CLAUDE_DOCKER_PROXY_IMAGE:-caddy:2.11.4@sha256:844f60b64e4724a5aa8245e019dace0d3f199f7433ce6c57676cb30a920dbad9}"
+
 # Keep this in sync with the flag-parsing case statement below — adding or
 # removing a wrapper flag means updating both the case branch and this heredoc
 # in the same diff.
@@ -37,8 +45,23 @@ Wrapper flags:
                       and forward AWS_PROFILE / AWS_REGION /
                       AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
                       AWS_SESSION_TOKEN when set.
-  --gh                Opt in to GitHub: forward GH_TOKEN / GITHUB_TOKEN and
-                      unmask in-container gh login state.
+  --gh                Opt in to GitHub via a per-session auth-proxy sidecar:
+                      gh/git reach GitHub through a proxy that injects the
+                      real token in transit. The agent container never sees
+                      it — GH_TOKEN / `gh auth token` return a placeholder.
+                      In-container gh login state stays masked while the
+                      sidecar is active. Requires a host GitHub token (env
+                      or `gh auth token`); silently behaves like today's
+                      --gh with no sidecar if none is found. Mutually
+                      exclusive with --gh-direct. Env overrides:
+                      CLAUDE_DOCKER_PROXY_IMAGE (sidecar image),
+                      CLAUDE_DOCKER_GH_POLICY (Caddyfile policy snippet).
+  --gh-direct         Legacy GitHub opt-in: forward GH_TOKEN / GITHUB_TOKEN
+                      straight into the agent container (no sidecar, no
+                      token isolation) and unmask in-container gh login
+                      state. For custom-hostname GitHub (Enterprise Server /
+                      *.ghe.com) or hosts that can't run the sidecar.
+                      Mutually exclusive with --gh.
   --glab              Opt in to GitLab: mount glab-cli config (:ro) and
                       forward GITLAB_TOKEN; unmask in-container glab login.
   --tfe               Opt in to Terraform Cloud (app.terraform.io): mount
@@ -79,6 +102,11 @@ Environment:
                            (default) auto-detects, preferring docker then
                            podman. This is the canonical way to force an engine
                            and works in scripts, CI, and non-interactive shells.
+  CLAUDE_DOCKER_PROXY_IMAGE Override the digest-pinned Caddy image used by the
+                           --gh auth-proxy sidecar.
+  CLAUDE_DOCKER_GH_POLICY  Path to a Caddyfile snippet imported into the --gh
+                           sidecar's api.github.com site block, to extend the
+                           default request-filtering policy.
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -103,6 +131,7 @@ EPHEMERAL=0
 RO_WORKSPACES=0
 WITH_AWS=0
 WITH_GH=0
+WITH_GH_DIRECT=0
 WITH_GLAB=0
 WITH_TFE=0
 WITH_REGISTRY=0
@@ -120,6 +149,7 @@ for arg in "$@"; do
     --ro)           RO_WORKSPACES=1 ;;
     --aws)          WITH_AWS=1 ;;
     --gh)           WITH_GH=1 ;;
+    --gh-direct)    WITH_GH_DIRECT=1 ;;
     --glab)         WITH_GLAB=1 ;;
     --tfe)          WITH_TFE=1 ;;
     --registry)     WITH_REGISTRY=1 ;;
@@ -131,6 +161,15 @@ for arg in "$@"; do
   esac
 done
 [ "${#WORKSPACES[@]}" -eq 0 ] && WORKSPACES=("$PWD")
+
+# --gh (auth-proxy sidecar) and --gh-direct (legacy forwarding) are mutually
+# exclusive strategies for the same credential — picking one silently would
+# hide the other's risk profile from the user, so reject the combination
+# outright (same exit style as the unknown-flag case above).
+if [ "$WITH_GH" = "1" ] && [ "$WITH_GH_DIRECT" = "1" ]; then
+  echo "claude-docker: --gh and --gh-direct are mutually exclusive — pick the auth-proxy sidecar (--gh) or legacy token forwarding (--gh-direct)" >&2
+  exit 1
+fi
 
 # Select the container runtime AFTER flag parsing: `-h`/`--help` is handled in
 # the loop above and has already exited 0 by now, so this never blocks help on
@@ -153,6 +192,30 @@ if [ -z "$RUNTIME" ]; then
 elif ! command -v "$RUNTIME" >/dev/null 2>&1; then
   echo "claude-docker: requested runtime '$RUNTIME' not found on PATH" >&2; exit 1
 fi
+
+# Best-effort prune of gh-auth-proxy resources stranded by a prior run.sh that
+# died before its EXIT trap could run — the trap installed below (right after
+# this session's own stage dir exists) is the primary teardown path; this is
+# only insurance. Containers: STOPPED states only (exited/created/dead) — a
+# running claude-gh-proxy-* almost certainly belongs to a concurrent live
+# session, and `rm -f` would sever its GitHub access mid-flight, so running
+# strays (hard-killed run.sh whose sidecar lives on) are deliberately left
+# for manual cleanup; the name prefix makes them easy to spot. Networks:
+# removal of an in-use network fails and is swallowed, so live sessions are
+# safe; an empty network belonging to a session inside its create→sidecar-run
+# window can race and lose, which fails that session closed with a clear
+# error — rare, safe, retry succeeds. Every failure here is swallowed: a
+# stale resource that resists removal must never abort this run.
+"$RUNTIME" ps -aq --filter "name=^claude-gh-proxy-" \
+    --filter "status=exited" --filter "status=created" --filter "status=dead" \
+    2>/dev/null | while IFS= read -r gh_stale_cid; do
+  [ -z "$gh_stale_cid" ] && continue
+  "$RUNTIME" rm -f "$gh_stale_cid" >/dev/null 2>&1 || true
+done || true
+"$RUNTIME" network ls -q --filter "name=^claude-gh-" 2>/dev/null | while IFS= read -r gh_stale_nid; do
+  [ -z "$gh_stale_nid" ] && continue
+  "$RUNTIME" network rm "$gh_stale_nid" >/dev/null 2>&1 || true
+done || true
 
 # Git Bash / MSYS / Cygwin on Windows rewrites POSIX-looking argv into Windows
 # paths before the native docker.exe/podman.exe sees them, corrupting the
@@ -280,7 +343,10 @@ if [ "$WITH_REGISTRY" = "1" ]; then
 fi
 
 ENV_VARS=()
-[ "$WITH_GH" = "1" ]   && ENV_VARS+=(GH_TOKEN GITHUB_TOKEN)
+# GH_TOKEN/GITHUB_TOKEN are forwarded verbatim only under --gh-direct: under
+# --gh the token instead goes to the auth-proxy sidecar (see below), never
+# into the agent container.
+[ "$WITH_GH_DIRECT" = "1" ] && ENV_VARS+=(GH_TOKEN GITHUB_TOKEN)
 [ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
 [ "$WITH_TFE" = "1" ]  && ENV_VARS+=(TF_TOKEN_app_terraform_io)
@@ -309,19 +375,28 @@ if [ "$WITH_REGISTRY" = "1" ]; then
     esac
   done < <(compgen -e)
 fi
-# --gh fallback: if neither GH_TOKEN nor GITHUB_TOKEN was forwarded, try the
-# gh CLI's active token so users authenticated via `gh auth login` don't have
-# to export anything manually. Silent on failure (gh absent or not logged in).
-if [ "$WITH_GH" = "1" ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
-  if command -v gh >/dev/null 2>&1; then
-    gh_token=$(gh auth token 2>/dev/null)
-    if [ -n "$gh_token" ]; then
-      GH_TOKEN="$gh_token"
-      export GH_TOKEN
-      ENV_ARGS+=("-e" "GH_TOKEN")
-    fi
-  fi
+# GitHub token discovery — shared, unchanged, by --gh and --gh-direct: host
+# env (GH_TOKEN/GITHUB_TOKEN) wins; else fall back to the gh CLI's active
+# token so users authenticated via `gh auth login` don't have to export
+# anything manually; else silent skip (gh absent or not logged in). What
+# differs is disposition: --gh-direct forwards the result into the agent
+# container (below, mirroring the legacy --gh behavior this preserves);
+# --gh instead hands it only to the auth-proxy sidecar, further down.
+GH_DISCOVERED_TOKEN=""
+if { [ "$WITH_GH" = "1" ] || [ "$WITH_GH_DIRECT" = "1" ]; } \
+   && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ] \
+   && command -v gh >/dev/null 2>&1; then
+  GH_DISCOVERED_TOKEN=$(gh auth token 2>/dev/null) || true
 fi
+if [ "$WITH_GH_DIRECT" = "1" ] && [ -n "$GH_DISCOVERED_TOKEN" ]; then
+  GH_TOKEN="$GH_DISCOVERED_TOKEN"
+  export GH_TOKEN
+  ENV_ARGS+=("-e" "GH_TOKEN")
+fi
+# Token handed to the --gh auth-proxy sidecar setup below, mirroring the
+# discovery precedence above (host env wins over the gh-CLI fallback). Empty
+# when --gh wasn't passed or no token was found either way.
+GH_HOST_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-$GH_DISCOVERED_TOKEN}}"
 
 # Forward host git identity so in-container `git commit` works without a
 # per-invocation `-c user.email=...` dance. Non-opt-in: user.name/user.email
@@ -346,6 +421,7 @@ fi
 # mode in its UI, so duplicating it here would just be noise.
 DOCKER_FLAGS=()
 [ "$WITH_GH" = "1" ]       && DOCKER_FLAGS+=("gh")
+[ "$WITH_GH_DIRECT" = "1" ] && DOCKER_FLAGS+=("gh-direct")
 [ "$WITH_AWS" = "1" ]      && DOCKER_FLAGS+=("aws")
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
 [ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
@@ -369,9 +445,197 @@ fi
 stage_root="$HOME/.cache/claude-docker"
 mkdir -p "$stage_root"
 stage=$(mktemp -d "$stage_root/host.XXXXXX")
+
+# GitHub auth-proxy sidecar session identity, derived from the stage-dir
+# suffix so it's already unique (mktemp did the work) with no extra
+# bookkeeping. Named here — immediately after the stage dir exists but
+# before ANY docker resource is created — purely so the EXIT trap below can
+# be extended before there is anything for it to clean up. Actual sidecar
+# creation (gated on --gh finding a host token) happens further down.
+gh_sid="${stage##*.}"
+GH_PROXY_NETWORK="claude-gh-$gh_sid"
+GH_PROXY_SIDECAR="claude-gh-proxy-$gh_sid"
+
 # `case` instead of `[[ ]]` for bash 3.2 friendliness inside the trap string.
-# $HOME is expanded at trap execution time, * is a glob wildcard.
-trap 'case "$stage" in "$HOME/.cache/claude-docker/host."*) rm -rf "$stage" ;; esac' EXIT
+# $HOME/$RUNTIME/$GH_PROXY_* are expanded at trap execution time, * is a glob
+# wildcard. The sidecar/network removals are unconditional and tolerate
+# not-yet-existing resources (`|| true`): trap-before-create closes the
+# window where a failure between creating a resource and re-trapping would
+# leak it, so this must be in place before the network/sidecar are created.
+trap '
+case "$stage" in "$HOME/.cache/claude-docker/host."*) rm -rf "$stage" ;; esac
+"$RUNTIME" rm -f "$GH_PROXY_SIDECAR" >/dev/null 2>&1 || true
+"$RUNTIME" network rm "$GH_PROXY_NETWORK" >/dev/null 2>&1 || true
+' EXIT
+
+# GitHub auth-proxy sidecar: active only when --gh found a host token
+# (GH_HOST_TOKEN, computed above during token discovery). --gh-direct and
+# the no-token fallback never reach this block — see gh-auth-proxy-sidecar.
+GH_SIDECAR_ACTIVE=0
+if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
+  mkdir -p "$stage/gh-proxy"
+
+  gh_upstream_github="https://github.com"
+  gh_upstream_api="https://api.github.com"
+  gh_upstream_uploads="https://uploads.github.com"
+  # Test-only hook for the run.sh-driven integration harness (tests/): route
+  # every site block's reverse_proxy at a single mock upstream instead of
+  # real GitHub. Undocumented — not a supported user-facing override.
+  if [ -n "${CLAUDE_DOCKER_GH_UPSTREAM:-}" ]; then
+    gh_upstream_github="$CLAUDE_DOCKER_GH_UPSTREAM"
+    gh_upstream_api="$CLAUDE_DOCKER_GH_UPSTREAM"
+    gh_upstream_uploads="$CLAUDE_DOCKER_GH_UPSTREAM"
+  fi
+
+  gh_policy_import=""
+  if [ -n "${CLAUDE_DOCKER_GH_POLICY:-}" ] && [ -f "$CLAUDE_DOCKER_GH_POLICY" ]; then
+    cp "$CLAUDE_DOCKER_GH_POLICY" "$stage/gh-proxy/policy.caddy"
+    gh_policy_import="import /etc/caddy/policy.caddy"
+  fi
+
+  # header_up REPLACES any client-supplied Authorization outright, so the
+  # placeholder GH_TOKEN that `gh`/git send into the container is discarded
+  # here, never forwarded. api.github.com/uploads.github.com want a Bearer
+  # token; github.com (git smart-HTTP) wants Basic x-access-token:<token> —
+  # see design.md for why the two differ. Both env values are computed below
+  # and injected only via {env.*} placeholders — the Caddyfile on disk never
+  # contains the token.
+  cat >"$stage/gh-proxy/Caddyfile" <<EOF
+{
+	admin off
+	local_certs
+	skip_install_trust
+	log {
+		output stdout
+		format json
+	}
+}
+
+github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+	reverse_proxy $gh_upstream_github {
+		header_up Authorization "{env.GH_PROXY_BASIC}"
+	}
+}
+
+api.github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+
+	@gh_proxy_repo_delete {
+		method DELETE
+		path_regexp ^/repos/[^/]+/[^/]+/?\$
+	}
+	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	$gh_policy_import
+
+	reverse_proxy $gh_upstream_api {
+		header_up Authorization "{env.GH_PROXY_BEARER}"
+	}
+}
+
+uploads.github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+	reverse_proxy $gh_upstream_uploads {
+		header_up Authorization "{env.GH_PROXY_BEARER}"
+	}
+}
+EOF
+
+  if ! "$RUNTIME" network create "$GH_PROXY_NETWORK" >/dev/null; then
+    echo "claude-docker: failed to create network '$GH_PROXY_NETWORK' for the gh-auth-proxy sidecar — aborting (the real GitHub token was never forwarded)" >&2
+    exit 1
+  fi
+
+  # Complete header values, scheme prefix included, computed host-side and
+  # passed to the sidecar's environment only — never written to the staged
+  # Caddyfile and never forwarded into the agent container. Exported here and
+  # forwarded by bare name (-e NAME, no value) so the token never appears in
+  # the docker CLI's argv: /proc/<pid>/cmdline is world-readable on Linux,
+  # while environ is owner-only. tr -d '\n' is required: GNU base64 wraps at
+  # 76 columns (the encoded credential exceeds that), BSD base64 does not —
+  # stripping newlines unconditionally is correct either way.
+  GH_PROXY_BASIC="Basic $(printf '%s' "x-access-token:$GH_HOST_TOKEN" | base64 | tr -d '\n')"
+  GH_PROXY_BEARER="Bearer $GH_HOST_TOKEN"
+  export GH_PROXY_BASIC GH_PROXY_BEARER
+
+  GH_SIDECAR_MOUNTS=(-v "$(hostpath "$stage/gh-proxy/Caddyfile"):/etc/caddy/Caddyfile:ro")
+  if [ -n "$gh_policy_import" ]; then
+    GH_SIDECAR_MOUNTS+=(-v "$(hostpath "$stage/gh-proxy/policy.caddy"):/etc/caddy/policy.caddy:ro")
+  fi
+
+  # No published ports: the sidecar is reachable only from the agent
+  # container, over the session-private network created above. Capabilities
+  # dropped to the one Caddy needs (binding <1024 as non-root).
+  if ! "$RUNTIME" run -d --rm \
+      --name "$GH_PROXY_SIDECAR" \
+      --network "$GH_PROXY_NETWORK" \
+      --cap-drop ALL --cap-add NET_BIND_SERVICE \
+      --security-opt no-new-privileges \
+      -e GH_PROXY_BEARER \
+      -e GH_PROXY_BASIC \
+      "${GH_SIDECAR_MOUNTS[@]}" \
+      "$PROXY_IMAGE" >/dev/null; then
+    echo "claude-docker: failed to start the gh-auth-proxy sidecar ($PROXY_IMAGE) — aborting; the real GitHub token was never forwarded into any container. Try '$RUNTIME pull $PROXY_IMAGE', or use --gh-direct to bypass the proxy." >&2
+    exit 1
+  fi
+
+  # Caddy materializes its local CA root at config load, not lazily on first
+  # TLS handshake (verified against the pinned image per design.md) — this
+  # loop is a startup-race guard, not a wait for lazy generation. ~15s total
+  # budget, short retries.
+  gh_ca_ready=0
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if "$RUNTIME" cp "$GH_PROXY_SIDECAR:/data/caddy/pki/authorities/local/root.crt" "$stage/gh-proxy/root.crt" >/dev/null 2>&1; then
+      gh_ca_ready=1
+      break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ "$gh_ca_ready" != "1" ]; then
+    echo "claude-docker: gh-auth-proxy sidecar did not produce a CA certificate within 15s — aborting; the real GitHub token was never forwarded into any container. See '$RUNTIME logs $GH_PROXY_SIDECAR'." >&2
+    exit 1
+  fi
+
+  gh_proxy_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$GH_PROXY_NETWORK\").IPAddress}}" "$GH_PROXY_SIDECAR" 2>/dev/null)
+  if [ -z "$gh_proxy_ip" ]; then
+    echo "claude-docker: could not determine the gh-auth-proxy sidecar's network address — aborting; the real GitHub token was never forwarded into any container." >&2
+    exit 1
+  fi
+
+  # Wire the agent container: redirect only the three GitHub hostnames that
+  # need the Authorization header to the sidecar (--add-host rewrites
+  # resolution inside the agent container only — see design.md on why this
+  # beats a network alias), trust the sidecar's CA, and hand `gh` a
+  # placeholder that satisfies its "am I authenticated" check without being
+  # a usable credential.
+  MOUNT_ARGS+=(
+    "--network" "$GH_PROXY_NETWORK"
+    "--add-host" "github.com:$gh_proxy_ip"
+    "--add-host" "api.github.com:$gh_proxy_ip"
+    "--add-host" "uploads.github.com:$gh_proxy_ip"
+    "-v" "$(hostpath "$stage/gh-proxy/root.crt"):/usr/local/share/ca-certificates/claude-docker-gh-proxy.crt:ro"
+  )
+  ENV_ARGS+=(
+    "-e" "GH_TOKEN=claude-docker-proxy"
+    "-e" "NODE_EXTRA_CA_CERTS=/usr/local/share/ca-certificates/claude-docker-gh-proxy.crt"
+  )
+  GH_SIDECAR_ACTIVE=1
+  echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
+fi
 
 for item in agents commands skills; do
   src="$CLAUDE_CONFIG_DIR/$item"
@@ -474,6 +738,13 @@ while [ "$i" -lt "$n" ]; do
   i=$((i + 1))
 done
 [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")
+# Test-only hook for the run.sh-driven integration harness (tests/): replace
+# the agent container's command entirely so the harness can run assertions
+# in-container instead of claude. Undocumented — not a supported user-facing
+# override.
+if [ -n "${CLAUDE_DOCKER_TEST_ENTRY:-}" ]; then
+  CMD=(sh -c "$CLAUDE_DOCKER_TEST_ENTRY")
+fi
 # CLAUDE_DOCKER_TMUX=1   → plain tmux (works in any terminal)
 # CLAUDE_DOCKER_TMUX=cc  → tmux -CC, iTerm2 control mode (native panes on macOS).
 #                          Host must NOT already be inside tmux -CC — nesting
@@ -495,7 +766,16 @@ if [ "$EPHEMERAL" = "0" ]; then
   # Mask persisted in-container auth state when the opt-in flag is off, so a
   # prior `gh`/`glab`/`terraform` auth login stored under claude-code-root
   # doesn't leak into a session the user didn't ask to grant those creds to.
-  [ "$WITH_GH" = "0" ]   && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
+  # gh is the exception with three states, not two: masked whenever --gh is
+  # absent OR the sidecar is active (the placeholder env token makes
+  # persisted login state unnecessary, and leaving it accessible would
+  # reintroduce a persisted in-container secret) — unmasked only for --gh
+  # with no host token found (in-container login is the remaining auth
+  # path, unchanged from before this sidecar existed) and for --gh-direct.
+  gh_config_unmask=0
+  [ "$WITH_GH_DIRECT" = "1" ] && gh_config_unmask=1
+  [ "$WITH_GH" = "1" ] && [ "$GH_SIDECAR_ACTIVE" = "0" ] && gh_config_unmask=1
+  [ "$gh_config_unmask" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "$WITH_GLAB" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   [ "$WITH_TFE" = "0" ]  && MOUNT_ARGS+=("--tmpfs" "/root/.terraform.d")
   MOUNT_ARGS=(-v claude-code-root:/root -v claude-code-home:/root/.claude "${MOUNT_ARGS[@]}")

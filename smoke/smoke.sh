@@ -65,7 +65,15 @@ die() { echo "[smoke] FAIL: $*" >&2; exit 1; }
 # ---------------------------------------------------------------------------
 # Temp workspace + cleanup
 # ---------------------------------------------------------------------------
-TMPROOT=$(mktemp -d)
+# Staged under $HOME, not the mktemp default: everything under TMPROOT is
+# bind-mounted into containers, and macOS docker VMs don't share the default
+# location (Colima shares only $HOME; /var/folders is invisible to it), so
+# sources there arrive as empty dirs in-container. macOS mktemp ignores even
+# an explicit TMPDIR override for no-template invocations, hence the explicit
+# template. Same rationale as run.sh's stage_root.
+smoke_stage_root="${HOME}/.cache/claude-docker"
+mkdir -p "${smoke_stage_root}"
+TMPROOT=$(mktemp -d "${smoke_stage_root}/smoke.XXXXXX")
 WORKSPACE_HOST="${TMPROOT}/workspace"
 CREDS_HOST="${TMPROOT}/creds"
 mkdir -p "${WORKSPACE_HOST}" "${CREDS_HOST}"
