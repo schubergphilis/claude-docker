@@ -149,13 +149,19 @@ MOCK_CID=""
 BG_PIDS=()
 CLEANUP_DONE=0
 
-# Removes any claude-gh-* sidecars/networks — mirrors run.sh's own startup
-# prune (same prefix, same rationale). Called both before we start (so a prior
-# crashed run of THIS harness can't confuse network discovery below) and from
-# the exit trap (backstop only; each scenario's own release-handshake is the
-# primary teardown path).
+# Removes STOPPED claude-gh-* sidecars and unused networks — mirrors run.sh's
+# own startup prune (same prefix, same stopped-only rationale). CRITICAL: never
+# touches a RUNNING claude-gh-proxy-* container, because that almost certainly
+# belongs to a concurrent live `claude-docker --gh` session on this same host
+# (e.g. the one you may be running this from) — force-removing it would sever
+# that session's GitHub access mid-flight. Network rm is best-effort and fails
+# harmlessly on an in-use network (a live session's), so only genuinely orphaned
+# networks are removed. Called at pre-flight (so a prior crashed run of THIS
+# harness can't confuse discovery) and from the exit trap (backstop only).
 sweep_stale_claude_gh() {
-  docker ps -aq --filter "name=^claude-gh-proxy-" 2>/dev/null | while IFS= read -r cid; do
+  docker ps -aq --filter "name=^claude-gh-proxy-" \
+      --filter "status=exited" --filter "status=created" --filter "status=dead" \
+      2>/dev/null | while IFS= read -r cid; do
     [ -n "$cid" ] && docker rm -f "$cid" >/dev/null 2>&1
   done
   docker network ls -q --filter "name=^claude-gh-" 2>/dev/null | while IFS= read -r nid; do
@@ -193,6 +199,17 @@ trap cleanup EXIT INT TERM
 
 echo "Pre-flight: sweeping any stale claude-gh-* resources from a previous run..."
 sweep_stale_claude_gh
+
+# Baseline: claude-gh-* resources that already exist AFTER the sweep — i.e. a
+# concurrent live `claude-docker --gh` session's network/sidecar on this host
+# (the sweep leaves running sidecars alone). They legitimately persist for the
+# whole run, so teardown assertions must judge "clean" as "nothing NEW beyond
+# this baseline", never "nothing at all". Space-padded for whole-word `case`
+# membership tests.
+BASELINE_NETS=" $(docker network ls --filter 'name=claude-gh-' --format '{{.Name}}' 2>/dev/null | tr '\n' ' ')"
+BASELINE_SIDECARS=" $(docker ps -a --filter 'name=claude-gh-proxy-' --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
+[ "$(printf '%s' "$BASELINE_NETS" | tr -d ' ')" != "" ] \
+  && echo "Pre-flight: detected pre-existing claude-gh-* resources (likely a live --gh session) — excluding from teardown checks:$BASELINE_NETS"
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -265,15 +282,29 @@ wait_for_container_running() {
   return 1
 }
 
-no_claude_gh_resources() {
-  [ -z "$(docker ps -aq --filter 'name=claude-gh-' 2>/dev/null)" ] \
-    && [ -z "$(docker network ls -q --filter 'name=claude-gh-' 2>/dev/null)" ]
+# Space-separated list of claude-gh-* resources that exist now but were NOT in
+# the pre-existing baseline — i.e. resources this harness created and failed to
+# clean up. Empty means clean. A concurrent live session (in the baseline) is
+# correctly ignored.
+new_claude_gh_leftovers() {
+  local n c out=""
+  for n in $(docker network ls --filter 'name=claude-gh-' --format '{{.Name}}' 2>/dev/null); do
+    case "$BASELINE_NETS" in *" $n "*) ;; *) out="$out net:$n" ;; esac
+  done
+  for c in $(docker ps -a --filter 'name=claude-gh-proxy-' --format '{{.Names}}' 2>/dev/null); do
+    case "$BASELINE_SIDECARS" in *" $c "*) ;; *) out="$out container:$c" ;; esac
+  done
+  printf '%s' "${out# }"
+}
+
+no_new_claude_gh_resources() {
+  [ -z "$(new_claude_gh_leftovers)" ]
 }
 
 wait_for_absence_claude_gh() {
   local timeout="$1" i=0
   while [ "$i" -lt "$timeout" ]; do
-    no_claude_gh_resources && return 0
+    no_new_claude_gh_resources && return 0
     i=$((i + 1))
     sleep 1
   done
@@ -301,6 +332,16 @@ poll_new_network() {
     sleep 1
   done
   return 1
+}
+
+# Space-delimited snapshot of the claude-gh-* networks that exist RIGHT NOW.
+# Captured immediately before launching a run.sh and fed to poll_new_network as
+# the exclude list, so a network stranded by an earlier interrupted run (which
+# the pre-flight sweep cannot remove while a wedged sidecar still holds it)
+# can never be misidentified as this session's freshly-created network — the
+# failure mode that otherwise cascades into wrong-network mock attachment.
+snapshot_claude_gh_nets() {
+  docker network ls --filter "name=claude-gh-" --format '{{.Name}}' 2>/dev/null | tr '\n' ' '
 }
 
 # Builds a PATH whose first entry holds an always-failing `gh` stub, for the
@@ -584,6 +625,7 @@ respond @claude_docker_test_policy_ext "claude-docker gh-proxy policy (test exte
 POLICY
 
 LOG1="$SCRATCH/run1.log"
+PRE1=$(snapshot_claude_gh_nets)
 run_wrapped "$LOG1" env \
   GH_TOKEN="$FAKE1" \
   CLAUDE_DOCKER_RUNTIME=docker \
@@ -595,7 +637,7 @@ run_wrapped "$LOG1" env \
 PID1=$!
 BG_PIDS+=("$PID1")
 
-NET1=$(poll_new_network 30 "") || NET1=""
+NET1=$(poll_new_network 30 "$PRE1") || NET1=""
 SIDECAR1=""
 if [ -n "$NET1" ]; then
   record_pass "setup: session network '$NET1' appeared (task 2.1 naming: claude-gh-<id>)"
@@ -715,6 +757,7 @@ gen_assert_script "$WS2B/assert.sh" concurrent "$FAKE_B" ""
 LOG2A="$SCRATCH/run2a.log"
 LOG2B="$SCRATCH/run2b.log"
 
+PRE2A=$(snapshot_claude_gh_nets)
 run_wrapped "$LOG2A" env \
   GH_TOKEN="$FAKE_A" \
   CLAUDE_DOCKER_RUNTIME=docker \
@@ -725,7 +768,7 @@ run_wrapped "$LOG2A" env \
 PID2A=$!
 BG_PIDS+=("$PID2A")
 
-NET2A=$(poll_new_network 30 "") || NET2A=""
+NET2A=$(poll_new_network 30 "$PRE2A") || NET2A=""
 if [ -n "$NET2A" ]; then
   record_pass "4.5 session A got its own network '$NET2A'"
   docker network connect --alias ghmock "$NET2A" "$MOCK_CID" 2>/dev/null \
@@ -734,6 +777,7 @@ else
   record_fail "4.5 session A's network never appeared within 30s"
 fi
 
+PRE2B=$(snapshot_claude_gh_nets)
 run_wrapped "$LOG2B" env \
   GH_TOKEN="$FAKE_B" \
   CLAUDE_DOCKER_RUNTIME=docker \
@@ -744,7 +788,9 @@ run_wrapped "$LOG2B" env \
 PID2B=$!
 BG_PIDS+=("$PID2B")
 
-NET2B=$(poll_new_network 30 "$NET2A") || NET2B=""
+# PRE2B already includes NET2A (captured after A's network appeared), so B's
+# discovery excludes both leftovers and session A's network.
+NET2B=$(poll_new_network 30 "$PRE2B") || NET2B=""
 if [ -n "$NET2B" ] && [ "$NET2B" != "$NET2A" ]; then
   record_pass "4.5 session B got its own, distinct network '$NET2B'"
   docker network connect --alias ghmock "$NET2B" "$MOCK_CID" 2>/dev/null \
@@ -805,7 +851,7 @@ ingest_results_file "$WS2B/results.txt" "concurrent-B"
 if wait_for_absence_claude_gh 20; then
   record_pass "4.5 teardown: no claude-gh-* containers or networks remain after both sessions exit"
 else
-  record_fail "4.5 teardown: claude-gh-* leftovers found: containers=[$(docker ps -a --filter 'name=claude-gh-' --format '{{.Names}}' | tr '\n' ' ')] networks=[$(docker network ls --filter 'name=claude-gh-' --format '{{.Name}}' | tr '\n' ' ')]"
+  record_fail "4.5 teardown: harness-created claude-gh-* leftovers remain (baseline/live-session resources excluded): [$(new_claude_gh_leftovers)]"
 fi
 
 # ===========================================================================
@@ -833,7 +879,7 @@ wait "$PID3D"
 RC3D=$?
 if [ "$RC3D" -eq 0 ]; then record_pass "4.6 --gh-direct session exited 0"; else record_fail "4.6 --gh-direct session exited $RC3D"; fi
 ingest_results_file "$WS3D/results.txt" "gh-direct"
-if no_claude_gh_resources; then
+if no_new_claude_gh_resources; then
   record_pass "4.6 --gh-direct started no claude-gh-* sidecar or network"
 else
   record_fail "4.6 --gh-direct unexpectedly left claude-gh-* resources behind"
@@ -868,7 +914,7 @@ else
   record_pass "4.6 --gh with no host token printed no error-like output"
 fi
 ingest_results_file "$WS3N/results.txt" "gh-no-token"
-if no_claude_gh_resources; then
+if no_new_claude_gh_resources; then
   record_pass "4.6 --gh with no host token started no sidecar or network"
 else
   record_fail "4.6 --gh with no host token unexpectedly left claude-gh-* resources behind"
@@ -894,7 +940,7 @@ if grep -qF -- '--gh' "$LOG3X" && grep -qF -- 'gh-direct' "$LOG3X"; then
 else
   record_fail "4.6 --gh --gh-direct rejection message doesn't clearly name both flags (see $LOG3X)"
 fi
-if no_claude_gh_resources; then
+if no_new_claude_gh_resources; then
   record_pass "4.6 --gh --gh-direct started no container or sidecar"
 else
   record_fail "4.6 --gh --gh-direct unexpectedly left claude-gh-* resources behind"
@@ -928,7 +974,7 @@ if [ -f "$WS3I/should-not-exist" ]; then
 else
   record_pass "4.6 agent container never started when the sidecar failed to start (fail-closed)"
 fi
-if no_claude_gh_resources; then
+if no_new_claude_gh_resources; then
   record_pass "4.6 sidecar start failure left no claude-gh-* resources behind"
 else
   record_fail "4.6 sidecar start failure left claude-gh-* resources behind"

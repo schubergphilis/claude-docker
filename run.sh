@@ -243,6 +243,70 @@ hostpath() {
     printf '%s' "$1"
   fi
 }
+
+# Emit the gh-auth-proxy sidecar Caddyfile (consumed by the --gh block below)
+# to stdout. Deliberately a constant, not a template: every per-run difference
+# is resolved by Caddy itself — {$GH_PROXY_UPSTREAM_*} substituted at
+# config-load, {env.GH_PROXY_*} (the token) per-request — plus the always-
+# present /etc/caddy/policy.caddy import. header_up REPLACES any client-supplied
+# Authorization, so the placeholder GH_TOKEN gh/git send is discarded, never
+# forwarded; the token reaches Caddy only via {env.*} and never touches disk.
+# api.github.com/uploads.github.com take a Bearer token; github.com (git
+# smart-HTTP) takes Basic x-access-token:<token> — see design.md.
+gen_gh_proxy_caddyfile() {
+  cat <<'EOF'
+{
+	admin off
+	local_certs
+	skip_install_trust
+	log {
+		output stdout
+		format json
+	}
+}
+
+github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+	reverse_proxy {$GH_PROXY_UPSTREAM_GITHUB} {
+		header_up Authorization "{env.GH_PROXY_BASIC}"
+	}
+}
+
+api.github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+
+	@gh_proxy_repo_delete {
+		method DELETE
+		path_regexp ^/repos/[^/]+/[^/]+/?$
+	}
+	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	import /etc/caddy/policy.caddy
+
+	reverse_proxy {$GH_PROXY_UPSTREAM_API} {
+		header_up Authorization "{env.GH_PROXY_BEARER}"
+	}
+}
+
+uploads.github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+	reverse_proxy {$GH_PROXY_UPSTREAM_UPLOADS} {
+		header_up Authorization "{env.GH_PROXY_BEARER}"
+	}
+}
+EOF
+}
 # Expand a leading ~/ in CLAUDE_CONFIG_DIR — needed when set via env var, where
 # the shell does not perform tilde expansion. Pattern is "~/" not "~" so a
 # user-tilde form like "~alice/path" is not silently misresolved as "$HOME/alice/path".
@@ -475,83 +539,36 @@ GH_SIDECAR_ACTIVE=0
 if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   mkdir -p "$stage/gh-proxy"
 
-  gh_upstream_github="https://github.com"
-  gh_upstream_api="https://api.github.com"
-  gh_upstream_uploads="https://uploads.github.com"
-  # Test-only hook for the run.sh-driven integration harness (tests/): route
-  # every site block's reverse_proxy at a single mock upstream instead of
-  # real GitHub. Undocumented — not a supported user-facing override.
+  # Everything that varies between runs is injected into the sidecar's
+  # environment, not the config text: the upstreams here and the token
+  # further down. Real GitHub by default; the test-only
+  # CLAUDE_DOCKER_GH_UPSTREAM hook repoints all three at a single mock
+  # upstream (undocumented — for the tests/ integration harness only). Caddy
+  # substitutes these {$VAR} references at config-load time.
+  GH_PROXY_UPSTREAM_GITHUB="https://github.com"
+  GH_PROXY_UPSTREAM_API="https://api.github.com"
+  GH_PROXY_UPSTREAM_UPLOADS="https://uploads.github.com"
   if [ -n "${CLAUDE_DOCKER_GH_UPSTREAM:-}" ]; then
-    gh_upstream_github="$CLAUDE_DOCKER_GH_UPSTREAM"
-    gh_upstream_api="$CLAUDE_DOCKER_GH_UPSTREAM"
-    gh_upstream_uploads="$CLAUDE_DOCKER_GH_UPSTREAM"
+    GH_PROXY_UPSTREAM_GITHUB="$CLAUDE_DOCKER_GH_UPSTREAM"
+    GH_PROXY_UPSTREAM_API="$CLAUDE_DOCKER_GH_UPSTREAM"
+    GH_PROXY_UPSTREAM_UPLOADS="$CLAUDE_DOCKER_GH_UPSTREAM"
   fi
+  export GH_PROXY_UPSTREAM_GITHUB GH_PROXY_UPSTREAM_API GH_PROXY_UPSTREAM_UPLOADS
 
-  gh_policy_import=""
+  # The policy file is ALWAYS staged and mounted — the user's snippet when
+  # CLAUDE_DOCKER_GH_POLICY is set, an empty file otherwise — so the Caddyfile
+  # can `import` it unconditionally (importing an empty file is a no-op). That
+  # keeps the config free of a conditional import line, i.e. fully static.
   if [ -n "${CLAUDE_DOCKER_GH_POLICY:-}" ] && [ -f "$CLAUDE_DOCKER_GH_POLICY" ]; then
     cp "$CLAUDE_DOCKER_GH_POLICY" "$stage/gh-proxy/policy.caddy"
-    gh_policy_import="import /etc/caddy/policy.caddy"
+  else
+    : > "$stage/gh-proxy/policy.caddy"
   fi
 
-  # header_up REPLACES any client-supplied Authorization outright, so the
-  # placeholder GH_TOKEN that `gh`/git send into the container is discarded
-  # here, never forwarded. api.github.com/uploads.github.com want a Bearer
-  # token; github.com (git smart-HTTP) wants Basic x-access-token:<token> —
-  # see design.md for why the two differ. Both env values are computed below
-  # and injected only via {env.*} placeholders — the Caddyfile on disk never
-  # contains the token.
-  cat >"$stage/gh-proxy/Caddyfile" <<EOF
-{
-	admin off
-	local_certs
-	skip_install_trust
-	log {
-		output stdout
-		format json
-	}
-}
-
-github.com {
-	tls internal
-	log {
-		output stdout
-		format json
-	}
-	reverse_proxy $gh_upstream_github {
-		header_up Authorization "{env.GH_PROXY_BASIC}"
-	}
-}
-
-api.github.com {
-	tls internal
-	log {
-		output stdout
-		format json
-	}
-
-	@gh_proxy_repo_delete {
-		method DELETE
-		path_regexp ^/repos/[^/]+/[^/]+/?\$
-	}
-	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
-	$gh_policy_import
-
-	reverse_proxy $gh_upstream_api {
-		header_up Authorization "{env.GH_PROXY_BEARER}"
-	}
-}
-
-uploads.github.com {
-	tls internal
-	log {
-		output stdout
-		format json
-	}
-	reverse_proxy $gh_upstream_uploads {
-		header_up Authorization "{env.GH_PROXY_BEARER}"
-	}
-}
-EOF
+  # Static config emitted by gen_gh_proxy_caddyfile() (near hostpath above);
+  # everything variable is resolved by Caddy from the sidecar env and the
+  # policy import, not by the shell.
+  gen_gh_proxy_caddyfile >"$stage/gh-proxy/Caddyfile"
 
   if ! "$RUNTIME" network create "$GH_PROXY_NETWORK" >/dev/null; then
     echo "claude-docker: failed to create network '$GH_PROXY_NETWORK' for the gh-auth-proxy sidecar — aborting (the real GitHub token was never forwarded)" >&2
@@ -570,10 +587,12 @@ EOF
   GH_PROXY_BEARER="Bearer $GH_HOST_TOKEN"
   export GH_PROXY_BASIC GH_PROXY_BEARER
 
-  GH_SIDECAR_MOUNTS=(-v "$(hostpath "$stage/gh-proxy/Caddyfile"):/etc/caddy/Caddyfile:ro")
-  if [ -n "$gh_policy_import" ]; then
-    GH_SIDECAR_MOUNTS+=(-v "$(hostpath "$stage/gh-proxy/policy.caddy"):/etc/caddy/policy.caddy:ro")
-  fi
+  # Both mounts are unconditional: policy.caddy is always staged (empty when
+  # the user set no policy) so the Caddyfile's unconditional import resolves.
+  GH_SIDECAR_MOUNTS=(
+    -v "$(hostpath "$stage/gh-proxy/Caddyfile"):/etc/caddy/Caddyfile:ro"
+    -v "$(hostpath "$stage/gh-proxy/policy.caddy"):/etc/caddy/policy.caddy:ro"
+  )
 
   # No published ports: the sidecar is reachable only from the agent
   # container, over the session-private network created above. Capabilities
@@ -585,6 +604,9 @@ EOF
       --security-opt no-new-privileges \
       -e GH_PROXY_BEARER \
       -e GH_PROXY_BASIC \
+      -e GH_PROXY_UPSTREAM_GITHUB \
+      -e GH_PROXY_UPSTREAM_API \
+      -e GH_PROXY_UPSTREAM_UPLOADS \
       "${GH_SIDECAR_MOUNTS[@]}" \
       "$PROXY_IMAGE" >/dev/null; then
     echo "claude-docker: failed to start the gh-auth-proxy sidecar ($PROXY_IMAGE) — aborting; the real GitHub token was never forwarded into any container. Try '$RUNTIME pull $PROXY_IMAGE', or use --gh-direct to bypass the proxy." >&2
