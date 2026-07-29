@@ -31,6 +31,18 @@ cp /run/claude-docker/settings.json /root/.claude/settings.json
 chmod 600 /root/.claude/settings.json
 fi
 
+# GitHub auth-proxy sidecar CA (run.sh --gh with a sidecar active): install
+# it into the system trust store so git (libcurl) and gh (Go) trust the
+# sidecar's TLS termination for the redirected GitHub hostnames. Must run
+# as root, before the UID drop below — update-ca-certificates writes under
+# /etc/ssl/certs. Silent when the file is absent (no --gh, --gh-direct, or
+# the no-token fallback); a refresh failure is a warning, not fatal, so it
+# doesn't block the session over a CA problem the user can't fix here.
+if [ -f /usr/local/share/ca-certificates/claude-docker-gh-proxy.crt ]; then
+update-ca-certificates >/dev/null 2>&1 \
+  || printf 'entrypoint: WARN update-ca-certificates failed for the gh-auth-proxy CA\n' >&2
+fi
+
 if [ "$HOST_UID" = 0 ]; then
 exec "$@"
 fi
