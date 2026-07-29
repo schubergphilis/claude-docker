@@ -597,7 +597,13 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   # No published ports: the sidecar is reachable only from the agent
   # container, over the session-private network created above. Capabilities
   # dropped to the one Caddy needs (binding <1024 as non-root).
-  if ! "$RUNTIME" run -d --rm \
+  # Deliberately NOT --rm: `run -d` reports success as soon as the container
+  # *starts*, so a Caddy that exits immediately (most often an invalid
+  # CLAUDE_DOCKER_GH_POLICY snippet) needs its logs to diagnose — with --rm the
+  # container, and its logs, would already be gone by the time we notice. The
+  # EXIT trap removes it on session end; a stopped stray from a hard-killed
+  # run.sh is swept by the stopped-only prune at the next start.
+  if ! "$RUNTIME" run -d \
       --name "$GH_PROXY_SIDECAR" \
       --network "$GH_PROXY_NETWORK" \
       --cap-drop ALL --cap-add NET_BIND_SERVICE \
@@ -618,17 +624,29 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   # loop is a startup-race guard, not a wait for lazy generation. ~15s total
   # budget, short retries.
   gh_ca_ready=0
+  gh_proxy_exited=0
   i=0
   while [ "$i" -lt 15 ]; do
     if "$RUNTIME" cp "$GH_PROXY_SIDECAR:/data/caddy/pki/authorities/local/root.crt" "$stage/gh-proxy/root.crt" >/dev/null 2>&1; then
       gh_ca_ready=1
       break
     fi
+    # Distinguish "still starting" from "already dead" so a config error is
+    # reported as itself instead of waiting out the budget and blaming the CA.
+    if [ -z "$("$RUNTIME" ps -q --filter "name=^$GH_PROXY_SIDECAR$" 2>/dev/null)" ]; then
+      gh_proxy_exited=1
+      break
+    fi
     sleep 1
     i=$((i + 1))
   done
+  if [ "$gh_proxy_exited" = "1" ]; then
+    echo "claude-docker: the gh-auth-proxy sidecar exited during startup — aborting; the real GitHub token was never forwarded into any container. Caddy's own error follows (an invalid CLAUDE_DOCKER_GH_POLICY snippet is the usual cause):" >&2
+    "$RUNTIME" logs "$GH_PROXY_SIDECAR" 2>&1 | tail -15 | sed 's/^/  | /' >&2
+    exit 1
+  fi
   if [ "$gh_ca_ready" != "1" ]; then
-    echo "claude-docker: gh-auth-proxy sidecar did not produce a CA certificate within 15s — aborting; the real GitHub token was never forwarded into any container. See '$RUNTIME logs $GH_PROXY_SIDECAR'." >&2
+    echo "claude-docker: gh-auth-proxy sidecar did not produce a CA certificate within 15s — aborting; the real GitHub token was never forwarded into any container. The sidecar is still running; inspect it with '$RUNTIME logs $GH_PROXY_SIDECAR' (it is removed when this command exits)." >&2
     exit 1
   fi
 
