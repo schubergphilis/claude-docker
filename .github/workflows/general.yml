@@ -1,4 +1,3 @@
-# yamllint disable rule:line-length
 ---
 name: General
 "on":
@@ -26,6 +25,7 @@ jobs:
       # action. Pinned to v0.6.1 by commit SHA rather than by tag name: this
       # job's own zizmor audit reports a tag ref as unpinned-uses, and a tag is
       # mutable. Same style as the actions/checkout pin above.
+      # yamllint disable rule:line-length
       - uses: schubergphilis/mcvs-general-action@86c9a1021d8a7e43012d9501df19e709f3c52b7a # v0.6.1
         with:
           testing-type: ${{ matrix.args.testing-type }}
