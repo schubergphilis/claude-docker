@@ -1,0 +1,31 @@
+# yamllint disable rule:line-length
+---
+name: General
+"on":
+  pull_request:
+permissions:
+  contents: read
+  packages: read
+jobs:
+  MCVS-general-action:
+    strategy:
+      matrix:
+        args:
+          - testing-type: lint-action
+          - testing-type: lint-commit
+          - testing-type: lint-git
+          - testing-type: security-file-system
+          - testing-type: yamllint
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The previous ref was the zizmor-advanced-security feature branch, which
+      # has since been merged and deleted, so every run failed to resolve the
+      # action. Pinned to v0.6.1 by commit SHA rather than by tag name: this
+      # job's own zizmor audit reports a tag ref as unpinned-uses, and a tag is
+      # mutable. Same style as the actions/checkout pin above.
+      - uses: schubergphilis/mcvs-general-action@86c9a1021d8a7e43012d9501df19e709f3c52b7a # v0.6.1
+        with:
+          testing-type: ${{ matrix.args.testing-type }}
