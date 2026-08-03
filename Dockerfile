@@ -100,7 +100,8 @@ RUN . /tmp/glab.env; set -e; ARCH=$(dpkg --print-architecture); \
     curl -fsSL "$URL" -o /tmp/glab.deb \
  && echo "${SHA}  /tmp/glab.deb" | sha256sum -c - \
  && apt-get install -y --no-install-recommends /tmp/glab.deb \
- && rm /tmp/glab.deb /tmp/glab.env
+ && rm /tmp/glab.deb /tmp/glab.env \
+ && rm -rf /var/lib/apt/lists/*
 
 # AWS CLI v2 — version + download URL + sha256 from the generated pins/awscli.env.
 # URL sourced from the fragment so the pinned sha256 covers exactly what is
