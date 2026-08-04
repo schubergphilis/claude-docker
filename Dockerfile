@@ -15,7 +15,7 @@
 # it alone and only reminds the operator to check it.
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_24.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
-ARG NODE_VERSION=24.17.0-1nodesource1
+ARG NODE_VERSION=24.18.1-1nodesource1
 
 # ── installer ────────────────────────────────────────────────────────────────
 # Has curl, gnupg, unzip, and all apt repository infrastructure needed to
@@ -199,6 +199,13 @@ RUN groupadd -g 999 claude \
 # as a binary below.
 COPY --from=installer /etc/apt/keyrings/nodesource.gpg /etc/apt/keyrings/nodesource.gpg
 
+# ca-certificates must be installed before apt-get update can verify the
+# NodeSource HTTPS repo — installing it in the same RUN that adds the repo
+# is too late, so we bootstrap it first.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ca-certificates curl \
+ && rm -rf /var/lib/apt/lists/*
+
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
 # NodeSource's distro-independent codename (works on any Debian/Ubuntu).
@@ -207,8 +214,6 @@ RUN chmod go+r /etc/apt/keyrings/nodesource.gpg \
       > /etc/apt/sources.list.d/nodesource.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends \
-      ca-certificates \
-      curl \
       "nodejs=${NODE_VERSION}" \
       git \
       git-lfs \
