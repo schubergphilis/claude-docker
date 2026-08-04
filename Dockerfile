@@ -165,7 +165,7 @@ RUN . /tmp/tfenv.env \
  && echo "${TFENV_SHA256}  /tmp/tfenv.tar.gz" | sha256sum -c - \
  && mkdir -p /opt/tfenv \
  && tar -xzf /tmp/tfenv.tar.gz -C /opt/tfenv --strip-components=1 \
- && rm /tmp/tfenv.tar.gz /tmp/tfenv.env
+ && rm /tmp/tfenv.tar.gz /tmp/tfenv.env /opt/tfenv/Dockerfile
 
 
 # ── runtime ───────────────────────────────────────────────────────────────────
@@ -224,6 +224,18 @@ RUN chmod go+r /etc/apt/keyrings/nodesource.gpg \
       openssh-client \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
+
+# Strip setuid/setgid bits from base-image and openssh-client binaries whose
+# privileged function (password/account management, mount, host-based SSH
+# auth) is never exercised by this container — entrypoint uses `runuser`, not
+# `su`, and there's no local password store or fstab to manage. Removing the
+# bit closes off privilege-escalation paths for the dropped-privilege
+# `claude` user without touching the binaries' non-privileged behavior.
+RUN chmod -s \
+      /usr/bin/chage /usr/bin/chfn /usr/bin/chsh /usr/bin/expiry \
+      /usr/bin/gpasswd /usr/bin/mount /usr/bin/passwd /usr/bin/su \
+      /usr/bin/umount /usr/bin/ssh-agent /usr/lib/openssh/ssh-keysign \
+      /usr/sbin/unix_chkpwd /usr/sbin/pam_extrausers_chkpwd
 
 # gh and glab: self-contained Go binaries — no apt repo infrastructure needed.
 COPY --from=installer /usr/bin/gh   /usr/bin/gh
