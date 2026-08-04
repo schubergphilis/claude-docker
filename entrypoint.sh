@@ -4,8 +4,8 @@
 #
 # Drop from container root to the host user's UID/GID before exec'ing claude
 # so that files written through bind-mounts match host ownership. With
-# HOST_UID unset or 0, falls through to the legacy "run as root" behavior so
-# the image still works in environments that don't forward the host UID.
+# HOST_UID unset or 0, falls back to the baked-in non-root `claude` user
+# (UID 999) so the container never runs the workload as root.
 set -euo pipefail
 
 HOST_UID="${HOST_UID:-0}"
@@ -44,7 +44,7 @@ update-ca-certificates >/dev/null 2>&1 \
 fi
 
 if [ "$HOST_UID" = 0 ]; then
-exec "$@"
+exec runuser -u claude -- "$@"
 fi
 
 # Synthesize a passwd entry so getpwuid / $HOME / shell expansions resolve
