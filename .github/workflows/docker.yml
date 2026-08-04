@@ -1,0 +1,33 @@
+---
+name: Docker
+"on":
+  # required by gomod-go-version-updater to trigger this action once pr has
+  # been reviewed
+  pull_request_review:
+    types: [submitted]
+  push:
+permissions:
+  contents: read
+  packages: write
+jobs:
+  mcvs-docker-action:
+    strategy:
+      matrix:
+        args:
+          - build-args: claude-docker
+            image-suffix: ""
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # yamllint disable rule:line-length
+      - uses: schubergphilis/mcvs-docker-action@1de6c6ce1dd24cdea3b1964a13ac902a7cd57128 # v0.11.6
+        with:
+          build-args: ${{ matrix.args.build-args }}
+          images: |-
+            ghcr.io/${{ github.repository }}${{ matrix.args.image-suffix }}
+          # yamllint disable rule:line-length
+          dockle-accept-key: libcrypto3>,libssl3>,PATH,APPLICATION,HOME,APPLICATION_PERMISSIONS,APPLICATION_USER_ID,curl,NODE_VERSION,--chmod,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,--strip-components,DISABLE_AUTOUPDATER,ARCH,nodejs,URL,IS_SANDBOX,SHA,LANG,LC_ALL
+          # yamllint enable rule:line-length
+          token: ${{ secrets.GITHUB_TOKEN }}

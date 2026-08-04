@@ -133,11 +133,20 @@ SECURITY_ARGS=(
 
 # Core env. EXPECT_SETTINGS / EXPECT_SETTINGS_SENTINEL are injected per pass
 # in run_container — the warm cell varies them between passes.
+# EXPECT_UID/GID mirror HOST_UID/GID, except HOST_UID=0 (unset): the
+# entrypoint resolves that to the baked-in claude account (999:999, see
+# entrypoint.sh), so the fallback cell must expect 999, not 0.
+EXPECT_UID_ARG="${HOST_UID_ARG}"
+EXPECT_GID_ARG="${HOST_GID_ARG}"
+if [ "${HOST_UID_ARG}" = "0" ]; then
+  EXPECT_UID_ARG=999
+  EXPECT_GID_ARG=999
+fi
 ENV_ARGS=(
   "-e" "HOST_UID=${HOST_UID_ARG}"
   "-e" "HOST_GID=${HOST_GID_ARG}"
-  "-e" "EXPECT_UID=${HOST_UID_ARG}"
-  "-e" "EXPECT_GID=${HOST_GID_ARG}"
+  "-e" "EXPECT_UID=${EXPECT_UID_ARG}"
+  "-e" "EXPECT_GID=${EXPECT_GID_ARG}"
   "-e" "EXPECT_OPTINS=${OPTINS}"
   "-e" "EXPECT_RO=${RO}"
   "-e" "WORKSPACE=${CONTAINER_WORKSPACE}"
@@ -346,7 +355,8 @@ if [ "${RO}" = "0" ]; then
   #    numerically, so a file the container wrote as HOST_UID is owned by that
   #    same UID on the host — `stat` reads it back regardless of the runner's own
   #    UID (so this covers the uid=501 cell too). Skipped only for HOST_UID=0,
-  #    where the file is root-owned and ownership round-trip is not the point.
+  #    where the entrypoint falls back to the baked-in claude account (999) and
+  #    there's no host-side account to round-trip against.
   if [ "${HOST_UID_ARG}" != "0" ]; then
     PROBE_OWNER=$(stat -c '%u' "${PROBE_FILE}" 2>/dev/null || stat -f '%u' "${PROBE_FILE}" 2>/dev/null)
     if [ "${PROBE_OWNER}" = "${HOST_UID_ARG}" ]; then

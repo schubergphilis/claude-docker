@@ -1,0 +1,9 @@
+# No USER directive by design: the container starts as root so the
+# entrypoint can chown /root to the host UID and useradd a matching
+# passwd entry, then drops privileges via runuser. Steady-state, claude
+# runs as the host user (or the baked-in UID 999 `claude` user when
+# HOST_UID is unset) with no effective/permitted/ambient capabilities —
+# the kernel clears those on the UID→non-zero transition; the bounding
+# set retains the setup caps but is inert under `no-new-privileges`.
+# See entrypoint.sh and run.sh's --cap-add lines for the full picture.
+CIS-DI-0001
