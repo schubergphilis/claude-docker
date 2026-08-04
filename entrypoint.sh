@@ -43,21 +43,33 @@ update-ca-certificates >/dev/null 2>&1 \
   || printf 'entrypoint: WARN update-ca-certificates failed for the gh-auth-proxy CA\n' >&2
 fi
 
+# TARGET_UID/GID resolve HOST_UID=0 (unset) to the baked-in claude account
+# (999:999, see Dockerfile) so the fallback path never runs the workload as
+# root. Used below for both the account remap and the /root chown walk: the
+# fallback needs the exact same "claude can read its own HOME" treatment as
+# a real HOST_UID, since /root ships root-owned 0700 and claude otherwise
+# can't even traverse into it.
 if [ "$HOST_UID" = 0 ]; then
-exec runuser -u claude -- "$@"
-fi
+TARGET_UID=999
+TARGET_GID=999
+else
+TARGET_UID="$HOST_UID"
+TARGET_GID="$HOST_GID"
 
-# Synthesize a passwd entry so getpwuid / $HOME / shell expansions resolve
-# cleanly inside the container. -o (--non-unique) tolerates a HOST_UID that
-# happens to collide with a baked-in Ubuntu system user. HOME=/root is
-# deliberate — keeps the existing /root/.claude, /root/.aws, /root/.config
-# mount paths intact instead of forcing a layout migration.
-# -K UID_MIN=1 overrides the login.defs floor per-call so macOS UIDs (≥501,
-# below Ubuntu's default 1000) don't trigger a warning.
+# Remap the baked-in `claude` account (UID/GID 999) to the host's UID/GID
+# rather than useradd/groupadd-ing a second account: the image already has
+# a passwd/group entry named `claude`, so creating another one under that
+# same name fails with "already exists" the moment HOST_UID/GID isn't
+# already 999 (i.e. almost always). usermod/groupmod -o (--non-unique)
+# tolerates a HOST_UID/GID that happens to collide with a baked-in Ubuntu
+# system account. HOME stays /root — keeps the existing /root/.claude,
+# /root/.aws, /root/.config mount paths intact instead of forcing a layout
+# migration.
 if ! getent passwd "$HOST_UID" >/dev/null 2>&1; then
 getent group "$HOST_GID" >/dev/null 2>&1 \
-    || groupadd -o -g "$HOST_GID" claude
-useradd -o -K UID_MIN=1 -u "$HOST_UID" -g "$HOST_GID" -d /root -s /bin/bash -M -N claude
+    || groupmod -o -g "$HOST_GID" claude
+usermod -o -u "$HOST_UID" -g "$HOST_GID" claude
+fi
 fi
 
 # Chown the persistent /root volumes (claude-code-root, claude-code-home)
@@ -75,7 +87,7 @@ fi
 # container root can traverse HOST_UID-owned, mode-0700 directories
 # under /root.
 chown_errs="$(find /root /root/.claude -xdev -print0 \
-  | xargs -0 --no-run-if-empty chown -h "$HOST_UID:$HOST_GID" 2>&1 >/dev/null || true)"
+  | xargs -0 --no-run-if-empty chown -h "$TARGET_UID:$TARGET_GID" 2>&1 >/dev/null || true)"
 chown_errs="$(grep -v 'Read-only file system' <<<"$chown_errs" || true)"
 [ -n "$chown_errs" ] && printf 'entrypoint: WARN chown: %s\n' "$chown_errs" >&2 || true
 

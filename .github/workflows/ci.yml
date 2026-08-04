@@ -130,7 +130,7 @@ jobs:
         #   4. runner-uid/cold/aws+glab+tfe  — all three opt-ins combined
         #   5. runner-uid/warm               — warm volume (HOST_UID-owned /root traversal)
         #   6. uid-501/cold/no-optins        — macOS-style UID (<1000, below Ubuntu floor)
-        #   7. uid-0/cold/no-optins          — root-legacy path (HOST_UID=0 → exec directly)
+        #   7. uid-0/cold/no-optins          — HOST_UID unset/0 fallback (entrypoint drops to the baked-in claude/999)
         #   8. runner-uid/ephemeral          — --ephemeral mode (no named volumes)
         #   9. runner-uid/ro/no-optins       — read-only workspace (EROFS robustness)
         run: |
@@ -162,8 +162,8 @@ jobs:
           # 6. macOS-style UID 501 (below Ubuntu's default UID_MIN=1000).
           run_cell --uid=501 --volstate=cold --ephemeral=0
 
-          # 7. Root-legacy path: HOST_UID=0 → entrypoint skips useradd+runuser and
-          #    exec's claude directly as container root.
+          # 7. HOST_UID unset/0 fallback: the entrypoint drops to the baked-in
+          #    claude account (999:999) instead of leaving the workload as root.
           run_cell --uid=0 --volstate=cold --ephemeral=0
 
           # 8. Ephemeral mode: no named volumes.

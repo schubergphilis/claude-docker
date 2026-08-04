@@ -107,11 +107,8 @@ check_identity() {
   fi
 
   # And it must be the EXPECTED primary GID — a regression assigning claude to
-  # gid 0 (root) as its single group would pass the count check above. Skip for
-  # the root-legacy cell, where the process keeps gid 0 (not HOST_GID).
-  if [ "${EXPECT_UID:-0}" != "0" ]; then
-    assert_eq "primary-GID=EXPECT_GID" "$(id -g)" "${EXPECT_GID:-0}"
-  fi
+  # gid 0 (root) as its single group would pass the count check above.
+  assert_eq "primary-GID=EXPECT_GID" "$(id -g)" "${EXPECT_GID:-0}"
 
   # HOME must be /root regardless of HOST_UID (kept for mount-path compatibility).
   home_val="${HOME:-}"
@@ -137,8 +134,7 @@ check_security() {
   cap_bnd=$(grep '^CapBnd:' "$status_file" | awk '{print $2}')
   nnp=$(grep '^NoNewPrivs:' "$status_file" | awk '{print $2}')
 
-  # Universal invariants — these hold regardless of HOST_UID (including the
-  # root-legacy path), so assert them BEFORE the uid=0 branch below.
+  # Universal invariants — these hold regardless of HOST_UID.
   # no-new-privileges and the absence of setuid-root binaries are exactly the
   # controls that bound blast radius if the root path is ever entered, so the
   # root cell is the one place we most want them confirmed.
@@ -161,17 +157,10 @@ check_security() {
     pass "no-sudo: sudo not installed (no escalation path beyond the inert base setuid set)"
   fi
 
-  # Root-legacy path: with HOST_UID=0 the entrypoint execs directly as root
-  # (entrypoint.sh :11-13) and never drops privileges, so root legitimately
-  # retains effective caps. The dropped-privilege posture below does NOT apply;
-  # asserting CapEff==0 here would wrongly fail a correct image.
-  if [ "${EXPECT_UID:-0}" = "0" ]; then
-    pass "security: HOST_UID=0 root-legacy path — cap-drop posture N/A (runs as root by design)"
-    return
-  fi
-
   # Dropped-privilege posture: CapEff/CapPrm/CapAmb must all be zero after
-  # runuser drops UID 0. CapBnd retains the --cap-add set but is inert under
+  # runuser drops UID 0 — including the HOST_UID=0 fallback, which now drops
+  # to the baked-in claude account (999) exactly like any other cell, never
+  # staying root. CapBnd retains the --cap-add set but is inert under
   # NoNewPrivs. Bit decomposition of the expected 0xc5 bounding set:
   #   CAP_CHOWN          (0) → bit 0 → 0x001
   #   CAP_DAC_READ_SEARCH(2) → bit 2 → 0x004
