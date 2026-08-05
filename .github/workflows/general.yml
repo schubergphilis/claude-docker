@@ -25,6 +25,6 @@ jobs:
       # job's own zizmor audit reports a tag ref as unpinned-uses, and a tag is
       # mutable. Same style as the actions/checkout pin above.
       # yamllint disable rule:line-length
-      - uses: schubergphilis/mcvs-general-action@86c9a1021d8a7e43012d9501df19e709f3c52b7a # v0.6.1
+      - uses: schubergphilis/mcvs-general-action@03b7d82ed321d30353707237ce1d95a65899548c # v0.6.2
         with:
           testing-type: ${{ matrix.args.testing-type }}
