@@ -33,6 +33,9 @@
 #        discoverable host token starts no sidecar and stays silent; --gh
 #        --gh-direct together is rejected; a bad CLAUDE_DOCKER_PROXY_IMAGE
 #        fails closed (no agent container, no leftovers).
+#   #22  release-asset HEAD probes leave the sidecar with no Authorization
+#        header while the GET on the same path keeps the injected Basic one,
+#        and UV_SYSTEM_CERTS=1 reaches the agent container.
 #
 # Known deviations / assumptions (see the final report to the orchestrator for
 # the full list):
@@ -500,6 +503,30 @@ run_main_checks() {
       fail "4.3 CLAUDE_DOCKER_GH_POLICY extension did not block DELETE .../git/refs/heads/foo (code=$refs_code)"
     fi
   fi
+
+  # --- issue #22: release-asset HEAD probes must leave the sidecar anonymous ---
+  # Real GitHub routes a release-asset HEAD that carries ANY Authorization
+  # header to a legacy objects.githubusercontent.com pre-signed URL that then
+  # 401s, which is what breaks uv (it probes with HEAD before GET). That routing
+  # is GitHub-side and cannot be reproduced against a mock, so what the harness
+  # asserts here is the sidecar's half of the contract — which credential each
+  # method carries — plus the env var that lets uv trust the session CA at all.
+  # The HEAD is asserted host-side from the mock's access log: a HEAD response
+  # carries no body, so the echo cannot report its own headers.
+  if [ "${UV_SYSTEM_CERTS:-}" = "1" ]; then
+    pass "#22 UV_SYSTEM_CERTS=1 present in the agent env (uv reads the OS trust store)"
+  else
+    fail "#22 UV_SYSTEM_CERTS: expected '1', got '${UV_SYSTEM_CERTS:-<unset>}' — uv would fail TLS against the intercepted hostnames"
+  fi
+
+  local asset_url="https://github.com/o/r/releases/download/v1.0.0/pkg-1.0.0-py3-none-any.whl"
+  curl -sS --max-time 10 -I -o /dev/null "$asset_url" 2>/dev/null
+  local asset_get
+  asset_get=$(curl -sS --max-time 10 "$asset_url" 2>/dev/null)
+  case "$asset_get" in
+    *'"authorization":"Basic '*) pass "#22 GET on a release-asset path still carries the injected Basic credential" ;;
+    *) fail "#22 GET on a release-asset path lost its injected credential: $asset_get" ;;
+  esac
 }
 
 run_concurrent_check() {
@@ -736,6 +763,28 @@ if [ -f "$SCRATCH/mock-phase1.log" ]; then
     record_pass "4.2 git ls-remote's smart-HTTP discovery request reached the mock with a Basic Authorization header"
   else
     record_fail "4.2 could not confirm git's request + Basic header arrived at the mock (see $SCRATCH/mock-phase1.log)"
+  fi
+
+  # Issue #22, the two halves that matter for regressions: the HEAD must arrive
+  # with NO Authorization header (otherwise GitHub's dead-legacy-URL routing
+  # comes back), and the GET on the very same path must still arrive WITH the
+  # injected Basic header (otherwise the exclusion has leaked past HEAD and
+  # widened into traffic that works today). Caddy omits the key entirely when
+  # the header is absent, so its presence/absence is a reliable signal.
+  asset_uri='"uri":"/o/r/releases/download/v1.0.0/pkg-1.0.0-py3-none-any.whl"'
+  asset_head_lines=$(grep -F "$asset_uri" "$SCRATCH/mock-phase1.log" 2>/dev/null | grep -F '"method":"HEAD"' || true)
+  if [ -z "$asset_head_lines" ]; then
+    record_fail "#22 the release-asset HEAD never reached the mock upstream (see $SCRATCH/mock-phase1.log)"
+  elif printf '%s\n' "$asset_head_lines" | grep -qF '"Authorization"'; then
+    record_fail "#22 the release-asset HEAD still carried an Authorization header upstream — GitHub would route it to the 401ing objects.githubusercontent.com URL"
+  else
+    record_pass "#22 the release-asset HEAD reached the upstream with no Authorization header"
+  fi
+  asset_get_lines=$(grep -F "$asset_uri" "$SCRATCH/mock-phase1.log" 2>/dev/null | grep -F '"method":"GET"' || true)
+  if printf '%s\n' "$asset_get_lines" | grep -qF '"Authorization":["Basic'; then
+    record_pass "#22 the release-asset GET still reached the upstream with the injected Basic header (exclusion did not widen past HEAD)"
+  else
+    record_fail "#22 the release-asset GET lost its injected Basic header (see $SCRATCH/mock-phase1.log)"
   fi
 else
   record_fail "4.2/4.3 mock upstream log for phase 1 was never captured"
