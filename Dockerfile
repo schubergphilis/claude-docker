@@ -19,6 +19,13 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # Bump with: curl -fsSL https://deb.nodesource.com/node_24.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
 ARG NODE_VERSION=24.17.0-1nodesource1
 
+# task (go-task) is the same class of MANUAL pin as nodejs above: it installs from
+# a signed apt repo (Cloudsmith), and update_pins.py only knows how to pin direct
+# downloads by URL + sha256, so it leaves this alone. Cloudsmith retains every
+# published version, so an old pin keeps resolving until you bump it.
+# Bump with: curl -fsSL https://dl.cloudsmith.io/public/task/task/deb/ubuntu/dists/resolute/main/binary-amd64/Packages.gz | gunzip | grep -A1 '^Package: task$' | head -2
+ARG TASK_VERSION=3.53.1
+
 # Every other tool's version (and per-arch sha256) is a GENERATED pin under
 # pins/<tool>.env — NOT an ARG. Each install RUN below COPYs and sources its
 # fragment, so `docker build .` is reproducible from the committed lockfile with
@@ -83,6 +90,26 @@ RUN install -d -m 0755 /etc/apt/keyrings \
       > /etc/apt/sources.list.d/github-cli.list \
  && apt-get update \
  && apt-get install -y --no-install-recommends gh \
+ && rm -rf /var/lib/apt/lists/*
+
+# Task (go-task) — the upstream apt instructions are `curl … setup.deb.sh | bash`;
+# that script is inlined here instead (fetch key, write sources.list, install), so
+# nothing pipes a remote script into a shell at build time. Repo, key and layout
+# are exactly what setup.deb.sh produces. Cloudsmith serves one pool under every
+# codename path, so $VERSION_CODENAME survives a base-image bump to a release the
+# repo has no explicit dist for.
+# Version-pinned via TASK_VERSION (unlike `gh` above, which floats): Cloudsmith
+# keeps every published version in the pool, so pinning here does not break on the
+# next upstream release the way pinning against Ubuntu's own archive would.
+RUN . /etc/os-release \
+ && install -d -m 0755 /etc/apt/keyrings \
+ && curl -fsSL https://dl.cloudsmith.io/public/task/task/gpg.046FD1186CA342F0.key \
+      | gpg --dearmor -o /etc/apt/keyrings/task-archive-keyring.gpg \
+ && chmod go+r /etc/apt/keyrings/task-archive-keyring.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/task-archive-keyring.gpg] https://dl.cloudsmith.io/public/task/task/deb/ubuntu ${VERSION_CODENAME} main" \
+      > /etc/apt/sources.list.d/task.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends "task=${TASK_VERSION}" \
  && rm -rf /var/lib/apt/lists/*
 
 # GitLab CLI (glab) — version + download URL + sha256 from the generated
