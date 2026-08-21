@@ -507,17 +507,43 @@ def ubuntu_current_digest() -> str:
         return ""
 
 
+def go_latest_stable() -> str:
+    """Newest stable Go version per go.dev's release feed, without the `go`
+    prefix (e.g. '1.26.7'). Best-effort: returns '' on any failure.
+
+    Go stays a manual pin because this feed carries no publish dates — there is
+    nothing here to evaluate the soak window against, so Go cannot join the
+    automated selection in TOOLS without a second, weaker date source."""
+    try:
+        rel = get_json("https://go.dev/dl/?mode=json")
+        stable = [r["version"].removeprefix("go") for r in rel if r.get("stable")]
+        return max_stable(stable)
+    except Exception:
+        return ""
+
+
 def print_reminders():
     print("\n  ⚠ needs your eyes (manual pins) ─────────────────────────────")
     node = ""
+    go = ""
     base = ""
     for line in DOCKERFILE.read_text().splitlines():
         if line.startswith("ARG NODE_VERSION="):
             node = line.split("=", 1)[1]
+        if line.startswith("ARG GO_VERSION="):
+            go = line.split("=", 1)[1]
         m = re.search(r"@(sha256:[0-9a-f]+)", line)
         if line.startswith("FROM ubuntu") and m:
             base = m.group(1)
     print(f"  ⚠ nodejs        pinned {node or '?'}  — bump via the NodeSource note in the Dockerfile")
+    go_cur = go_latest_stable()
+    if go_cur and go_cur != go:
+        print(f"  ⚠ go            pinned {go or '?'}  latest stable → {go_cur}  "
+              f"(bump via the go.dev note in the Dockerfile — hashes too)")
+    elif go_cur:
+        print(f"  ⚠ go            pinned {go or '?'}  (matches latest stable on go.dev)")
+    else:
+        print(f"  ⚠ go            pinned {go or '?'}  (could not resolve latest stable from go.dev)")
     cur = ubuntu_current_digest()
     if cur and cur != base:
         print(f"  ⚠ ubuntu base   pinned {base[:19]}…  current tag → {cur[:19]}…  (DIFFERS — review)")

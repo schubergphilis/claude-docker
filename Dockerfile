@@ -26,6 +26,10 @@ ARG NODE_VERSION=24.17.0-1nodesource1
 # Bump with: curl -fsSL https://dl.cloudsmith.io/public/task/task/deb/ubuntu/dists/resolute/main/binary-amd64/Packages.gz | gunzip | grep -A1 '^Package: task$' | head -2
 ARG TASK_VERSION=3.53.1
 
+# Go is the other MANUAL pin (ARG GO_VERSION + per-arch sha256, see its block
+# below): go.dev's release feed has no publish dates, so update_pins.py can't
+# soak-gate it and only reports how the pin compares to the latest stable.
+#
 # Every other tool's version (and per-arch sha256) is a GENERATED pin under
 # pins/<tool>.env — NOT an ARG. Each install RUN below COPYs and sources its
 # fragment, so `docker build .` is reproducible from the committed lockfile with
@@ -166,6 +170,38 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
  && install -m 0755 "/tmp/uv/uv-${ARCH}-unknown-linux-gnu/uvx" /usr/local/bin/uvx \
  && rm -rf /tmp/uv /tmp/uv.tar.gz /tmp/uv.env
 
+# Go toolchain — the official tarball from go.dev, unpacked into /usr/local/go
+# exactly as https://go.dev/doc/install prescribes (no apt: Ubuntu's golang-go
+# tracks an older release and splits GOROOT across paths the upstream installer
+# assumes are one tree).
+# MANUAL pin, like NODE_VERSION above and NOT a pins/ fragment: go.dev's release
+# JSON carries no publish dates, so update_pins.py cannot evaluate its soak
+# window for Go — it only reminds the operator to look. 1.26.6 was tagged
+# 2026-08-13, i.e. it had already cleared the 7-day soak when pinned here.
+# Bump with (version + both hashes in one shot):
+#   curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r '.[] | select(.stable) |
+#     .version, (.files[] | select(.os=="linux" and .kind=="archive" and
+#     (.arch=="amd64" or .arch=="arm64")) | "  " + .arch + " " + .sha256)'
+# Confirm a bump the way these two hashes were produced: download both tarballs
+# and sha256sum them locally rather than trusting the JSON's advertised digest.
+# Placed before the npm layer on purpose — the tarball is ~64 MB and Go moves far
+# less often than the claude-code pin, so a weekly claude-code bump does not
+# re-download it.
+ARG GO_VERSION=1.26.6
+ARG GO_SHA256_AMD64=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89
+ARG GO_SHA256_ARM64=d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e
+RUN ARCH=$(dpkg --print-architecture); \
+    case "$ARCH" in \
+      amd64) SHA="${GO_SHA256_AMD64}" ;; \
+      arm64) SHA="${GO_SHA256_ARM64}" ;; \
+      *) echo "Unsupported arch for go: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tar.gz \
+ && echo "${SHA}  /tmp/go.tar.gz" | sha256sum -c - \
+ && tar -C /usr/local -xzf /tmp/go.tar.gz \
+ && rm /tmp/go.tar.gz \
+ && /usr/local/go/bin/go version
+
 # npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
 # run `npm audit signatures <pkg>@<ver>` when bumping.
 # --ignore-scripts blocks lifecycle hooks for every package + transitive dep
@@ -223,11 +259,17 @@ EOF
 # DISABLE_AUTOUPDATER=1 keeps the pinned CLAUDE_CODE_VERSION authoritative —
 # without it, claude auto-replaces itself at runtime, defeating the
 # --ignore-scripts supply-chain pinning above. Bump the image to upgrade.
+# PATH: /usr/local/go/bin is the go.dev-prescribed entry for the toolchain.
+# $HOME/go/bin (GOPATH default; HOME=/root for the dropped user) is appended
+# LAST on purpose — `go install` targets it and /root persists in the
+# claude-code-root volume, so anything a session drops there must never be able
+# to shadow a system binary earlier in PATH.
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     DISABLE_AUTOUPDATER=1 \
     IS_SANDBOX=1 \
     LANG=C.UTF-8 \
-    LC_ALL=C.UTF-8
+    LC_ALL=C.UTF-8 \
+    PATH="/usr/local/go/bin:${PATH}:/root/go/bin"
 
 # Container starts as root so the entrypoint can chown /root to the host
 # UID, then drops privileges via runuser. Steady-state, claude runs as the
