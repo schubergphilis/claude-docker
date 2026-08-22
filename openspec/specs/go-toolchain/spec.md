@@ -28,6 +28,18 @@ choose, and `go` itself resolves a project's required toolchain at build time
 - **AND** the reported version equals the `GO_VERSION` pinned in the Dockerfile
 - **AND** `go env GOROOT` reports `/usr/local/go`
 
+#### Scenario: Go environment exported explicitly, not left to defaults
+
+- **WHEN** the container launches
+- **THEN** `GOROOT` is `/usr/local/go`, `GOPATH` is `/root/go`, and `GOBIN` is
+  `/root/go/bin` in the process environment — not merely as `go env` defaults —
+  so scripts and non-Go tooling that read the variables directly agree with the
+  toolchain
+- **AND** the values are exported by the image (`ENV`), so they hold for
+  `docker run`, `docker exec`, and non-login shells alike
+- **AND** they are spelled against a literal `/root` rather than `${HOME}`,
+  which Docker does not define at build time
+
 #### Scenario: builds on Apple Silicon
 
 - **WHEN** `docker build -t claude-code:local ~/claude-docker` runs on arm64
@@ -104,16 +116,21 @@ refresh run.
 
 ### Requirement: PATH ordering keeps GOPATH binaries non-shadowing
 
-The default PATH SHALL place `/usr/local/go/bin` first and the GOPATH `bin`
-directory — `/root/go/bin` for the dropped-privilege user — last, after every
-system path.
+The default PATH SHALL place `/usr/local/go/bin` ahead of every system path and
+the GOPATH `bin` directory — `/root/go/bin` for the dropped-privilege user —
+last, after every system path.
 
 `go install` writes into that GOPATH `bin` directory, which sits inside the
 persistent `claude-code-root` volume and is writable by the agent. It MAY be on
 the default PATH for convenience, but only in last position: a binary one
 session leaves there must not be able to shadow a system binary (`git`, `gh`,
-`aws`, …) on a later run. `/usr/local/go/bin` goes first so the image's pinned
-toolchain wins over anything installed into the volume.
+`aws`, …) on a later run. `/usr/local/go/bin` precedes the system paths so the
+image's pinned toolchain wins over anything installed into the volume.
+
+The user-local prefix `/root/.local/bin` MAY precede `/usr/local/go/bin`, by the
+usual convention that a tool the user installs there is meant to win. It carries
+the same agent-writable, volume-persisted caveat as `/root/go/bin`; the
+distinction is intent, not trust.
 
 #### Scenario: a persisted GOPATH binary cannot shadow a system tool
 
