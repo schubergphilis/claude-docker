@@ -17,7 +17,7 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # it alone and only reminds the operator to check it.
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_24.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
-ARG NODE_VERSION=24.17.0-1nodesource1
+ARG NODE_VERSION=24.19.0-1nodesource1
 
 # task (go-task) is the same class of MANUAL pin as nodejs above: it installs from
 # a signed apt repo (Cloudsmith), and update_pins.py only knows how to pin direct
