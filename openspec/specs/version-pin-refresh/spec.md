@@ -54,7 +54,17 @@ The newest published `task` version SHALL be resolved from the same apt suite
 the image's build installs from, so the reminder cannot report a version that
 the build's own `apt-get install` would not find. The suite SHALL be derived
 from the pinned base image rather than hard-coded, so a base-image bump moves
-both together.
+both together, and SHALL be derived from the same base-image line whose digest
+the run reports as pinned. For the same reason, the version SHALL be read only
+from index entries for the `task` package itself: another package published into
+the repo is not a version `apt-get install task=<v>` can resolve.
+
+#### Scenario: only the task package's versions are considered
+
+- **GIVEN** the apt repo's index lists `task` at `3.53.1` and a second package at
+  a higher version
+- **WHEN** the reminder resolves the newest published version
+- **THEN** it reports `3.53.1`
 
 #### Scenario: suite follows a base-image bump
 
@@ -64,12 +74,19 @@ both together.
 - **AND** bumping the pinned base image to a different release moves the queried
   suite with it, with no separate edit
 
-### Requirement: manual-pin reminder resolution is best-effort
+### Requirement: the task reminder's version resolution is best-effort
 
-Resolving the newest published version for a manual pin SHALL be best-effort: a
-network, decompression, or parse failure SHALL degrade to a reminder stating that
-the newest version could not be resolved, and SHALL NOT fail the refresh run or
-change the status it exits on.
+Resolving the newest published `task` version SHALL be best-effort: a network,
+decompression, or parse failure SHALL degrade to a reminder stating that the
+newest version could not be resolved, and SHALL NOT fail the refresh run or
+change the status it exits on. Decompression of the fetched index SHALL be
+bounded, so an oversized payload degrades the same way rather than exhausting
+memory.
+
+This states the rule for `task` only. Each manual pin's reminder carries the same
+best-effort contract inside its own capability's requirement — Go's in
+`go-toolchain` — so the rule has exactly one owner per pin and the two cannot
+drift apart.
 
 #### Scenario: reminder degrades gracefully without network
 
@@ -86,3 +103,11 @@ change the status it exits on.
 - **THEN** the `task` reminder states that the newest published version could not
   be resolved
 - **AND** every automated tool's pin is refreshed exactly as it otherwise would be
+
+#### Scenario: oversized index degrades instead of exhausting memory
+
+- **GIVEN** the fetched index decompresses to far more than a package index
+  plausibly holds
+- **WHEN** the reminder resolves the newest published version
+- **THEN** it reports that the newest version could not be resolved
+- **AND** the run does not decompress the payload in full

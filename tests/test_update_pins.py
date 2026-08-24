@@ -11,6 +11,7 @@ import gzip
 import io
 import re
 import sys
+import tempfile
 import unittest
 import unittest.mock
 import urllib.error
@@ -436,14 +437,26 @@ class TestTaskLatestPublished(unittest.TestCase):
     """task_latest_published() — mocked apt index bytes, no network."""
 
     @staticmethod
-    def _index(*versions):
-        """Build a gzipped Debian Packages index listing `versions`."""
-        stanzas = "".join(
-            f"Package: task\nVersion: {v}\n"
-            f"Filename: pool/any-version/main/t/ta/task_{v}/task_{v}_linux_amd64.deb\n\n"
-            for v in versions
+    def _stanza(package, version):
+        return (
+            f"Package: {package}\nVersion: {version}\n"
+            f"Filename: pool/any-version/main/t/ta/{package}_{version}"
+            f"/{package}_{version}_linux_amd64.deb\n\n"
         )
-        return gzip.compress(stanzas.encode())
+
+    @classmethod
+    def _index(cls, *versions):
+        """Build a gzipped Debian Packages index listing `versions` of task."""
+        return gzip.compress(
+            "".join(cls._stanza("task", v) for v in versions).encode()
+        )
+
+    @classmethod
+    def _mixed_index(cls, *stanzas):
+        """Build a gzipped index from explicit (package, version) pairs."""
+        return gzip.compress(
+            "".join(cls._stanza(p, v) for p, v in stanzas).encode()
+        )
 
     def _resolve(self, payload, codename="resolute"):
         with unittest.mock.patch.object(up, "http_bytes", return_value=payload):
@@ -461,6 +474,40 @@ class TestTaskLatestPublished(unittest.TestCase):
 
     def test_prerelease_ignored(self):
         self.assertEqual(self._resolve(self._index("3.53.1", "3.54.0-beta.1")), "3.53.1")
+
+    def test_foreign_package_versions_ignored(self):
+        """The repo serves only `task` today, so nothing else would catch a
+        version scraped from a sibling package's stanza — and a version of some
+        other package is exactly what `apt-get install task=<v>` cannot resolve."""
+        self.assertEqual(
+            self._resolve(self._mixed_index(
+                ("task", "3.53.1"),
+                ("taskfile-docs", "9.99.9"),
+                ("task-completion", "8.0.0"),
+            )),
+            "3.53.1",
+        )
+
+    def test_index_without_task_yields_empty(self):
+        """No `task` stanza at all must read as unresolvable, not as the newest
+        version of whatever else the index happens to list."""
+        self.assertEqual(
+            self._resolve(self._mixed_index(("taskfile-docs", "9.99.9"))), ""
+        )
+
+    def test_field_order_within_a_stanza_does_not_matter(self):
+        payload = gzip.compress(
+            b"Version: 3.53.1\nPackage: task\n\n"
+            b"Version: 9.99.9\nPackage: taskfile-docs\n\n"
+        )
+        self.assertEqual(self._resolve(payload), "3.53.1")
+
+    def test_oversize_index_yields_empty(self):
+        """Decompression of third-party bytes is bounded: `except Exception`
+        cannot catch an OOM kill, so the bomb case has to degrade instead."""
+        bomb = gzip.compress(b"Package: task\nVersion: 3.53.1\n\n" + b"#" * (2 << 20))
+        self.assertLess(len(bomb), 1 << 20, "fixture must be small compressed")
+        self.assertEqual(self._resolve(bomb), "")
 
     def test_empty_index_yields_empty(self):
         self.assertEqual(self._resolve(gzip.compress(b"")), "")
@@ -519,6 +566,12 @@ class TestPrintReminders(unittest.TestCase):
         self.assertIn("DIFFERS", line)
         self.assertIn("TASK_VERSION", line)
 
+    def test_drift_names_the_suite(self):
+        """The operator most likely to act on the line gets the suite named too —
+        the other three branches all say which suite they spoke to."""
+        line = self._task_line(self._capture("9.99.9", codename="noble"))
+        self.assertIn("noble", line)
+
     def test_match_reports_no_action(self):
         pinned = re.search(
             r"^ARG TASK_VERSION=(\S+)", up.DOCKERFILE.read_text(), re.MULTILINE
@@ -537,6 +590,33 @@ class TestPrintReminders(unittest.TestCase):
     def test_underivable_suite_is_distinct_from_an_outage(self):
         line = self._task_line(self._capture("", codename=""))
         self.assertIn("could not derive", line)
+
+    def test_codename_and_digest_come_from_one_from_line(self):
+        """A second `FROM ubuntu` must not split the two reminders: the suite the
+        task line queries has to be the one on the base-image line whose digest
+        the same run reports as pinned."""
+        seen = []
+        dockerfile = (
+            f"FROM ubuntu:jammy-20240101@sha256:{'a' * 64} AS build\n"
+            "ARG TASK_VERSION=3.53.1\n"
+            f"FROM ubuntu:resolute-20260724.1@sha256:{'b' * 64}\n"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "Dockerfile"
+            path.write_text(dockerfile)
+            with unittest.mock.patch.object(up, "DOCKERFILE", path), \
+                 unittest.mock.patch.object(
+                     up, "task_latest_published",
+                     side_effect=lambda c: (seen.append(c), "")[1]), \
+                 unittest.mock.patch.object(up, "go_latest_stable", return_value=""), \
+                 unittest.mock.patch.object(up, "ubuntu_current_digest", return_value=""):
+                buf = io.StringIO()
+                with contextlib.redirect_stdout(buf):
+                    up.print_reminders()
+        out = buf.getvalue()
+        self.assertEqual(seen, ["resolute"])
+        self.assertIn(f"sha256:{'b' * 12}", out)
+        self.assertNotIn("a" * 12, out)
 
     def test_reminder_block_covers_every_manual_pin(self):
         out = self._capture("3.53.1")

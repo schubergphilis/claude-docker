@@ -26,7 +26,9 @@ ARG NODE_VERSION=24.19.0-1nodesource1
 # FROM tag names) and flags the pin when a newer version has been published. That
 # report is the only thing watching this pin — Cloudsmith retains every published
 # version, so a stale pin keeps building successfully and forever.
-# Bump with: curl -fsSL https://dl.cloudsmith.io/public/task/task/deb/ubuntu/dists/resolute/main/binary-amd64/Packages.gz | gunzip | grep -A1 '^Package: task$' | head -2
+# Bump with (stanza-scoped and sorted, so it agrees with update_pins.py rather
+# than trusting the index's happens-to-be-newest-first order):
+# Bump with: curl -fsSL https://dl.cloudsmith.io/public/task/task/deb/ubuntu/dists/resolute/main/binary-amd64/Packages.gz | gunzip | awk '/^Package: task$/{t=1} /^Version:/{if(t){print $2; t=0}} /^$/{t=0}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
 ARG TASK_VERSION=3.53.1
 
 # Go is the other MANUAL pin (ARG GO_VERSION + per-arch sha256, see its block

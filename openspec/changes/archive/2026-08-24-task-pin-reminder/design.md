@@ -108,14 +108,29 @@ the drift signal above.
 
 ### Parse the index directly, reusing existing helpers
 
-`gzip.decompress()` (stdlib, keeping `dependencies = []` intact) over the bytes
-from the existing `http_bytes()` — which already enforces https-only with bounded,
-credential-stripping redirects — then scan `^Version:` lines and hand the
-collected strings to the existing `max_stable()`. That reuse buys the stable-only
-filter (`SEMVER_RE`) and the numeric ordering for free, so a `-beta` entry or a
-non-newest-first index cannot mislead the reminder. No `python-apt`, no
-`dpkg --compare-versions` subprocess: the index is 17 short stanzas, and the only
-field needed is `Version:`.
+`gzip` (stdlib, keeping `dependencies = []` intact) over the bytes from the
+existing `http_bytes()` — which already enforces https-only with bounded,
+credential-stripping redirects — then split the index on blank lines, keep the
+stanzas whose `Package:` is exactly `task`, and hand their `Version:` values to
+the existing `max_stable()`. That reuse buys the stable-only filter (`SEMVER_RE`)
+and the numeric ordering for free, so a `-beta` entry or a non-newest-first index
+cannot mislead the reminder. No `python-apt`, no `dpkg --compare-versions`
+subprocess: the index is 17 short stanzas, and the only fields needed are
+`Package:` and `Version:`.
+
+Scoping to the `task` stanzas rather than scanning every `^Version:` line matters
+for the guarantee above, not just for tidiness: today the repo publishes only
+`task`, so a bare scan happens to be correct, but a second package landing in it
+would feed *its* versions to a reminder whose whole promise is naming a version
+`apt-get install task=<v>` can resolve. Stanza scoping also makes field order
+within a stanza irrelevant.
+
+Decompression is bounded (`GzipFile.read(INDEX_MAX_BYTES + 1)`, over-cap treated
+as a failure) rather than `gzip.decompress()` on the whole response. These are
+third-party bytes expanded inside a supply-chain tool, and the best-effort
+`except Exception` that covers every other failure here cannot catch an OOM kill.
+~100x headroom over today's 9 KB index, so the cap only fires on an upstream
+layout change or an attack — and in both cases going quiet beats half-parsing.
 
 `binary-amd64` is fetched, not both arches. Cloudsmith publishes the same version
 set for each arch out of one pool, and this is a staleness reminder, not a pin —
@@ -131,26 +146,38 @@ one line in `print_reminders()`, ordered to match the Dockerfile's own ARG order
 failures and the caller has a "could not resolve" branch, the best-effort
 requirement holds structurally rather than by convention.
 
+`print_reminders()` resolves the winning `FROM ubuntu` line once and derives both
+the reported digest and the queried suite from that one line, instead of scanning
+the Dockerfile text a second time inside `base_image_codename()`. The two scans
+disagreed by construction — the caller keeps the last match, the helper returns on
+the first — so a second `FROM ubuntu` (a multi-stage build) would have had the
+task reminder querying one base image's suite while the digest line reported
+another's. Single-stage today, so this is about not leaving the trap armed.
+
+All four branches of the task line name the suite they spoke to, including the
+drift branch: that is the branch whose reader is about to edit `TASK_VERSION`, so
+it is the last one that should omit which suite the "newest" came from.
+
 ## Risks / Trade-offs
 
 **The pinned base image's tag stops carrying a codename** (e.g. someone pins
-`ubuntu:26.04@sha256:…`, where `26.04` is not a suite) **→** derivation yields a
+`ubuntu:26.04@sha256:…`, where `26.04` is not a suite) → derivation yields a
 token that 404s, and the reminder degrades to "could not resolve". Mitigation:
 treat a derived token that is not a plausible codename (not purely alphabetic) as
 unresolvable *without* a network call, and make the message name the token it
 derived, so the cause reads as a parse problem rather than an outage.
 
-**One more network dependency per refresh run → **a `dl.cloudsmith.io` outage
+**One more network dependency per refresh run** → a `dl.cloudsmith.io` outage
 makes a run noisier. Mitigation: best-effort by construction — one ~2 KB request,
 failure is a printed line, exit status untouched.
 
-**Cloudsmith changes its repo layout or index compression → **the reminder goes
+**Cloudsmith changes its repo layout or index compression** → the reminder goes
 permanently quiet in the "could not resolve" state, which is a weaker failure
 than a loud one. Accepted: the same exposure `go` and the base-digest reminders
 already carry, and a reminder that fails the build on an upstream layout change
 would be worse.
 
-**A reminder is only as good as someone reading it → **this closes a silent gap
+**A reminder is only as good as someone reading it** → this closes a silent gap
 but still depends on a human running the script. That dependency is exactly what
 `automate-version-pins` task 8.2 (weekly CI refresh opening a PR) exists to
 remove, and this change makes `task` visible to that future job for free.
