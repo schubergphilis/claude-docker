@@ -100,14 +100,15 @@ The Dockerfile SHALL obtain every automated tool's version (and, for binary tool
 
 ### Requirement: Operator report
 
-The refresh tooling SHALL print a report describing the outcome for every tool: each updated tool's previous and new version with the new version's age, each `held` tool with the in-soak version that was withheld, and explicit reminders for residual manual pins (the NodeSource `nodejs` version and the ubuntu base-image digest). The report SHALL indicate when the base-image tag's currently-resolved digest differs from the pinned digest.
+The refresh tooling SHALL print a report describing the outcome for every tool: each updated tool's previous and new version with the new version's age, each `held` tool with the in-soak version that was withheld, and explicit reminders for every residual manual pin (the NodeSource `nodejs` version, the `task` version, the Go toolchain version, and the ubuntu base-image digest). The report SHALL indicate when the base-image tag's currently-resolved digest differs from the pinned digest.
 
 #### Scenario: report shows updates, holds, and reminders
 
 - **WHEN** the operator runs the refresh script
 - **THEN** the report lists per-tool `old → new` versions with ages
 - **AND** lists any `held` tools with the withheld version and its age
-- **AND** lists `nodejs` and the base-image digest as manual reminders
+- **AND** lists `nodejs`, `task`, `go`, and the base-image digest as manual
+  reminders
 
 #### Scenario: base digest drift surfaced
 
