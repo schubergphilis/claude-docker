@@ -21,8 +21,11 @@ ARG NODE_VERSION=24.19.0-1nodesource1
 
 # task (go-task) is the same class of MANUAL pin as nodejs above: it installs from
 # a signed apt repo (Cloudsmith), and update_pins.py only knows how to pin direct
-# downloads by URL + sha256, so it leaves this alone. Cloudsmith retains every
-# published version, so an old pin keeps resolving until you bump it.
+# downloads by URL + sha256, so it never rewrites this ARG. It does REPORT on it:
+# each run reads the same Packages index as the command below (for the suite the
+# FROM tag names) and flags the pin when a newer version has been published. That
+# report is the only thing watching this pin — Cloudsmith retains every published
+# version, so a stale pin keeps building successfully and forever.
 # Bump with: curl -fsSL https://dl.cloudsmith.io/public/task/task/deb/ubuntu/dists/resolute/main/binary-amd64/Packages.gz | gunzip | grep -A1 '^Package: task$' | head -2
 ARG TASK_VERSION=3.53.1
 

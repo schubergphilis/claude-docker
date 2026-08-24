@@ -7,7 +7,9 @@ imports as a normal module. Run with:
     python3 -m unittest discover -s tests
 """
 import contextlib
+import gzip
 import io
+import re
 import sys
 import unittest
 import unittest.mock
@@ -406,6 +408,140 @@ class TestAudit(unittest.TestCase):
                 rc = up.run_audit(self.SOAK_DAYS)
         self.assertNotEqual(rc, 0)
         self.assertIn("no pinned version", err_buf.getvalue())
+
+
+class TestBaseImageCodename(unittest.TestCase):
+    """base_image_codename() is pure — it parses the FROM tag, no I/O."""
+
+    def test_codename_tag(self):
+        text = "FROM ubuntu:resolute-20260724.1@sha256:" + "a" * 64 + "\n"
+        self.assertEqual(up.base_image_codename(text), "resolute")
+
+    def test_version_number_tag_yields_empty(self):
+        """`ubuntu:26.04` names no apt suite — degrade rather than emit '26.04'
+        and let the caller query a dists/ path that cannot exist."""
+        text = "FROM ubuntu:26.04@sha256:" + "a" * 64 + "\n"
+        self.assertEqual(up.base_image_codename(text), "")
+
+    def test_no_from_line_yields_empty(self):
+        self.assertEqual(up.base_image_codename("# just a comment\n"), "")
+
+    def test_real_dockerfile_resolves(self):
+        """Guards against the committed Dockerfile drifting to a FROM form this
+        parser can't read — which would silently mute the task reminder."""
+        self.assertTrue(up.base_image_codename(up.DOCKERFILE.read_text()))
+
+
+class TestTaskLatestPublished(unittest.TestCase):
+    """task_latest_published() — mocked apt index bytes, no network."""
+
+    @staticmethod
+    def _index(*versions):
+        """Build a gzipped Debian Packages index listing `versions`."""
+        stanzas = "".join(
+            f"Package: task\nVersion: {v}\n"
+            f"Filename: pool/any-version/main/t/ta/task_{v}/task_{v}_linux_amd64.deb\n\n"
+            for v in versions
+        )
+        return gzip.compress(stanzas.encode())
+
+    def _resolve(self, payload, codename="resolute"):
+        with unittest.mock.patch.object(up, "http_bytes", return_value=payload):
+            return up.task_latest_published(codename)
+
+    def test_newest_version_resolved(self):
+        self.assertEqual(self._resolve(self._index("3.53.1", "3.52.0", "3.51.1")), "3.53.1")
+
+    def test_order_in_index_does_not_matter(self):
+        """The index happens to be newest-first today; ordering must not be relied on."""
+        self.assertEqual(self._resolve(self._index("3.46.4", "3.53.1", "3.50.0")), "3.53.1")
+
+    def test_numeric_not_lexical_ordering(self):
+        self.assertEqual(self._resolve(self._index("3.9.0", "3.53.1")), "3.53.1")
+
+    def test_prerelease_ignored(self):
+        self.assertEqual(self._resolve(self._index("3.53.1", "3.54.0-beta.1")), "3.53.1")
+
+    def test_empty_index_yields_empty(self):
+        self.assertEqual(self._resolve(gzip.compress(b"")), "")
+
+    def test_garbage_payload_yields_empty(self):
+        """Not gzip at all → the decompress error is swallowed, not raised."""
+        self.assertEqual(self._resolve(b"this is not gzip"), "")
+
+    def test_empty_codename_skips_the_fetch(self):
+        """With no suite there is no URL to build, so no request may be made."""
+        with unittest.mock.patch.object(
+            up, "http_bytes",
+            side_effect=AssertionError("http_bytes must not be called without a codename"),
+        ):
+            self.assertEqual(up.task_latest_published(""), "")
+
+    def test_network_failure_degrades(self):
+        with unittest.mock.patch.object(
+            up, "http_bytes", side_effect=urllib.error.URLError("simulated outage")
+        ):
+            self.assertEqual(up.task_latest_published("resolute"), "")
+
+    def test_url_targets_the_derived_suite(self):
+        seen = []
+
+        def fake_http_bytes(url, headers=None):
+            seen.append(url)
+            return self._index("3.53.1")
+
+        with unittest.mock.patch.object(up, "http_bytes", side_effect=fake_http_bytes):
+            up.task_latest_published("noble")
+        self.assertEqual(len(seen), 1)
+        self.assertIn("/dists/noble/", seen[0])
+        self.assertTrue(seen[0].startswith("https://"))
+
+
+class TestPrintReminders(unittest.TestCase):
+    """print_reminders() output — every upstream resolver mocked, no network."""
+
+    def _capture(self, task_cur, codename="resolute"):
+        with unittest.mock.patch.object(up, "task_latest_published", return_value=task_cur), \
+             unittest.mock.patch.object(up, "base_image_codename", return_value=codename), \
+             unittest.mock.patch.object(up, "go_latest_stable", return_value=""), \
+             unittest.mock.patch.object(up, "ubuntu_current_digest", return_value=""):
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                up.print_reminders()
+        return buf.getvalue()
+
+    def _task_line(self, out):
+        return next(ln for ln in out.splitlines() if " task " in ln)
+
+    def test_drift_names_both_versions(self):
+        line = self._task_line(self._capture("9.99.9"))
+        self.assertIn("9.99.9", line)
+        self.assertIn("DIFFERS", line)
+        self.assertIn("TASK_VERSION", line)
+
+    def test_match_reports_no_action(self):
+        pinned = re.search(
+            r"^ARG TASK_VERSION=(\S+)", up.DOCKERFILE.read_text(), re.MULTILINE
+        ).group(1)
+        line = self._task_line(self._capture(pinned))
+        self.assertIn(pinned, line)
+        self.assertIn("matches", line)
+        self.assertNotIn("DIFFERS", line)
+
+    def test_unresolved_names_the_suite(self):
+        """An outage must read as an outage against a named suite."""
+        line = self._task_line(self._capture("", codename="noble"))
+        self.assertIn("could not resolve", line)
+        self.assertIn("noble", line)
+
+    def test_underivable_suite_is_distinct_from_an_outage(self):
+        line = self._task_line(self._capture("", codename=""))
+        self.assertIn("could not derive", line)
+
+    def test_reminder_block_covers_every_manual_pin(self):
+        out = self._capture("3.53.1")
+        for pin in ("nodejs", "task", "go", "ubuntu base"):
+            self.assertIn(pin, out, f"{pin} missing from the manual-pin reminder block")
 
 
 if __name__ == "__main__":
