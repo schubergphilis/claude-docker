@@ -1,0 +1,152 @@
+# yamllint disable rule:line-length
+---
+name: Pins updater
+
+"on":
+  schedule:
+    # Mondays, 05:23 UTC. Deliberately offset from Dependabot's weekly window
+    # so an actions/docker bump and a pin refresh don't land in the same minute.
+    - cron: 23 5 * * 1
+  workflow_dispatch:
+    inputs:
+      soak:
+        description: Soak window in days (update_pins.py --soak)
+        required: false
+        default: "7"
+      block-major-bumps:
+        description: Stay within each tool's current major version
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One refresh at a time — two concurrent runs would force-push the same
+  # branch. Never cancel a run in flight; it may be mid-push.
+  group: pins-updater
+  cancel-in-progress: false
+
+env:
+  # A single long-lived branch that is force-pushed on every run, rather than a
+  # dated branch per run: a stale pins PR is worthless (the pins it proposes
+  # have been superseded), so the newest refresh should replace the open PR
+  # instead of stacking another one next to it.
+  BRANCH: bump/pins
+
+jobs:
+  update-pins:
+    name: Refresh pins and open a PR
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No persisted credentials: the push below authenticates explicitly
+          # with the token it wants to use, which may be a PAT rather than the
+          # job's GITHUB_TOKEN (see the PR step).
+          persist-credentials: false
+
+      - name: Install uv (version + sha256 from pins/uv.env)
+        # Deliberately not a third-party setup action: pins/uv.env already
+        # carries the exact version, URL and sha256 the image itself installs,
+        # so the workflow can bootstrap from the repo's own pinned artifact and
+        # verify the bytes — same trust model as the Dockerfile's uv block, and
+        # one less action to keep pinned. Runners are amd64, hence *_X86_64.
+        run: |
+          set -euo pipefail
+          . pins/uv.env
+          curl -fsSL "$UV_URL_X86_64" -o "$RUNNER_TEMP/uv.tar.gz"
+          echo "${UV_SHA256_X86_64}  ${RUNNER_TEMP}/uv.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/uv.tar.gz" -C "$RUNNER_TEMP"
+          install -m 0755 "$RUNNER_TEMP/uv-x86_64-unknown-linux-gnu/uv" /usr/local/bin/uv
+          uv --version
+
+      - name: Refresh pins
+        id: refresh
+        env:
+          # Raises GitHub's API rate limit for the release lookups.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Dispatch inputs go through env, never string-interpolated into the
+          # script body (that would be a template-injection sink). Both are
+          # empty on the schedule trigger, hence the defaults.
+          SOAK: ${{ inputs.soak || '7' }}
+          BLOCK_MAJOR: ${{ inputs.block-major-bumps || 'false' }}
+        run: |
+          set -euo pipefail
+          args=(--soak "$SOAK")
+          if [ "$BLOCK_MAJOR" = "true" ]; then
+            args+=(--block-major-bumps)
+          fi
+          # tee so the report lands both in the job log and in the PR body.
+          # A non-zero exit from update_pins.py fails the job (pipefail); it
+          # leaves pins/ untouched on any resolve/download failure.
+          uv run update_pins.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          echo "soak=$SOAK" >> "$GITHUB_OUTPUT"
+
+      - name: Detect pin changes
+        id: diff
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- pins)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No pin changes — every tool is already on its newest soaked version." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- pins
+          fi
+
+      - name: Open or update the pull request
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          # PINS_UPDATER_TOKEN (a PAT or GitHub App token) is optional but
+          # recommended: a PR opened with the default GITHUB_TOKEN does not
+          # trigger `pull_request` workflows, so CI — the docker build and the
+          # smoke matrix that actually validate a pin bump — would not run on
+          # it. With the fallback in use, push an empty commit or reopen the PR
+          # by hand to get CI to run.
+          GH_TOKEN: ${{ secrets.PINS_UPDATER_TOKEN || secrets.GITHUB_TOKEN }}
+          # Resolve the repo explicitly rather than from the git remote.
+          GH_REPO: ${{ github.repository }}
+          SOAK: ${{ steps.refresh.outputs.soak }}
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$BRANCH"
+          git add pins
+          git commit -m "build(deps): refresh tool pins" -m \
+            "Automated refresh by .github/workflows/pins-updater.yml (uv run update_pins.py --soak ${SOAK}). Full report in the PR body."
+
+          # Force-push: the branch is regenerated from main every run, so its
+          # previous head is an obsolete refresh with no history worth keeping.
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/${BRANCH}"
+
+          {
+            echo "Automated pin refresh — \`uv run update_pins.py --soak ${SOAK}\`, run by [\`pins-updater.yml\`](.github/workflows/pins-updater.yml)."
+            echo
+            echo "Review the diff and let CI build the image before merging. The \`⚠ needs your eyes\` block below covers the manual pins (nodejs, go, ubuntu base) that the script reports but never rewrites — act on those in a separate commit."
+            echo
+            echo '<details><summary>update_pins.py report</summary>'
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/report.txt"
+            echo '```'
+            echo
+            echo '</details>'
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          title="build(deps): refresh tool pins"
+          number=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file "$RUNNER_TEMP/pr-body.md"
+            echo "Updated PR #${number}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$title" --body-file "$RUNNER_TEMP/pr-body.md"
+          fi
