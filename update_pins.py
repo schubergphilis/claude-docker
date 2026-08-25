@@ -34,7 +34,9 @@ base minimal; `dependencies = []` above makes that visible and enforced).
 from __future__ import annotations
 
 import argparse
+import gzip
 import hashlib
+import io
 import json
 import os
 import re
@@ -62,6 +64,12 @@ DEFAULT_SOAK_DAYS = 7
 # prereleases (1.2.3-rc.1), build metadata (1.2.3+x), and calver (2024.10.1) —
 # only shell/URL metacharacters (space, ; $ ` ' " / newline …) are rejected.
 PIN_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]*")
+# Cap on the decompressed size of a remote apt `Packages` index. These are
+# third-party bytes fed to gzip inside a supply-chain tool, and the best-effort
+# `except Exception` around the parse cannot catch an OOM kill. The task index is
+# ~9 KB today, so this is ~100x headroom: crossing it means an upstream layout
+# change or an attack, and either way going quiet beats half-parsing.
+INDEX_MAX_BYTES = 1 << 20
 
 # tool registry: (name, kind, ref). ref meaning is kind-specific:
 #   npm    -> npm package name        github -> owner/repo (releases)
@@ -522,20 +530,103 @@ def go_latest_stable() -> str:
         return ""
 
 
+def base_image_codename(dockerfile_text: str) -> str:
+    """Ubuntu suite codename of the pinned base image, taken from its FROM tag
+    (`ubuntu:resolute-20260724.1@sha256:…` → 'resolute'). Returns '' when the
+    tag's leading token is not a codename — a version-number tag such as
+    `ubuntu:26.04` names no apt suite — so a caller degrades with a parse-shaped
+    message instead of querying a path that cannot exist.
+
+    Takes the FIRST `FROM ubuntu` line in the text it is given. Callers that
+    resolve a winning base-image line themselves (print_reminders picks the last
+    one, as a multi-stage build's final stage would) SHOULD pass that single line
+    rather than the whole Dockerfile, so the codename and the digest reminder can
+    never come from two different lines."""
+    for line in dockerfile_text.splitlines():
+        m = re.match(r"FROM ubuntu:([^@\s]+)", line)
+        if m:
+            token = m.group(1).split("-", 1)[0]
+            return token if re.fullmatch(r"[a-z]+", token) else ""
+    return ""
+
+
+def task_latest_published(codename: str) -> str:
+    """Newest stable `task` (go-task) version published in the Cloudsmith apt
+    repo for `codename`. Best-effort: returns '' on any failure.
+
+    task stays a manual pin for the same reason as Go above: a Debian `Packages`
+    index carries no publish dates, so there is nothing here to evaluate the soak
+    window against. This index — not go-task's GitHub releases — is the source
+    that matters, because a version the apt repo has not ingested yet is one the
+    build's `apt-get install task=<v>` cannot resolve.
+
+    Versions are collected per stanza, and only from stanzas whose `Package:` is
+    exactly `task`. The repo serves nothing else today, but a second package
+    published into it would otherwise contribute its version numbers here — and
+    another package's version is precisely what `apt-get install task=<v>` cannot
+    resolve, which is the one thing this reminder promises. Stanza scoping also
+    means field order within a stanza does not matter.
+
+    max_stable() filters to plain semver, so a prerelease (or, were Cloudsmith to
+    start publishing Debian revisions like `3.53.1-1`, a revisioned version) is
+    skipped rather than misreported — worst case the reminder goes quiet."""
+    if not codename:
+        return ""
+    try:
+        gz = io.BytesIO(http_bytes(
+            "https://dl.cloudsmith.io/public/task/task/deb/ubuntu"
+            f"/dists/{codename}/main/binary-amd64/Packages.gz"
+        ))
+        with gzip.GzipFile(fileobj=gz) as fh:
+            raw = fh.read(INDEX_MAX_BYTES + 1)
+        if len(raw) > INDEX_MAX_BYTES:
+            raise ValueError("Packages index exceeds INDEX_MAX_BYTES")
+        versions = []
+        for stanza in re.split(r"\n[ \t]*\n", raw.decode("utf-8", "replace")):
+            if re.search(r"^Package:[ \t]*task[ \t]*$", stanza, re.MULTILINE):
+                versions += re.findall(
+                    r"^Version:[ \t]*(\S+)[ \t]*$", stanza, re.MULTILINE
+                )
+        return max_stable(versions)
+    except Exception:
+        return ""
+
+
 def print_reminders():
     print("\n  ⚠ needs your eyes (manual pins) ─────────────────────────────")
     node = ""
+    task_v = ""
     go = ""
-    base = ""
+    base_line = ""
     for line in DOCKERFILE.read_text().splitlines():
         if line.startswith("ARG NODE_VERSION="):
             node = line.split("=", 1)[1]
+        if line.startswith("ARG TASK_VERSION="):
+            task_v = line.split("=", 1)[1]
         if line.startswith("ARG GO_VERSION="):
             go = line.split("=", 1)[1]
-        m = re.search(r"@(sha256:[0-9a-f]+)", line)
-        if line.startswith("FROM ubuntu") and m:
-            base = m.group(1)
+        if line.startswith("FROM ubuntu"):
+            base_line = line
+    # One base-image line feeds both reminders below: the digest this run reports
+    # as pinned, and the apt suite the task reminder queries. Deriving them from
+    # separate scans let them disagree about which FROM line wins.
+    m = re.search(r"@(sha256:[0-9a-f]+)", base_line)
+    base = m.group(1) if m else ""
     print(f"  ⚠ nodejs        pinned {node or '?'}  — bump via the NodeSource note in the Dockerfile")
+    codename = base_image_codename(base_line)
+    task_cur = task_latest_published(codename)
+    if task_cur and task_cur != task_v:
+        print(f"  ⚠ task          pinned {task_v or '?'}  "
+              f"newest in the '{codename}' apt suite → {task_cur}  "
+              f"(DIFFERS — bump ARG TASK_VERSION in the Dockerfile)")
+    elif task_cur:
+        print(f"  ⚠ task          pinned {task_v or '?'}  (matches newest in the '{codename}' apt suite)")
+    elif codename:
+        print(f"  ⚠ task          pinned {task_v or '?'}  "
+              f"(could not resolve newest from the '{codename}' apt suite)")
+    else:
+        print(f"  ⚠ task          pinned {task_v or '?'}  "
+              f"(could not derive an apt suite from the pinned base-image tag)")
     go_cur = go_latest_stable()
     if go_cur and go_cur != go:
         print(f"  ⚠ go            pinned {go or '?'}  latest stable → {go_cur}  "
