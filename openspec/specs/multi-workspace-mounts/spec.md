@@ -95,35 +95,6 @@ For every workspace argument beyond the first, `run.sh` SHALL pass `--add-dir <c
 - **THEN** the container launches `claude --add-dir /workspaces/repo-b`
 - **AND** writes to either workspace fail with EROFS at the OS layer (the `--add-dir` flag itself has no read-only mode)
 
-### Requirement: Nested worktrees portable via relative paths
-
-When a git worktree is nested inside its repository's directory tree (e.g. `<repo>/.claude/worktrees/<name>`) AND the repo has been opted in to relative-path worktrees (`git config worktree.useRelativePaths true` plus `git worktree repair --relative-paths` for any pre-existing worktree), the same worktree directory mounted into the container at a different absolute path SHALL function for `git status`, `git log`, `git diff`, `git commit`, `git worktree add`, and `git worktree list` without requiring `git worktree repair`. This applies in both directions — host-created worktrees work in the container, and container-created worktrees work on the host — because the relative offset between the worktree's `.git` link file and the repo's `.git/worktrees/<name>/` directory is preserved by any bind mount that includes the entire repo tree.
-
-The container image SHALL ship a `git` version (≥ 2.48) that supports both reading and writing relative-path worktrees, including the `extensions.relativeWorktrees` repository extension that git 2.48+ sets as a safety lock when relative paths are in use. Older git versions refuse to operate on a repo with this extension set, so the container's git MUST be at the supporting version for the workflow to function at all once the host has opted in.
-
-This requirement assumes the user's host git is also ≥ 2.48 (needed to write the initial `--relative-paths` repair). Hosts on older git fall back to the existing repair-based workflow — see "Sibling worktrees supported".
-
-#### Scenario: Host-created nested worktree round-trips between host and container without repair
-
-- **GIVEN** the host has git ≥ 2.48 and ran `git config worktree.useRelativePaths true` in the repo
-- **AND** a worktree exists at `<repo>/.claude/worktrees/feature-x` (created with relative paths, or migrated via `git worktree repair --relative-paths`)
-- **WHEN** the user runs `claude-docker <repo>` on the host and the repo is mounted at `/workspaces/<repo-basename>` in the container
-- **THEN** `git status` inside `/workspaces/<repo-basename>/.claude/worktrees/feature-x` succeeds without prompting for repair
-- **AND** the user can exit the container and run `git status` in the same worktree on the host without any repair step
-
-#### Scenario: Container-created worktree is portable to the host
-
-- **GIVEN** the user is inside `claude-docker` with the repo configured for relative-path worktrees
-- **WHEN** they run `git worktree add .claude/worktrees/feature-y -b feature-y`
-- **THEN** the link files written under `<repo>/.git/worktrees/feature-y/` and `<repo>/.claude/worktrees/feature-y/.git` SHALL contain relative paths
-- **AND** exiting the container and running `git status` in that worktree from the host succeeds without `git worktree repair`
-
-#### Scenario: Container's git accepts the extensions.relativeWorktrees flag
-
-- **GIVEN** a repo on which the host has run `git worktree repair --relative-paths` (which sets `extensions.relativeWorktrees = true` in `.git/config`)
-- **WHEN** the user runs `claude-docker <repo>` and runs any git command inside the mounted repo
-- **THEN** the command succeeds (i.e. the container's git does NOT abort with `fatal: unknown repository extension found: relativeworktrees`)
-
 ### Requirement: Sibling worktrees supported
 
 Users SHALL be able to pass both a repo and its sibling git worktree (or a shared parent) as separate workspace arguments so that git operations across them succeed. Because each workspace argument is bind-mounted at `/workspaces/<basename>` in the container, the relative offset between the worktree's `.git` link file and the repo's `.git/worktrees/<name>/` directory is NOT preserved (the host parent directory does not appear in the container). For this layout, users MAY need to run `git worktree repair` once inside the container to rewrite the link-file paths, regardless of whether `worktree.useRelativePaths` is set on the host.
@@ -181,3 +152,44 @@ This requirement covers only sibling-flattened layouts, and also covers hosts wh
 
 - **WHEN** user runs `claude-docker --yolo ~/repo -- --resume`
 - **THEN** the container launches `claude --dangerously-skip-permissions --resume`
+
+### Requirement: Nested worktrees portable via a container-only git config overlay
+
+When a git worktree is nested inside its repository's directory tree (e.g. `<repo>/.claude/worktrees/<name>`), the same worktree directory mounted into the container at a different absolute path SHALL function for `git status`, `git log`, `git diff`, `git commit`, `git worktree add`, and `git worktree list` without requiring `git worktree repair`. This applies in both directions — host-created worktrees work in the container after a one-time `git worktree repair --relative-paths` (only for pre-existing absolute-path worktrees), and container-created worktrees work on the host with no extra step — because the relative offset between the worktree's `.git` link file and the repo's `.git/worktrees/<name>/` directory is preserved by any bind mount that includes the entire repo tree.
+
+For every workspace whose `.git/config` is a regular file (i.e. the main repo, not a worktree pointer), `run.sh` SHALL inject a container-only `.git/config` overlay by copying the host's `.git/config` into the existing `$stage` directory, appending a `[core]` section bumping `repositoryformatversion` to 1 plus `[extensions] relativeWorktrees = true` and `[worktree] useRelativePaths = true`, and bind-mounting that file over `/workspaces/<name>/.git/config` in the container.
+
+The host's on-disk `.git/config` SHALL NOT be modified by `run.sh` or by any operation performed inside the container. This is required to keep host tools that link against an older libgit2 (notably `gitstatusd`, which powers the Powerlevel10k git prompt) able to open the repo — those tools refuse to open a v1 repo declaring an unknown extension.
+
+The overlay mount SHALL be writable (not `:ro`), so container-side operations that write to `.git/config` (e.g. `git remote add`, `git branch --set-upstream-to`) succeed. Such writes land in the ephemeral stage copy and are discarded at session end; persistent local-config edits are expected to happen on the host.
+
+The overlay SHALL NOT be created for workspaces where `.git` is a pointer file rather than a directory (worktrees, submodules). Worktrees mounted alongside their main repo resolve through the main repo's overlay; worktrees mounted standalone (without their main repo) fall back to the existing `git worktree repair` workflow.
+
+#### Scenario: Container-created nested worktree is portable to the host
+
+- **GIVEN** the user runs `claude-docker <repo>` and `<repo>/.git/config` is a regular file
+- **WHEN** they run `git worktree add .claude/worktrees/feature-y -b feature-y` inside the container
+- **THEN** `<repo>/.git/worktrees/feature-y/gitdir` and `<repo>/.claude/worktrees/feature-y/.git` SHALL contain relative paths
+- **AND** exiting the container and running `git status` in that worktree from the host SHALL succeed without `git worktree repair`
+
+#### Scenario: Host's on-disk `.git/config` is not modified by container-side git operations
+
+- **GIVEN** a repo whose host-visible `.git/config` does NOT contain `extensions.relativeWorktrees`
+- **WHEN** the user runs `claude-docker <repo>` and performs any sequence of `git` operations inside (including `git worktree add`, `git remote add`, `git config --local`)
+- **THEN** inspecting `<repo>/.git/config` from the host after the container exits SHALL show no new `extensions.relativeWorktrees`, no bumped `repositoryformatversion`, and no other writes performed by the container
+- **AND** host tools that link against libgit2 versions predating January 2025 (e.g. `gitstatusd`) SHALL continue to open the repo without an "unknown extension" error
+
+#### Scenario: Container-side `git` sees the relative-paths configuration
+
+- **GIVEN** the user is inside `claude-docker` with the main repo mounted
+- **WHEN** they run `git config --get extensions.relativeWorktrees` and `git config --get worktree.useRelativePaths`
+- **THEN** both return `true`
+- **AND** `git config --get core.repositoryformatversion` returns `1`
+
+#### Scenario: Pre-existing absolute-path worktree fixed by one in-container repair
+
+- **GIVEN** the user has a worktree at `<repo>/.claude/worktrees/old` created before this change (absolute paths in its link files)
+- **WHEN** they run `claude-docker <repo>` and execute `git worktree repair --relative-paths .claude/worktrees/old` inside
+- **THEN** the link files SHALL be rewritten with relative paths
+- **AND** subsequent host-side and container-side git operations on that worktree SHALL succeed without further repair
+
