@@ -1,6 +1,15 @@
-## MODIFIED Requirements
+## REMOVED Requirements
 
 ### Requirement: Nested worktrees portable via relative paths
+
+Retracted in favour of the container-only overlay approach below: the host
+opt-in precondition (`git config worktree.useRelativePaths true` plus a host
+`git worktree repair --relative-paths`) is no longer required, so the old
+scenarios describing that host-side opt-in no longer apply.
+
+## ADDED Requirements
+
+### Requirement: Nested worktrees portable via a container-only git config overlay
 
 When a git worktree is nested inside its repository's directory tree (e.g. `<repo>/.claude/worktrees/<name>`), the same worktree directory mounted into the container at a different absolute path SHALL function for `git status`, `git log`, `git diff`, `git commit`, `git worktree add`, and `git worktree list` without requiring `git worktree repair`. This applies in both directions — host-created worktrees work in the container after a one-time `git worktree repair --relative-paths` (only for pre-existing absolute-path worktrees), and container-created worktrees work on the host with no extra step — because the relative offset between the worktree's `.git` link file and the repo's `.git/worktrees/<name>/` directory is preserved by any bind mount that includes the entire repo tree.
 
