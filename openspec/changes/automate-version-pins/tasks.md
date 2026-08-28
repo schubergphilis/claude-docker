@@ -48,4 +48,4 @@
 ## 8. Deferred to dedicated follow-up changes
 
 - [ ] 8.1 Independent hash cross-checks at record time — verify uv release attestations (`gh attestation verify` / cosign) and the aws-cli PGP-signed installer before trusting a self-computed sha. Deferred because it adds new tool dependencies + per-tool verification logic (a new capability, not "finishing" the resolver)
-- [ ] 8.2 Weekly automated refresh (CI/cron) opening a PR, so freshness doesn't depend on someone remembering to run the script — the fragments + script were built to support it
+- [x] 8.2 Weekly automated refresh (CI/cron) opening a PR, so freshness doesn't depend on someone remembering to run the script — the fragments + script were built to support it. Done as the dedicated follow-up change `schedule-pin-refresh`, which adds the `Scheduled unattended refresh` requirement to this capability
