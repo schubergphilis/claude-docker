@@ -5,10 +5,13 @@
 # than by CVE so they do not go stale. deb findings, and npm findings outside
 # npm's own bundle, stay enforced.
 ignore:
-  # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries.
-  # Nothing here compiles Go; only an upstream rebuild moves them.
+  # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries,
+  # which only an upstream rebuild moves. Scoped to /usr/bin so it does NOT
+  # cover the Go toolchain this repo pins itself at /usr/local/go — a stdlib
+  # CVE there is fixable by bumping ARG GO_VERSION and stays enforced.
   - package:
       type: go-module
+      location: /usr/bin/**
     reason: Vendored code inside prebuilt upstream binaries.
 
   # AWS CLI v2's bundled interpreter, distinct from the distro python3 deb.
