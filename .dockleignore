@@ -1,41 +1,11 @@
-# Dockle checkpoints suppressed for this image.
-#
-# mcvs-docker-action runs goodwithtech/dockle-action at its default
-# `exit-level: warn`, so only WARN and FATAL checkpoints can fail the build;
-# INFO ones are printed and ignored. That is why this list is short — see the
-# "deliberately not listed" note at the bottom.
-#
-# The action already hardcodes `--ignore CIS-DI-0005,CIS-DI-0006`, so those two
-# must not be repeated here.
+# Only WARN and FATAL checkpoints gate at the action's exit-level=warn, so this
+# list is short. CIS-DI-0008 and DKL-LI-0003 report as INFO and are left
+# visible. The action already ignores CIS-DI-0005 and CIS-DI-0006.
 
-# CIS-DI-0001 (WARN) "Create a user for the container".
-# Reported as "Last user should not be root", and that is deliberate. The
-# container starts as root so entrypoint.sh can chown /root to the host UID and
-# useradd a matching passwd entry, then drops privileges via runuser;
-# --security-opt no-new-privileges rules out a file-capability workaround.
-# Steady state, claude runs as the host user with no effective, permitted or
-# ambient capabilities — the kernel clears those on the UID -> non-zero
-# transition, and the bounding set is inert under no-new-privileges. Adding a
-# USER directive would break the entrypoint's chown; the Dockerfile carries the
-# same rationale above WORKDIR and explicitly forbids one.
-# See entrypoint.sh and run.sh's --cap-add lines for the full picture.
+# No USER by design: the entrypoint needs root to chown /root to the host UID
+# before dropping via runuser. See the comment above WORKDIR in the Dockerfile.
 CIS-DI-0001
 
-# DKL-DI-0005 (FATAL) "Clear apt-get caches".
-# Fires on the glab layer, which apt-get installs a locally downloaded .deb and
-# then removes only the .deb, not /var/lib/apt/lists. Dockle trips on `apt-get
-# install` OR `apt-get update` and then wants `rm -rf /var/lib/apt/lists/*` in a
-# later &&-segment of the same RUN. Installing a local .deb never populates
-# /var/lib/apt/lists (no apt-get update precedes it, and the preceding layer
-# already emptied the directory), so there is nothing to clear — a false
-# positive against this Dockerfile. Note hadolint's DL3009 keys on `apt-get
-# update` alone, which is why this same layer passes hadolint and fails dockle.
-# Remove this line once that RUN gains the cleanup anyway (see PR follow-ups).
+# False positive on the glab layer, which apt-get installs a local .deb and so
+# never populates /var/lib/apt/lists. Drop once that RUN gains the cleanup.
 DKL-DI-0005
-
-# Deliberately NOT listed. Both are INFO, so they do not gate at
-# exit-level=warn, and suppressing them would only hide signal:
-#   CIS-DI-0008  setuid/setgid files inherited from the base image
-#                (mount, su, passwd, chsh, gpasswd, ssh-keysign, ...)
-#   DKL-LI-0003  deletable files — tfenv's bundled /opt/tfenv/Dockerfile
-#                and root/.npm

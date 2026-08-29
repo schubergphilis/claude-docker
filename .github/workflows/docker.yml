@@ -2,11 +2,8 @@
 ---
 name: Docker
 
-# mcvs-docker-action gates its push step on
-# `github.event_name == 'push' && contains(github.ref, 'refs/tags/')`, so the
-# `tags:` filter below is load-bearing — without it the image is built and
-# scanned but never published. Branch and PR runs deliberately exercise the
-# same build + scan gate with the push step skipped.
+# The action's push step is gated on a tag push, so the `tags:` filter is what
+# makes this publish at all. Branch and PR runs build and scan without pushing.
 "on":
   push:
     branches: [main]
@@ -17,8 +14,6 @@ name: Docker
 
 concurrency:
   group: docker-${{ github.ref }}
-  # Cancel superseded PR builds, but never cancel a run on main or on a tag —
-  # a cancelled tag run silently skips a release.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
@@ -27,68 +22,30 @@ permissions:
 
 jobs:
   docker:
-    # This string becomes the status-check context. It is NOT in main's
-    # ruleset (which requires only "Validate" and "Docker build (validate, no
-    # push)") and should stay that way: grype runs with only-fixed=false at a
-    # `high` cutoff, so a CVE disclosed against ubuntu, node or the Go
-    # toolchain turns this red on a PR that never touched the image, and the
-    # author cannot fix it. Advisory-red informs; required-red would block
-    # every merge on an unrelated upstream disclosure. Keep the name stable
-    # regardless — contexts match by literal string, so a rename silently
-    # invalidates any ruleset entry that ever references it.
+    # Not a required check, and should stay that way: grype runs with
+    # only-fixed=false, so an unrelated upstream CVE can turn this red.
     name: Docker build and push (amd64)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # amd64 only: the action exposes no `platforms` input and pushes whatever
-      # the runner built natively — schubergphilis/mcvs-docker-action#31.
-      #
-      # Its tuning surface is deliberately tiny. hadolint's `style` failure
-      # threshold, dockle's exit level, dive's rules and grype's `high` cutoff
-      # with fail-on-vulnerability are all fixed inside the action; they are
-      # steered from committed config files instead — .hadolint.yaml,
-      # .dockleignore and .grype.yaml.
-      #
-      # No `build-args`: the action rewrites a newline-free value to
-      # APPLICATION=<value>, and this Dockerfile declares no APPLICATION ARG.
-      #
-      # Tagging is docker/metadata-action's defaults (type=ref for branch, tag
-      # and pr) with the action forcing `flavor: latest=false`, and there is no
-      # input to change it. So a `v0.1.0` tag publishes exactly
-      # ghcr.io/schubergphilis/claude-docker:v0.1.0 — no `latest`, no `0.1`,
-      # no semver expansion. Consumers must pin the full v-prefixed tag.
+      # amd64 only — the action has no `platforms` input:
+      # schubergphilis/mcvs-docker-action#31.
       #
       # Do NOT add docker/setup-buildx-action before this step. The action
-      # builds with push:false and no load:true, which only puts the image
-      # where dockle, dive and `docker push` can find it while the default
-      # docker-driver builder is in use; the docker-container driver would
-      # keep the image out of the local daemon and break every later step.
+      # builds with push:false and no load:true, so the image only reaches
+      # dockle, dive and `docker push` while the default docker driver is used.
+      #
+      # Scanner thresholds are fixed inside the action and steered from
+      # .hadolint.yaml, .dockleignore and .grype.yaml. Tagging is
+      # metadata-action's defaults with latest=false, so a v0.1.0 tag publishes
+      # :v0.1.0 and nothing else.
       - uses: schubergphilis/mcvs-docker-action@1de6c6ce1dd24cdea3b1964a13ac902a7cd57128 # v0.11.6
         with:
           images: ghcr.io/${{ github.repository }}
-          # CIS-DI-0010 (FATAL) shlex-tokenises every layer-history command
-          # and flags the first NAME=value whose NAME it deems suspicious. It
-          # flags plenty of benign ones — an earlier attempt at this workflow
-          # was tripped by plain `LANG` — and it reports only ONE key per
-          # history line, so a naive fix loop needs a CI round per key.
-          #
-          # This list is instead the full enumeration of both sources, so it
-          # should not need to grow on its own:
-          #
-          #  - The base image's history, read straight off the registry:
-          #    `--clear` and the four org.opencontainers.image.* labels come
-          #    from Canonical's rockcraft/umoci build, not from anything here.
-          #    Those five plus PATH are ALL the NAME=value tokens ubuntu
-          #    resolute-20260811.1 contributes.
-          #  - This Dockerfile's own build-time shell variables, pinned
-          #    versions, apt package names and tar/copy flags.
-          #
-          # `signed-by=` and `arch=` are deliberately absent: they only occur
-          # inside double-quoted `echo "deb [...]"` strings, which shlex emits
-          # as a single word whose name half contains a space — dockle skips
-          # those. None of these is a credential, and no real secret enters
-          # the build (the pins are public URLs and sha256s).
+          # CIS-DI-0010 flags benign NAME=value tokens out of layer history,
+          # one per line per run. This is the full set from the base image
+          # (Canonical's rockcraft/umoci build) and from this Dockerfile.
           dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,HOME,curl,nodejs,task,gh,NODE_VERSION,TASK_VERSION,ARCH,URL,SHA,--chmod,--strip-components,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,IS_SANDBOX,LANG,LC_ALL,GOBIN,GOPATH,GOROOT,GO_VERSION,GO_SHA256_AMD64,GO_SHA256_ARM64,TFENV_URL,TFENV_SHA256,CLAUDE_CODE_VERSION,OPENSPEC_VERSION,PNPM_VERSION,libcrypto3>,libssl3>
           token: ${{ secrets.GITHUB_TOKEN }}

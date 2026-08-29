@@ -1,50 +1,26 @@
 ---
-# Grype policy for the scans mcvs-docker-action runs (one over the source tree,
-# one over the built image). The action hardcodes `severity-cutoff: high`,
-# `fail-build: true` and `only-fixed: false` with no input to relax any of them,
-# and the scan runs *before* the push step — so without these rules the job
-# fails and the image never publishes at all.
-#
-# Grype auto-discovers this file because the action leaves scan-action's
-# `config` input empty. Rules are deliberately scoped by package *type* rather
-# than by CVE: the last full image scan produced 105 High/Critical matches
-# across ~63 advisory IDs, so a CVE snapshot would be stale within the week.
-# Each rule below states how the finding is actually remediated instead.
+# The action hardcodes severity-cutoff=high, fail-build=true and
+# only-fixed=false, and the scan runs before the push — so without these rules
+# nothing can ever publish. Rules are scoped by package type or location rather
+# than by CVE so they do not go stale. deb findings, and npm findings outside
+# npm's own bundle, stay enforced.
 ignore:
-  # 93 of those 105 matches. Nothing in this repo compiles Go — every
-  # go-module match is Go stdlib or a vendored dependency baked into a
-  # *prebuilt* upstream release binary (gh, glab, task). The only remediation
-  # is upstream shipping a rebuild, which update_pins.py already tracks and
-  # the weekly pins PR already surfaces. Not actionable from this Dockerfile.
+  # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries.
+  # Nothing here compiles Go; only an upstream rebuild moves them.
   - package:
       type: go-module
-    reason: Stdlib/vendored code inside prebuilt upstream binaries.
+    reason: Vendored code inside prebuilt upstream binaries.
 
-  # AWS CLI v2 bundles its own CPython, which grype's binary classifier reports
-  # separately from (and at a newer version than) the distro's python3.14 deb.
-  # Remediated by bumping pins/awscli.env, not by anything in the Dockerfile.
+  # AWS CLI v2's bundled interpreter, distinct from the distro python3 deb.
   - package:
       name: python
       type: binary
-    reason: AWS CLI v2's vendored interpreter; bumped via pins/awscli.env.
+    reason: AWS CLI v2's vendored interpreter; moves with pins/awscli.env.
 
-  # npm's OWN bundled dependency tree, which arrives with the nodejs deb and
-  # is not resolved by anything this repo pins. Verified against the registry:
-  # node 24.19.0 ships npm 11.17.0, whose bundle contains exactly the flagged
-  # brace-expansion@5.0.6, ip-address@10.2.0, tar@7.5.16 and undici@6.26.0.
-  # No `npm install` here can move them — only a Node release can — and no
-  # released Node clears the gate: 24.20.0 (npm 11.19.0) fixes brace-expansion
-  # and undici but still ships ip-address@10.2.0 (needs 10.3.1) and tar@7.5.19
-  # (one High needs 7.5.21). Scoped by location on purpose: this glob covers
-  # npm's vendored tree at any prefix and does NOT match the globals installed
-  # alongside it (@anthropic-ai/claude-code, @fission-ai/openspec, pnpm), whose
-  # own dependencies stay enforced.
-  # Revisit when a Node release carries a clean npm bundle.
+  # npm's own bundled tree, which arrives with the nodejs deb and is not
+  # resolved by anything under pins/. Scoped by location so the globals
+  # installed beside it keep their dependencies enforced. No released Node
+  # clears these: 24.20.0 still ships ip-address@10.2.0 and tar@7.5.19.
   - package:
       location: "**/node_modules/npm/**"
     reason: npm's bundled deps ship with the nodejs deb; only Node moves them.
-
-# Deliberately NOT ignored: deb findings, and npm findings outside the bundle
-# above. Those are genuinely actionable — a pin bump under pins/ or a
-# base-image digest bump — so leaving them enforced keeps this gate meaningful
-# rather than decorative.
