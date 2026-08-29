@@ -5,6 +5,7 @@
 Ship exactly one version-pinned, sha256-verified Go toolchain in the image — the one preinstalled language runtime, since the Go distribution is a single self-contained tree with no per-project variant to select and `go` resolves a project's required toolchain itself (contrast `tfenv`/`uv`, which fetch per-project Terraform/Python at runtime; see `package-managers`). The pin is manual rather than soak-gated under `pins/`, because go.dev's release feed carries no publish dates — so it must stay visible via an operator reminder. PATH ordering keeps the pinned toolchain authoritative while ensuring volume-persisted `go install` output can never shadow a system binary, and the toolchain's runtime code-fetch paths are named in the threat model.
 
 ## Requirements
+
 ### Requirement: Pinned Go toolchain installed on the default PATH
 
 The container image SHALL ship exactly one Go toolchain, installed from the
@@ -27,18 +28,6 @@ choose, and `go` itself resolves a project's required toolchain at build time
 - **THEN** `go version` succeeds without an absolute path
 - **AND** the reported version equals the `GO_VERSION` pinned in the Dockerfile
 - **AND** `go env GOROOT` reports `/usr/local/go`
-
-#### Scenario: Go environment exported explicitly, not left to defaults
-
-- **WHEN** the container launches
-- **THEN** `GOROOT` is `/usr/local/go`, `GOPATH` is `/root/go`, and `GOBIN` is
-  `/root/go/bin` in the process environment — not merely as `go env` defaults —
-  so scripts and non-Go tooling that read the variables directly agree with the
-  toolchain
-- **AND** the values are exported by the image (`ENV`), so they hold for
-  `docker run`, `docker exec`, and non-login shells alike
-- **AND** they are spelled against a literal `/root` rather than `${HOME}`,
-  which Docker does not define at build time
 
 #### Scenario: builds on Apple Silicon
 
@@ -114,37 +103,6 @@ refresh run.
   resolved
 - **AND** the run continues and exits on the same status it otherwise would
 
-### Requirement: PATH ordering keeps GOPATH binaries non-shadowing
-
-The default PATH SHALL place `/usr/local/go/bin` ahead of every system path and
-the GOPATH `bin` directory — `/root/go/bin` for the dropped-privilege user —
-last, after every system path.
-
-`go install` writes into that GOPATH `bin` directory, which sits inside the
-persistent `claude-code-root` volume and is writable by the agent. It MAY be on
-the default PATH for convenience, but only in last position: a binary one
-session leaves there must not be able to shadow a system binary (`git`, `gh`,
-`aws`, …) on a later run. `/usr/local/go/bin` precedes the system paths so the
-image's pinned toolchain wins over anything installed into the volume.
-
-The user-local prefix `/root/.local/bin` MAY precede `/usr/local/go/bin`, by the
-usual convention that a tool the user installs there is meant to win. It carries
-the same agent-writable, volume-persisted caveat as `/root/go/bin`; the
-distinction is intent, not trust.
-
-#### Scenario: a persisted GOPATH binary cannot shadow a system tool
-
-- **GIVEN** a previous session left an executable named `git` in `/root/go/bin`
-  in the persistent volume
-- **WHEN** a new container starts and `git` is invoked
-- **THEN** the system `git` runs, not the one from `/root/go/bin`
-
-#### Scenario: go install output is runnable without an absolute path
-
-- **WHEN** the user runs `go install <module>@<version>` and then invokes the
-  installed command by name
-- **THEN** the command resolves from `/root/go/bin` on PATH
-
 ### Requirement: Go runtime code-fetch documented in the threat model
 
 The threat model documentation SHALL note that the Go toolchain adds runtime
@@ -177,3 +135,87 @@ loudly instead. The bundled-tools line SHALL list `go`.
 - **THEN** the Go tarball appears alongside `uv`, `glab`, the AWS CLI, and the
   `tfenv` source archive
 
+### Requirement: Go environment exported by the image
+
+The image SHALL export `GOROOT=/usr/local/go`, `GOPATH=/root/go`, and
+`GOBIN=/root/go/bin` as `ENV`, so the values are present in the process
+environment rather than existing only as `go env` defaults computed by the
+toolchain. Scripts and non-Go tooling that read the variables directly SHALL
+therefore agree with the toolchain.
+
+The values SHALL be spelled against a literal `/root`, not `${HOME}`: Docker
+does not define `HOME` during a build, so `"${HOME}/go"` expands to `/go`.
+`/root` is the home directory on both paths through the entrypoint — the
+legacy root fallback and the dropped-privilege user, whose passwd entry is
+created with `-d /root`.
+
+#### Scenario: the variables are set in a non-login shell
+
+- **WHEN** a command runs in the container without a login shell — the
+  entrypoint's `runuser -u`, a `docker exec`, or a plain `docker run` command
+- **THEN** `GOROOT` is `/usr/local/go`, `GOPATH` is `/root/go`, and `GOBIN` is
+  `/root/go/bin` in that process's environment
+
+#### Scenario: the exported values match what the toolchain computes
+
+- **WHEN** `go env GOROOT`, `go env GOPATH`, and `go env GOBIN` are compared
+  against the exported `GOROOT`, `GOPATH`, and `GOBIN`
+- **THEN** each pair agrees, so a script reading the variable and a script
+  shelling out to `go env` reach the same directory
+
+### Requirement: PATH ordering keeps volume-persisted directories non-shadowing
+
+The default PATH SHALL place `/usr/local/go/bin` ahead of every system path,
+and SHALL place both agent-writable directories that live in the persistent
+`claude-code-root` volume — `/root/.local/bin` (the `pip install --user` /
+`uv tool install` prefix) and `/root/go/bin` (the GOPATH `bin` directory, where
+`go install` writes) — after every system path.
+
+Both directories are writable by the agent and survive the session: `/root` is
+a named volume shared across sessions and workspaces, and the image PATH
+reaches the agent unchanged because the entrypoint execs `runuser -u` rather
+than `runuser -l`. A binary one session leaves in either directory MUST NOT be
+able to shadow a system binary (`git`, `gh`, `aws`, …) on a later run. They MAY
+be on the default PATH for convenience, but only after every system path.
+
+Neither directory is distinguishable from the other by anything the image can
+check — same volume, same writer, same lifetime — so the usual convention that
+a user-local prefix precedes the system paths SHALL NOT be applied to
+`/root/.local/bin`. `/usr/local/go/bin` precedes the system paths so the
+image's pinned toolchain wins over anything installed into the volume.
+
+#### Scenario: a persisted GOPATH binary cannot shadow a system tool
+
+- **GIVEN** a previous session left an executable named `git` in `/root/go/bin`
+  in the persistent volume
+- **WHEN** a new container starts and `git` is invoked
+- **THEN** the system `git` runs, not the one from `/root/go/bin`
+
+#### Scenario: a persisted user-prefix binary cannot shadow a system tool
+
+- **GIVEN** a previous session left an executable named `gh` in
+  `/root/.local/bin` in the persistent volume
+- **WHEN** a new container starts, in any workspace, and `gh` is invoked
+- **THEN** the system `gh` runs, not the one from `/root/.local/bin`
+
+#### Scenario: go install output is runnable without an absolute path
+
+- **WHEN** the user runs `go install <module>@<version>` and then invokes the
+  installed command by name
+- **THEN** the command resolves from `/root/go/bin` on PATH
+
+#### Scenario: user-prefix installs are runnable without an absolute path
+
+- **WHEN** the user installs a tool whose entry point lands in
+  `/root/.local/bin` (for example `uv tool install` or `pip install --user`)
+  and then invokes it by name
+- **THEN** the command resolves from `/root/.local/bin` on PATH, provided no
+  system binary of that name exists
+
+#### Scenario: the smoke suite enforces the ordering
+
+- **WHEN** `smoke/smoke.sh` runs against a built image
+- **THEN** the in-container assertions confirm `/usr/local/go/bin` precedes
+  `/usr/bin`, that `/usr/bin` precedes both `/root/.local/bin` and
+  `/root/go/bin`, and that `git` resolves to `/usr/bin/git`
+- **AND** they confirm the exported `GOROOT`, `GOPATH`, and `GOBIN` values

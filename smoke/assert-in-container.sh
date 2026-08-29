@@ -191,7 +191,68 @@ check_security() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. File ownership — write into the workspace, smoke.sh checks host ownership
+# 3. PATH ordering and the exported Go environment
+# ---------------------------------------------------------------------------
+
+# Index of an entry in the colon-separated PATH, or -1 when absent. Matches
+# whole entries only, so /root/go/bin never matches inside /root/go/bin/foo.
+path_index() {
+  local want="$1" i=0 entry
+  local IFS=:
+  for entry in $PATH; do
+    if [ "$entry" = "$want" ]; then
+      printf '%s' "$i"
+      return
+    fi
+    i=$((i + 1))
+  done
+  printf '%s' "-1"
+}
+
+assert_path_before() {
+  local first="$1" second="$2"
+  local a b
+  a=$(path_index "$first")
+  b=$(path_index "$second")
+  if [ "$a" = "-1" ]; then
+    fail "path-order: $first is not on PATH (PATH=$PATH)"
+  elif [ "$b" = "-1" ]; then
+    fail "path-order: $second is not on PATH (PATH=$PATH)"
+  elif [ "$a" -lt "$b" ]; then
+    pass "path-order: $first (#$a) precedes $second (#$b)"
+  else
+    fail "path-order: expected $first before $second, got #$a and #$b (PATH=$PATH)"
+  fi
+}
+
+check_path_order() {
+  # The image PATH survives the privilege drop — entrypoint.sh execs
+  # `runuser -u claude` (not -l), so what this script sees IS the shipped
+  # ordering. /root is the persistent claude-code-root volume, so both
+  # /root/.local/bin (pip --user / uv tool install prefix) and /root/go/bin
+  # (GOPATH default, `go install` target) are agent-writable and survive the
+  # session. Neither may precede a system path: a binary one session leaves
+  # there must not shadow git/gh/aws on a later run, in an unrelated workspace.
+  # /usr/bin stands in for "the system paths" — it is where git and gh live.
+  assert_path_before /usr/local/go/bin /usr/bin
+  assert_path_before /usr/bin /root/.local/bin
+  assert_path_before /usr/bin /root/go/bin
+
+  # And the resolution actually lands on the system copy, not merely earlier in
+  # a string — this is the invariant the ordering exists to buy.
+  assert_eq "path-git-resolves-system" "$(command -v git)" "/usr/bin/git"
+
+  # Go environment exported by the image (ENV), so it holds for docker run,
+  # docker exec, and non-login shells alike rather than relying on `go env`
+  # defaults. Spelled against a literal /root: Docker does not define HOME at
+  # build time.
+  assert_eq "GOROOT=/usr/local/go" "${GOROOT:-}" "/usr/local/go"
+  assert_eq "GOPATH=/root/go" "${GOPATH:-}" "/root/go"
+  assert_eq "GOBIN=/root/go/bin" "${GOBIN:-}" "/root/go/bin"
+}
+
+# ---------------------------------------------------------------------------
+# 4. File ownership — write into the workspace, smoke.sh checks host ownership
 # ---------------------------------------------------------------------------
 
 check_workspace_write() {
@@ -213,7 +274,7 @@ check_workspace_write() {
 }
 
 # ---------------------------------------------------------------------------
-# 4. Credential plumbing
+# 5. Credential plumbing
 # ---------------------------------------------------------------------------
 
 # Mapping: opt-in name → container config path + env var to check.
@@ -308,7 +369,7 @@ check_credentials() {
 }
 
 # ---------------------------------------------------------------------------
-# 5. Seeded settings — must be a writable copy, not a mount
+# 6. Seeded settings — must be a writable copy, not a mount
 # ---------------------------------------------------------------------------
 
 check_settings() {
@@ -371,7 +432,7 @@ check_settings() {
 }
 
 # ---------------------------------------------------------------------------
-# 6. Robustness — entrypoint reached here, so it did not abort
+# 7. Robustness — entrypoint reached here, so it did not abort
 # ---------------------------------------------------------------------------
 
 check_entrypoint_reached() {
@@ -388,6 +449,7 @@ echo "=== assert-in-container starting (UID=$(id -u) GID=$(id -g)) ==="
 check_entrypoint_reached
 check_identity
 check_security
+check_path_order
 check_workspace_write
 check_credentials
 check_settings

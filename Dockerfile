@@ -267,11 +267,11 @@ EOF
 # and the dropped-privilege user, whose passwd entry is created with -d /root.
 # GOROOT is already baked into the go.dev tarball; set explicitly so scripts that
 # read the variable directly (rather than `go env GOROOT`) see it too.
-# Own ENV instruction because Docker resolves ${GOHOME} against the value from
-# *before* the current instruction — chaining inside one ENV would yield "/bin".
-ENV GOHOME=/root/go
-ENV GOBIN="${GOHOME}/bin" \
-    GOPATH="${GOHOME}" \
+# GOBIN is spelled out rather than written as ${GOPATH}/bin for the same class of
+# reason: Docker resolves a variable against the value from *before* the current
+# instruction, so ${GOPATH}/bin inside this ENV would yield "/bin".
+ENV GOBIN=/root/go/bin \
+    GOPATH=/root/go \
     GOROOT=/usr/local/go
 
 # DISABLE_AUTOUPDATER=1 keeps the pinned CLAUDE_CODE_VERSION authoritative —
@@ -282,20 +282,20 @@ ENV GOBIN="${GOHOME}/bin" \
 # makes every `task` invocation warn that the experiment is released. It stays a
 # runtime code-fetch primitive in the same class as `pnpm dlx`/`uvx`/`go install`;
 # task still prompts before trusting a new remote Taskfile checksum.
-# PATH: /usr/local/go/bin is the go.dev-prescribed entry for the toolchain.
-# $GOBIN (/root/go/bin, the GOPATH default) is appended LAST on purpose —
-# `go install` targets it and /root persists in the claude-code-root volume, so
-# anything a session drops there must never be able to shadow a system binary
-# earlier in PATH. /root/.local/bin (pip/pipx/`uv tool install` user prefix) is
-# first by the usual convention, so tools installed there are meant to win;
-# it is agent-writable and volume-persisted like /root/go/bin, so treat anything
-# landing in it as session-trusted.
+# PATH: /usr/local/go/bin comes first — the go.dev-prescribed entry for the
+# toolchain, ahead of the system paths so the image's pinned Go wins.
+# /root/.local/bin (the pip --user / `uv tool install` prefix) and /root/go/bin
+# (the GOPATH default, where `go install` writes) are appended LAST on purpose:
+# both live in the persistent claude-code-root volume and are writable by the
+# session, so a binary one session drops there must never be able to shadow a
+# system binary (git, gh, aws, …) on a later run. Tools installed into either
+# stay runnable by name; only deliberate overrides are given up.
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     DISABLE_AUTOUPDATER=1 \
     IS_SANDBOX=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PATH="/root/.local/bin:/usr/local/go/bin:${PATH}:/root/go/bin"
+    PATH="/usr/local/go/bin:${PATH}:/root/.local/bin:/root/go/bin"
 
 # Container starts as root so the entrypoint can chown /root to the host
 # UID, then drops privileges via runuser. Steady-state, claude runs as the
