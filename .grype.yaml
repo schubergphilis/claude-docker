@@ -18,7 +18,7 @@ ignore:
   # the weekly pins PR already surfaces. Not actionable from this Dockerfile.
   - package:
       type: go-module
-    reason: "Stdlib/vendored code inside prebuilt upstream binaries."
+    reason: Stdlib/vendored code inside prebuilt upstream binaries.
 
   # AWS CLI v2 bundles its own CPython, which grype's binary classifier reports
   # separately from (and at a newer version than) the distro's python3.14 deb.
@@ -26,7 +26,7 @@ ignore:
   - package:
       name: python
       type: binary
-    reason: "AWS CLI v2's vendored interpreter; bumped via pins/awscli.env."
+    reason: AWS CLI v2's vendored interpreter; bumped via pins/awscli.env.
 
 # Deliberately NOT ignored: npm and deb findings. Those are genuinely
 # actionable here — an npm pin bump under pins/ or a base-image digest bump —
