@@ -44,8 +44,11 @@ jobs:
       - uses: schubergphilis/mcvs-docker-action@1de6c6ce1dd24cdea3b1964a13ac902a7cd57128 # v0.11.6
         with:
           images: ghcr.io/${{ github.repository }}
-          # CIS-DI-0010 flags benign NAME=value tokens out of layer history,
-          # one per line per run. This is the full set from the base image
-          # (Canonical's rockcraft/umoci build) and from this Dockerfile.
-          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,HOME,curl,nodejs,task,gh,NODE_VERSION,TASK_VERSION,ARCH,URL,SHA,--chmod,--strip-components,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,IS_SANDBOX,LANG,LC_ALL,GOBIN,GOPATH,GOROOT,GO_VERSION,GO_SHA256_AMD64,GO_SHA256_ARM64,TFENV_URL,TFENV_SHA256,CLAUDE_CODE_VERSION,OPENSPEC_VERSION,PNPM_VERSION,libcrypto3>,libssl3>
+          # The action passes an empty sensitive-word, which makes dockle's
+          # CIS-DI-0010 regex end in an `.*` alternative — so EVERY NAME=value
+          # token in layer history is FATAL and this list is the only
+          # suppression. It reports one key per line per run, so this is the
+          # exhaustive set: the base image's own tokens (Canonical's
+          # rockcraft/umoci build) plus this Dockerfile's.
+          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,--chmod,--strip-components,ARCH,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,GOBIN,GOPATH,GOROOT,GO_SHA256_AMD64,GO_SHA256_ARM64,GO_VERSION,IS_SANDBOX,LANG,LC_ALL,NODE_VERSION,SHA,TASK_VERSION,URL,nodejs,task
           token: ${{ secrets.GITHUB_TOKEN }}
