@@ -10,7 +10,7 @@ name: Docker
 "on":
   push:
     branches: [main]
-    tags: ["v*"]
+    tags: [v*]
   pull_request:
     branches: [main]
   workflow_dispatch: {}
@@ -69,14 +69,26 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}
           # CIS-DI-0010 (FATAL) shlex-tokenises every layer-history command
-          # and flags the first NAME=value whose NAME it considers suspicious.
-          # In practice it flags benign ones too — a run on the earlier attempt
-          # at this workflow reported plain `LANG` — and it reports only ONE
-          # key per history line, so the list below was built by repeatedly
-          # running CI and adding whatever it named next. Every entry is a
-          # build-time shell variable, a pinned version, an apt package name or
-          # a tar/copy flag; none is a credential, and no real secret enters
+          # and flags the first NAME=value whose NAME it deems suspicious. It
+          # flags plenty of benign ones — an earlier attempt at this workflow
+          # was tripped by plain `LANG` — and it reports only ONE key per
+          # history line, so a naive fix loop needs a CI round per key.
+          #
+          # This list is instead the full enumeration of both sources, so it
+          # should not need to grow on its own:
+          #
+          #  - The base image's history, read straight off the registry:
+          #    `--clear` and the four org.opencontainers.image.* labels come
+          #    from Canonical's rockcraft/umoci build, not from anything here.
+          #    Those five plus PATH are ALL the NAME=value tokens ubuntu
+          #    resolute-20260811.1 contributes.
+          #  - This Dockerfile's own build-time shell variables, pinned
+          #    versions, apt package names and tar/copy flags.
+          #
+          # `signed-by=` and `arch=` are deliberately absent: they only occur
+          # inside double-quoted `echo "deb [...]"` strings, which shlex emits
+          # as a single word whose name half contains a space — dockle skips
+          # those. None of these is a credential, and no real secret enters
           # the build (the pins are public URLs and sha256s).
-          # Expect to append here if a run names a key that is not yet listed.
-          dockle-accept-key: PATH,HOME,curl,nodejs,task,gh,NODE_VERSION,TASK_VERSION,ARCH,URL,SHA,--chmod,--strip-components,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,IS_SANDBOX,LANG,LC_ALL,GOBIN,GOPATH,GOROOT,GO_VERSION,GO_SHA256_AMD64,GO_SHA256_ARM64,TFENV_URL,TFENV_SHA256,CLAUDE_CODE_VERSION,OPENSPEC_VERSION,PNPM_VERSION,libcrypto3>,libssl3>
+          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,HOME,curl,nodejs,task,gh,NODE_VERSION,TASK_VERSION,ARCH,URL,SHA,--chmod,--strip-components,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,IS_SANDBOX,LANG,LC_ALL,GOBIN,GOPATH,GOROOT,GO_VERSION,GO_SHA256_AMD64,GO_SHA256_ARM64,TFENV_URL,TFENV_SHA256,CLAUDE_CODE_VERSION,OPENSPEC_VERSION,PNPM_VERSION,libcrypto3>,libssl3>
           token: ${{ secrets.GITHUB_TOKEN }}
