@@ -1,0 +1,82 @@
+# yamllint disable rule:line-length
+---
+name: Docker
+
+# mcvs-docker-action gates its push step on
+# `github.event_name == 'push' && contains(github.ref, 'refs/tags/')`, so the
+# `tags:` filter below is load-bearing — without it the image is built and
+# scanned but never published. Branch and PR runs deliberately exercise the
+# same build + scan gate with the push step skipped.
+"on":
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: docker-${{ github.ref }}
+  # Cancel superseded PR builds, but never cancel a run on main or on a tag —
+  # a cancelled tag run silently skips a release.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    # This string becomes the status-check context. It is NOT in main's
+    # ruleset (which requires only "Validate" and "Docker build (validate, no
+    # push)") and should stay that way: grype runs with only-fixed=false at a
+    # `high` cutoff, so a CVE disclosed against ubuntu, node or the Go
+    # toolchain turns this red on a PR that never touched the image, and the
+    # author cannot fix it. Advisory-red informs; required-red would block
+    # every merge on an unrelated upstream disclosure. Keep the name stable
+    # regardless — contexts match by literal string, so a rename silently
+    # invalidates any ruleset entry that ever references it.
+    name: Docker build and push (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # amd64 only: the action exposes no `platforms` input and pushes whatever
+      # the runner built natively — schubergphilis/mcvs-docker-action#31.
+      #
+      # Its tuning surface is deliberately tiny. hadolint's `style` failure
+      # threshold, dockle's exit level, dive's rules and grype's `high` cutoff
+      # with fail-on-vulnerability are all fixed inside the action; they are
+      # steered from committed config files instead — .hadolint.yaml,
+      # .dockleignore and .grype.yaml.
+      #
+      # No `build-args`: the action rewrites a newline-free value to
+      # APPLICATION=<value>, and this Dockerfile declares no APPLICATION ARG.
+      #
+      # Tagging is docker/metadata-action's defaults (type=ref for branch, tag
+      # and pr) with the action forcing `flavor: latest=false`, and there is no
+      # input to change it. So a `v0.1.0` tag publishes exactly
+      # ghcr.io/schubergphilis/claude-docker:v0.1.0 — no `latest`, no `0.1`,
+      # no semver expansion. Consumers must pin the full v-prefixed tag.
+      #
+      # Do NOT add docker/setup-buildx-action before this step. The action
+      # builds with push:false and no load:true, which only puts the image
+      # where dockle, dive and `docker push` can find it while the default
+      # docker-driver builder is in use; the docker-container driver would
+      # keep the image out of the local daemon and break every later step.
+      - uses: schubergphilis/mcvs-docker-action@1de6c6ce1dd24cdea3b1964a13ac902a7cd57128 # v0.11.6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # CIS-DI-0010 (FATAL) shlex-tokenises every layer-history command
+          # and flags the first NAME=value whose NAME it considers suspicious.
+          # In practice it flags benign ones too — a run on the earlier attempt
+          # at this workflow reported plain `LANG` — and it reports only ONE
+          # key per history line, so the list below was built by repeatedly
+          # running CI and adding whatever it named next. Every entry is a
+          # build-time shell variable, a pinned version, an apt package name or
+          # a tar/copy flag; none is a credential, and no real secret enters
+          # the build (the pins are public URLs and sha256s).
+          # Expect to append here if a run names a key that is not yet listed.
+          dockle-accept-key: PATH,HOME,curl,nodejs,task,gh,NODE_VERSION,TASK_VERSION,ARCH,URL,SHA,--chmod,--strip-components,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,IS_SANDBOX,LANG,LC_ALL,GOBIN,GOPATH,GOROOT,GO_VERSION,GO_SHA256_AMD64,GO_SHA256_ARM64,TFENV_URL,TFENV_SHA256,CLAUDE_CODE_VERSION,OPENSPEC_VERSION,PNPM_VERSION,libcrypto3>,libssl3>
+          token: ${{ secrets.GITHUB_TOKEN }}
