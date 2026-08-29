@@ -28,6 +28,23 @@ ignore:
       type: binary
     reason: AWS CLI v2's vendored interpreter; bumped via pins/awscli.env.
 
-# Deliberately NOT ignored: npm and deb findings. Those are genuinely
-# actionable here — an npm pin bump under pins/ or a base-image digest bump —
-# so leaving them enforced keeps this gate meaningful rather than decorative.
+  # npm's OWN bundled dependency tree, which arrives with the nodejs deb and
+  # is not resolved by anything this repo pins. Verified against the registry:
+  # node 24.19.0 ships npm 11.17.0, whose bundle contains exactly the flagged
+  # brace-expansion@5.0.6, ip-address@10.2.0, tar@7.5.16 and undici@6.26.0.
+  # No `npm install` here can move them — only a Node release can — and no
+  # released Node clears the gate: 24.20.0 (npm 11.19.0) fixes brace-expansion
+  # and undici but still ships ip-address@10.2.0 (needs 10.3.1) and tar@7.5.19
+  # (one High needs 7.5.21). Scoped by location on purpose: this glob covers
+  # npm's vendored tree at any prefix and does NOT match the globals installed
+  # alongside it (@anthropic-ai/claude-code, @fission-ai/openspec, pnpm), whose
+  # own dependencies stay enforced.
+  # Revisit when a Node release carries a clean npm bundle.
+  - package:
+      location: "**/node_modules/npm/**"
+    reason: npm's bundled deps ship with the nodejs deb; only Node moves them.
+
+# Deliberately NOT ignored: deb findings, and npm findings outside the bundle
+# above. Those are genuinely actionable — a pin bump under pins/ or a
+# base-image digest bump — so leaving them enforced keeps this gate meaningful
+# rather than decorative.
