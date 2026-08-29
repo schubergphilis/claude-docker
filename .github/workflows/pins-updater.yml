@@ -1,0 +1,152 @@
+# yamllint disable rule:line-length
+---
+name: Pins updater
+
+"on":
+  schedule:
+    # Mondays, 05:23 UTC. Deliberately offset from Dependabot's weekly window
+    # so an actions/docker bump and a pin refresh don't land in the same minute.
+    - cron: 23 5 * * 1
+  workflow_dispatch:
+    inputs:
+      soak:
+        description: Soak window in days (update_pins.py --soak)
+        required: false
+        default: "7"
+      block-major-bumps:
+        description: Stay within each tool's current major version
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  # One refresh at a time — two concurrent runs would force-push the same
+  # branch. Never cancel a run in flight; it may be mid-push.
+  group: pins-updater
+  cancel-in-progress: false
+
+env:
+  # A single long-lived branch that is force-pushed on every run, rather than a
+  # dated branch per run: a stale pins PR is worthless (the pins it proposes
+  # have been superseded), so the newest refresh should replace the open PR
+  # instead of stacking another one next to it.
+  BRANCH: bump/pins
+
+jobs:
+  update-pins:
+    name: Refresh pins and open a PR
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # No persisted credentials: the push below authenticates explicitly
+          # with the token it wants to use, which may be a PAT rather than the
+          # job's GITHUB_TOKEN (see the PR step).
+          persist-credentials: false
+
+      - name: Refresh pins
+        id: refresh
+        env:
+          # Raises GitHub's API rate limit for the release lookups.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Dispatch inputs go through env, never string-interpolated into the
+          # script body (that would be a template-injection sink). Both are
+          # empty on the schedule trigger, hence the defaults.
+          SOAK: ${{ inputs.soak || '7' }}
+          BLOCK_MAJOR: ${{ inputs.block-major-bumps || 'false' }}
+        run: |
+          set -euo pipefail
+          args=(--soak "$SOAK")
+          if [ "$BLOCK_MAJOR" = "true" ]; then
+            args+=(--block-major-bumps)
+          fi
+          # python3, not `uv run`: update_pins.py is stdlib-only
+          # (`dependencies = []`) and the runner's python3.12 already satisfies
+          # its `requires-python = ">=3.11"`, so uv would have nothing to
+          # resolve — this is the same invocation ci.yml uses. README documents
+          # `uv run` for operators because the image ships uv.
+          # tee so the report lands both in the job log and in the PR body.
+          # A non-zero exit from update_pins.py fails the job (pipefail); it
+          # leaves pins/ untouched on any resolve/download failure.
+          python3 update_pins.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/report.txt"
+          echo "soak=$SOAK" >> "$GITHUB_OUTPUT"
+
+      - name: Detect pin changes
+        id: diff
+        run: |
+          set -euo pipefail
+          if [ -z "$(git status --porcelain -- pins)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No pin changes — every tool is already on its newest soaked version." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- pins
+          fi
+
+      - name: Open or update the pull request
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          # PINS_UPDATER_TOKEN (a fine-grained PAT or GitHub App token scoped
+          # to this repo with contents:write + pull-requests:write) is what you
+          # want here. A PR opened with the default GITHUB_TOKEN does not
+          # trigger `pull_request` workflows, so CI — the docker build and the
+          # smoke matrix that actually validate a pin bump — never runs on it;
+          # and because the `main protection` ruleset requires the `Validate`
+          # and `Docker build (validate, no push)` contexts, those stay stuck
+          # on "expected — waiting for status to be reported" and the PR cannot
+          # be merged at all. The fallback below keeps the job working without
+          # the secret, but every weekly PR then needs a human to push an empty
+          # commit or close/reopen it before it can merge.
+          GH_TOKEN: ${{ secrets.PINS_UPDATER_TOKEN || secrets.GITHUB_TOKEN }}
+          # Resolve the repo explicitly rather than from the git remote.
+          GH_REPO: ${{ github.repository }}
+          SOAK: ${{ steps.refresh.outputs.soak }}
+        run: |
+          set -euo pipefail
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$BRANCH"
+          git add pins
+          git commit -m "build(deps): refresh tool pins" -m \
+            "Automated refresh by .github/workflows/pins-updater.yml (python3 update_pins.py --soak ${SOAK}). Full report in the PR body."
+
+          # Force-push: the branch is regenerated from main every run, so its
+          # previous head is an obsolete refresh with no history worth keeping.
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/${BRANCH}"
+
+          # Absolute link: GitHub rewrites repo-relative markdown links only in
+          # files rendered from the repo, never in an issue or PR body — a
+          # relative one would resolve against /<org>/<repo>/pull/ and 404.
+          workflow_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/.github/workflows/pins-updater.yml"
+
+          {
+            echo "Automated pin refresh — \`python3 update_pins.py --soak ${SOAK}\`, run by [\`pins-updater.yml\`](${workflow_url})."
+            echo
+            echo "Review the diff and let CI build the image before merging. The \`⚠ needs your eyes\` block below covers the manual pins (nodejs, task, go, ubuntu base) that the script reports but never rewrites — act on those in a separate commit."
+            echo
+            echo '<details><summary>update_pins.py report</summary>'
+            echo
+            echo '```text'
+            cat "$RUNNER_TEMP/report.txt"
+            echo '```'
+            echo
+            echo '</details>'
+          } > "$RUNNER_TEMP/pr-body.md"
+
+          title="build(deps): refresh tool pins"
+          number=$(gh pr list --head "$BRANCH" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$number" ]; then
+            gh pr edit "$number" --title "$title" --body-file "$RUNNER_TEMP/pr-body.md"
+            echo "Updated PR #${number}" >> "$GITHUB_STEP_SUMMARY"
+          else
+            gh pr create --base main --head "$BRANCH" --title "$title" --body-file "$RUNNER_TEMP/pr-body.md"
+          fi
