@@ -1,0 +1,33 @@
+---
+# Grype policy for the scans mcvs-docker-action runs (one over the source tree,
+# one over the built image). The action hardcodes `severity-cutoff: high`,
+# `fail-build: true` and `only-fixed: false` with no input to relax any of them,
+# and the scan runs *before* the push step — so without these rules the job
+# fails and the image never publishes at all.
+#
+# Grype auto-discovers this file because the action leaves scan-action's
+# `config` input empty. Rules are deliberately scoped by package *type* rather
+# than by CVE: the last full image scan produced 105 High/Critical matches
+# across ~63 advisory IDs, so a CVE snapshot would be stale within the week.
+# Each rule below states how the finding is actually remediated instead.
+ignore:
+  # 93 of those 105 matches. Nothing in this repo compiles Go — every
+  # go-module match is Go stdlib or a vendored dependency baked into a
+  # *prebuilt* upstream release binary (gh, glab, task). The only remediation
+  # is upstream shipping a rebuild, which update_pins.py already tracks and
+  # the weekly pins PR already surfaces. Not actionable from this Dockerfile.
+  - package:
+      type: go-module
+    reason: "Stdlib/vendored code inside prebuilt upstream binaries."
+
+  # AWS CLI v2 bundles its own CPython, which grype's binary classifier reports
+  # separately from (and at a newer version than) the distro's python3.14 deb.
+  # Remediated by bumping pins/awscli.env, not by anything in the Dockerfile.
+  - package:
+      name: python
+      type: binary
+    reason: "AWS CLI v2's vendored interpreter; bumped via pins/awscli.env."
+
+# Deliberately NOT ignored: npm and deb findings. Those are genuinely
+# actionable here — an npm pin bump under pins/ or a base-image digest bump —
+# so leaving them enforced keeps this gate meaningful rather than decorative.
