@@ -11,6 +11,13 @@ The `uv` install SHALL pin the version and verify the downloaded artifact agains
 - **THEN** the build fails with a non-zero exit code before any extraction
 - **AND** no `uv` binary is installed into `/usr/local/bin/`
 
+#### Scenario: version bumps require sha256 bumps in the same commit
+
+- **WHEN** a contributor hand-edits `pins/uv.env`, changing `UV_VERSION` without
+  updating the matching `UV_SHA256_*` values
+- **THEN** the next build fails sha256 verification
+- **AND** the failure surfaces in CI before merge
+
 #### Scenario: version, URL, and sha256 stay coupled through generation
 
 - **WHEN** `pins/uv.env` is produced by the refresh tooling
