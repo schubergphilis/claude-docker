@@ -13,12 +13,14 @@ whose pins never moved produces no signal at all. Resolves
 
 ## What Changes
 
-- Add a **blocking Trivy scan step** to the existing `docker-build` job in
-  [`ci.yml`](../../../.github/workflows/ci.yml), scanning the `claude-docker:ci` image that
-  job already loaded. A step, not a new job: `docker-build` is the only job whose local
-  daemon holds that image, and `main`'s ruleset requires exactly the `Validate` and
-  `Docker build (validate, no push)` contexts — so a step gates merges on the checks that
-  already exist, where a new job would not gate anything until an operator edits the ruleset.
+- Add **two Trivy scan steps** to the existing `docker-build` job in
+  [`ci.yml`](../../../.github/workflows/ci.yml) — one advisory, one blocking — scanning the
+  `claude-docker:ci` image that job already loaded. Steps, not a new job: `docker-build` is
+  the only job whose local daemon holds that image, and `main`'s ruleset requires exactly the
+  `Validate` and `Docker build (validate, no push)` contexts — so a step gates merges on the
+  checks that already exist, where a new job would not gate anything until an operator edits
+  the ruleset. Two invocations because Trivy cannot both fail on the fixable subset and
+  report the unfixed remainder in one pass; `design.md` has the mechanics.
 - Add **`.github/workflows/image-scan.yml`**: a weekly cron plus `workflow_dispatch` that
   rebuilds `main`'s image and scans it. This is the case a PR scan structurally cannot cover
    — a CVE disclosed against an image nobody has touched. It rebuilds rather than pulls
@@ -71,7 +73,7 @@ code-fetch paths and the sha256-verified download list, neither of which this to
 
 ## Impact
 
-- `.github/workflows/ci.yml` — one new step in `docker-build`.
+- `.github/workflows/ci.yml` — two new steps in `docker-build`, advisory then gate.
 - `.github/workflows/image-scan.yml` — new.
 - `.trivyignore` — new; empty of entries at first, with the contract in a header comment.
 - `tests/test_trivyignore.py` — new; enforces that contract. Stdlib only, so CI's existing
