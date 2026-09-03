@@ -130,28 +130,45 @@ Unset, the binary version is a property of the action SHA, which Dependabot's
 The vulnerability database is fetched at scan time regardless, which is the point: new CVE
 data must reach an unchanged image.
 
-### `.trivyignore.yaml`, not `.trivyignore`
+### Plain `.trivyignore`, with a test enforcing the entry contract
 
-The spec requires a reason and an expiry per entry. Both formats support expiry — plain
-`.trivyignore` as `CVE-... exp:2026-01-01` — but only the YAML format makes the reason a
-first-class field (`statement`) rather than a `#` comment that nothing reads or validates.
+The spec makes a reason and an expiry mandatory per entry. **Trivy enforces neither.** In
+`pkg/result/ignore.go` at v0.70.0, a line whose fields do not include an `exp:` token yields
+a zero `ExpiredAt`, which suppresses the finding forever; the YAML format behaves the same
+way when `expired_at` is absent ("the ignore finding is always valid"). So whichever format
+is chosen, the mandatory part of the requirement needs something outside Trivy to hold it up,
+or it is decoration.
 
-Trivy documents the YAML format as **experimental**; that is the accepted cost, and the
-migration back to the plain format is mechanical if it changes. The action's `trivyignores`
-input documents accepting "a single `.trivyignore.yaml` file", so no `--ignorefile` plumbing
-is needed. Trivy only auto-detects the plain `.trivyignore`, so the path is passed explicitly
-on both invocations — including the advisory one, so a suppressed finding does not reappear
-there and read as unsuppressed.
+That reduces the format choice to how cheaply it can be validated:
 
-The file ships with `vulnerabilities: []` rather than comments alone: a comments-only file
-parses as an empty YAML document, and an explicit empty list is unambiguous to both Trivy and
-the next reader.
+- **Plain** — line-oriented, so a strict fail-closed validator needs nothing but `re` and
+  `datetime`. It can live in `tests/`, where CI's existing
+  `python3 -m unittest discover -s tests` step picks it up with no workflow edit. That step
+  documents itself as needing "no install, no third-party action (the suite imports only the
+  standard library)", a property worth keeping.
+- **YAML** — the reason becomes a first-class `statement` field rather than a comment, but
+  validating it means PyYAML, which the unit-test step deliberately does not have, and Trivy
+  documents the format as experimental.
 
-Two properties of the action's handling of that input are load-bearing and worth relying on
-deliberately. It **errors if the named file does not exist**, so renaming or deleting
-`.trivyignore.yaml` fails the build instead of silently scanning with no suppressions — the
-fail-closed direction. And it `cat`s the file into the job log on every run, so a suppression
-is visible to anyone reading a scan, not only to someone who thinks to open the file.
+Plain wins: the `statement`-versus-comment advantage evaporates once a validator enforces the
+comment's presence, and it is the only option that keeps the enforcement stdlib-only. One
+genuinely useful Trivy behaviour comes with it — a *malformed* `exp:` date makes the parser
+skip the entry entirely rather than treat it as unexpiring, so a typo'd date fails closed and
+the finding keeps blocking.
+
+The path is passed explicitly via the action's `trivyignores` input rather than relying on
+Trivy's auto-detection of `.trivyignore`, on both the advisory and the gate invocation. Two
+properties of that input are load-bearing. The action **errors if the named file does not
+exist**, so renaming or deleting the file fails the build instead of silently scanning with
+no suppressions. And it `cat`s the file into the job log on every run, so a suppression is
+visible to anyone reading a scan, not only to someone who thinks to open the file. Passing it
+to the advisory step too keeps a suppressed finding from reappearing there and reading as
+unsuppressed.
+
+The validator asserts presence and parseability of the expiry, **not** that the date is still
+in the future. An expired entry is Trivy's job: it stops suppressing, and the finding blocks
+the gate again. A test that failed on expiry would turn every lapsed acceptance into a red
+`Validate` job as well, reporting the same thing twice in different places.
 
 ### Weekly, Monday 06:23 UTC
 
@@ -176,12 +193,20 @@ factored into a reusable workflow: the two builds differ (the scheduled one need
 matrix and no version probes), and a reusable workflow would put a third indirection between
 the ruleset's required context and the thing it runs.
 
+The duplicated build is deliberately **not** a copy: it takes `cache-from: type=gha` and no
+`cache-to`. The scheduled run consumes the layer cache and must not write to it. PR builds
+import from the cache scope `main` writes, and the repo-wide Actions cache is a fixed budget
+under LRU eviction — a second weekly writer of multi-gigabyte layers can evict entries PR
+builds were relying on, which shows up as slower builds with nothing pointing at the cause.
+Copying `ci.yml`'s `cache-to: type=gha,mode=min` across is therefore the one edit to this
+file that looks like tidying up and is not.
+
 ## Risks / Trade-offs
 
 - **The gate goes red on a fixable CVE in a PR that did not introduce it** → this is the
-  design working as intended, and it is why `.trivyignore.yaml` exists with a mandatory
-  expiry. The scheduled scan is the early-warning channel that should normally surface such a
-  finding before a contributor meets it.
+  design working as intended, and it is why `.trivyignore` exists with a mandatory expiry.
+  The scheduled scan is the early-warning channel that should normally surface such a finding
+  before a contributor meets it.
 - **Ubuntu ships the fix later than the CVE is disclosed** → `--ignore-unfixed` covers exactly
   this window: while no fix exists the finding is advisory, and it becomes blocking the moment
   a fixed version is published. The trade-off is that the blocking moment is not chosen by us.
@@ -190,17 +215,20 @@ the ruleset's required context and the thing it runs.
   error rather than silently passing. Fail-closed is the right side to err on for a scanner,
   and this is not a novel exposure — the pipeline already depends on ghcr for actions and on
   npm for the signature audit.
-- **The YAML ignore format is experimental** → the entry set is expected to be near-empty;
-  moving to the plain format is a mechanical rewrite of at most a handful of entries.
 - **A red `Docker build (validate, no push)` no longer implies a build problem** → the step
   name disambiguates in the log. Accepted in exchange for gating without a ruleset edit; see
   the first decision.
 - **Scan time is added to the critical path of every PR** → two scans of one already-local
   image, with a cached DB. It lands after the smoke matrix, which is by far the longer step.
-- **An operator can silence a finding by editing `.trivyignore.yaml` with no review** → the
-  file is version-controlled and `main` requires a PR with one approval, so a suppression is
+- **An operator can silence a finding by editing `.trivyignore` with no review** → the file
+  is version-controlled and `main` requires a PR with one approval, so a suppression is
   reviewed like any other change. The expiry is what stops a reviewed suppression becoming
-  permanent.
+  permanent, and the entry-contract test stops it being added without one.
+- **The entry-contract test constrains `.trivyignore` to a subset of what Trivy accepts** →
+  the validator is fail-closed, so a legitimate construct it does not recognise (a `paths:`
+  scoping, say) fails `Validate` until the validator learns it. Accepted deliberately: the
+  alternative is a permissive validator, which cannot distinguish an unrecognised construct
+  from a malformed entry and so cannot enforce the requirement at all.
 
 ## Migration Plan
 

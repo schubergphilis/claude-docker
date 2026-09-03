@@ -27,9 +27,10 @@ whose pins never moved produces no signal at all. Resolves
   An unfixed upstream CVE cannot be actioned by the author of an unrelated PR, so blocking on
   one turns a required check red for everyone until someone silences it. Both scans apply the
   same policy, so the scheduled run tells the operator what the next PR will block on.
-- Add **`.trivyignore.yaml`** as the accepted-risk record. Every entry carries a reason and
-  an `expired_at` date, so an accepted risk lapses back into a failure instead of becoming
-  permanent silence.
+- Add **`.trivyignore`** as the accepted-risk record, and a stdlib-only test that enforces its
+  entry contract. Every entry carries a reason and an expiry date, so an accepted risk lapses
+  back into a failure instead of becoming permanent silence — and because Trivy treats an
+  entry with no expiry as valid indefinitely, the test is what makes "mandatory" true.
 - Scan the **whole image filesystem** — OS packages and language packages — not just the OS
   layers. The npm-installed CLIs and the Go toolchain are exactly what `npm audit signatures`
   does not cover: it establishes tarball provenance, not that the code inside is free of
@@ -38,7 +39,7 @@ whose pins never moved produces no signal at all. Resolves
   treatment every third-party action in this repo already gets. `general.yml`'s zizmor audit
   reports a tag ref as `unpinned-uses`, so a tag would fail that job.
 - Document the scan in [`README.md`](../../../README.md): the fail policy, the
-  `.trivyignore.yaml` contract, and the scheduled run. The Threat model section's
+  `.trivyignore` contract, and the scheduled run. The Threat model section's
   build-time hardening paragraph currently makes no claim about CVE scanning either way.
 
 Not in scope:
@@ -72,7 +73,9 @@ code-fetch paths and the sha256-verified download list, neither of which this to
 
 - `.github/workflows/ci.yml` — one new step in `docker-build`.
 - `.github/workflows/image-scan.yml` — new.
-- `.trivyignore.yaml` — new; empty of entries at first, with the contract in a header comment.
+- `.trivyignore` — new; empty of entries at first, with the contract in a header comment.
+- `tests/test_trivyignore.py` — new; enforces that contract. Stdlib only, so CI's existing
+  no-install unit-test step needs no change.
 - `README.md` — new subsection under CI documentation, plus a build-time hardening line in
   Threat model.
 - New third-party CI dependency: `aquasecurity/trivy-action`. Dependabot's

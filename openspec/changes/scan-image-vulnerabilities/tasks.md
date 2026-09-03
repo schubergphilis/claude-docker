@@ -1,16 +1,28 @@
 ## 1. Accepted-risk record
 
-- [ ] 1.1 Create `.trivyignore.yaml` carrying an explicit `vulnerabilities: []` and a header
-  comment stating the entry contract: `id`, a `statement` giving the reason, and a mandatory
-  `expired_at` (`yyyy-mm-dd`) after which the entry stops suppressing. Verify it loads under
-  `python3 -c "import yaml; ..."` and that the parsed document is a mapping whose
-  `vulnerabilities` key is an empty list, not `None` — a comments-only file parses to `None`
-  and is the failure this task exists to avoid
-  (spec: *Accepted risk is recorded with a reason and an expiry*)
-- [ ] 1.2 State in that header that lowering `severity` or dropping the gate is not an
-  accepted-risk mechanism, and that suppression is per-`id`. Verify by inspection against
-  the requirement's third scenario
-  (spec: *suppression does not widen beyond the recorded finding*)
+- [ ] 1.1 Create `.trivyignore` with no entries and a header comment stating the entry
+  contract: one finding per line as `<ID> exp:<yyyy-mm-dd>`, immediately preceded by a `#`
+  comment giving the reason it was accepted. State in the same header that lowering
+  `severity` or dropping the gate is not an accepted-risk mechanism, and that suppression is
+  per-ID. Verify the file contains no uncommented lines
+  (spec: *a recorded finding is suppressed*,
+  *suppression does not widen beyond the recorded finding*)
+- [ ] 1.2 Add `tests/test_trivyignore.py` enforcing that contract on every future entry:
+  stdlib only (`re`, `datetime`, `pathlib` — no PyYAML, so CI's existing
+  `python3 -m unittest discover -s tests` step keeps working with no install and no workflow
+  edit), fail-closed so a line the parser does not recognise is a failure rather than a skip,
+  asserting each entry has a parseable `exp:` date and a non-empty reason comment directly
+  above it. Verify by running the suite, and by asserting the test rejects three hand-built
+  fixtures — an entry with no `exp:`, one with an unparseable date, and one with no reason
+  comment — rather than only passing on the real file, which has no entries yet and would
+  make a broken test look green
+  (spec: *an entry with no expiry is rejected before it can suppress*)
+- [ ] 1.3 Assert in that test that expiry is checked for presence and parseability only, not
+  for being in the future: an expired entry is Trivy's to act on (it stops suppressing and
+  the finding blocks the gate again), and failing `Validate` on it too would report one
+  lapsed acceptance as two unrelated red checks. Verify with a fixture carrying a
+  long-past `exp:` date that the test accepts
+  (spec: *an expired acceptance stops suppressing*)
 
 ## 2. PR gate in `docker-build`
 
@@ -20,13 +32,14 @@
   belongs to that tag with `gh api repos/aquasecurity/trivy-action/tags` and that no tag or
   branch ref appears in the diff — `general.yml`'s zizmor audit reports a tag ref as
   `unpinned-uses`, so a tag would fail that job
-  (spec: *The scanner is pinned to an immutable revision*)
+  (spec: *the scanner reference is immutable*, *a mutable reference is rejected*)
 - [ ] 2.2 Add the advisory step first: `scan-type: image`, `scan-ref: claude-docker:ci`,
   `severity: HIGH,CRITICAL`, `scanners: vuln`, `exit-code: 0`,
-  `trivyignores: .trivyignore.yaml`. Verify by inspection that it cannot fail the job, and
+  `trivyignores: .trivyignore`. Verify by inspection that it cannot fail the job, and
   that `vuln-type` is left unset so the action's `os,library` default keeps language packages
   in scope
-  (spec: *an unfixed HIGH does not block*, *a vulnerable language package*)
+  (spec: *an unfixed HIGH does not block*, *a vulnerable language package*,
+  *a vulnerable OS package in the base image*)
 - [ ] 2.3 Set `scanners: vuln` explicitly on every invocation rather than relying on the
   default. An unset input exports no `TRIVY_SCANNERS`, so Trivy's own `vuln,secret` default
   applies and secret scanning runs against the whole image filesystem; a secret finding
@@ -38,7 +51,8 @@
 - [ ] 2.4 Add the gate step second, identical but with `ignore-unfixed: true` and
   `exit-code: 1`. Verify by inspection that the two steps differ in exactly those two inputs,
   so the advisory table and the gate cannot disagree about severity or suppressions
-  (spec: *a fixable CRITICAL blocks*, *severities below the threshold do not block*)
+  (spec: *a fixable CRITICAL blocks*, *severities below the threshold do not block*,
+  *a clean image passes*)
 - [ ] 2.5 Place both steps after the version-probe and smoke-matrix steps, and comment why
   the scan lives in `docker-build` rather than a job of its own: that job's local daemon is
   the only one holding the loaded `claude-docker:ci`, and `main`'s ruleset requires the
@@ -82,7 +96,7 @@
 
 - [ ] 4.1 Add a README subsection covering the scan: what it covers (OS and language
   packages across the whole image filesystem), that fixable HIGH/CRITICAL findings block a
-  merge while unfixed ones are advisory, that `.trivyignore.yaml` entries need a reason and
+  merge while unfixed ones are advisory, that `.trivyignore` entries need a reason and
   an expiry, and that `main` is re-scanned weekly with a failing run as the only
   notification. Verify the section renders with working relative links by inspection of the
   paths it names
@@ -90,6 +104,7 @@
 - [ ] 4.2 State in that subsection why the scan is a step in the existing Docker build job
   rather than its own check, so a maintainer reading a red `Docker build (validate, no push)`
   knows a CVE is one of the things it can mean. Verify by inspection
+  (spec: *README documents the policy*)
 - [ ] 4.3 Extend the Threat model section's build-time hardening sentence to say the image is
   scanned for known vulnerabilities and on what terms. Verify the existing
   sha256-verified download list and the npm `--ignore-scripts` claim are left textually
@@ -105,19 +120,22 @@
 
 ## 5. Verification
 
-- [ ] 5.1 Parse `ci.yml`, `.github/workflows/image-scan.yml` and `.trivyignore.yaml` with
-  PyYAML and assert the structure the tasks above claim: both scan steps present in
-  `docker-build`, the advisory/gate input pairs, `scanners: vuln` on all four scan steps,
-  identical scan inputs across the two workflows, and an empty-list `vulnerabilities` key. No
-  yamllint, actionlint or zizmor is available in this environment, so this parse plus 2.6's
-  input cross-check are the only local backstops; `general.yml`'s yamllint and zizmor jobs
-  are the real gate and run on the PR
+- [ ] 5.1 Parse `ci.yml` and `.github/workflows/image-scan.yml` with PyYAML and assert the
+  structure the tasks above claim: both scan steps present in `docker-build`, the
+  advisory/gate input pairs, `scanners: vuln` on all four scan steps, and identical scan
+  inputs across the two workflows. Note that `ci.yml`'s bare `on:` key parses to boolean
+  `True` under YAML 1.1 while the quoted `"on":` in `image-scan.yml` parses to the string —
+  do not key the assertions off it. No yamllint, actionlint or zizmor is available in this
+  environment, so this parse plus 2.6's input cross-check are the only local backstops;
+  `general.yml`'s yamllint and zizmor jobs are the real gate and run on the PR
 - [ ] 5.2 Record that the scan's runtime behaviour cannot be verified locally: neither docker
   nor trivy is available in this environment, so the first real evidence that the gate fires
   and the advisory step does not is CI's `docker-build` on the PR. Do not tick any task
   claiming an executed scan
-- [ ] 5.3 Run `python3 -m unittest discover -s tests -p 'test_*.py' -v` and confirm the
-  existing suite still passes — this change touches no Python, so a failure here is a
-  pre-existing break and must be reported as such rather than fixed in this change
+- [ ] 5.3 Run `python3 -m unittest discover -s tests -p 'test_*.py' -v` and confirm the whole
+  suite passes with `test_trivyignore.py` included. This change adds no production Python, so
+  a failure outside that new file is a pre-existing break and must be reported as such rather
+  than fixed here; record the pre- and post-change test counts so the new tests are visibly
+  additive
 - [ ] 5.4 Run `openspec validate scan-image-vulnerabilities --type change --strict
   --no-interactive` and confirm it passes
