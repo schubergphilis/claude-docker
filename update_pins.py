@@ -25,6 +25,7 @@ Usage:
   uv run update_pins.py --pin uv=0.12.3      force a specific version (bypasses soak)
   uv run update_pins.py --pin pnpm=11.5.3 --pin uv=0.12.3   multiple overrides
   python3 update_pins.py --list-npm-tools    list npm tools as TSV (name/pkg/env/var/ver)
+  python3 update_pins.py --list-tools        list all tools as TSV (name/probe/regex/ver)
   python3 update_pins.py --audit             soak-gate check against live npm registry
 
 Honors GITHUB_TOKEN / GH_TOKEN (raises the GitHub API rate limit) when set.
@@ -48,6 +49,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 REPO_DIR = Path(__file__).resolve().parent
 PINS_DIR = REPO_DIR / "pins"
@@ -71,17 +73,43 @@ PIN_VERSION_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9.+_-]*")
 # change or an attack, and either way going quiet beats half-parsing.
 INDEX_MAX_BYTES = 1 << 20
 
-# tool registry: (name, kind, ref). ref meaning is kind-specific:
-#   npm    -> npm package name        github -> owner/repo (releases)
-#   gitlab -> owner/repo (releases)   awscli -> special-cased (tag date + CDN)
+class Tool(NamedTuple):
+    """One automated pin. `ref` meaning is kind-specific:
+      npm    -> npm package name        github -> owner/repo (releases)
+      gitlab -> owner/repo (releases)   awscli -> special-cased (tag date + CDN)
+
+    `probe` is the argv asking the installed tool its version; `version_re`
+    pulls the version out of that argv's stdout. Both live here rather than in
+    CI so a tool cannot be pinned without also being verifiable."""
+
+    name: str
+    kind: str
+    ref: str
+    probe: str
+    version_re: str
+
+
+# `version_re` is read by two engines — Python `re` here and bash `[[ =~ ]]` in
+# CI — so it stays inside the subset they agree on: literals, `^`, `$`, `[^ ]+`,
+# one capture group. No tool reports its version the same way as another, hence
+# a rule per tool rather than one shared template.
 TOOLS = [
-    ("claude-code", "npm", "@anthropic-ai/claude-code"),
-    ("openspec", "npm", "@fission-ai/openspec"),
-    ("pnpm", "npm", "pnpm"),
-    ("uv", "github", "astral-sh/uv"),
-    ("glab", "gitlab", "gitlab-org/cli"),
-    ("tfenv", "github", "tfutils/tfenv"),
-    ("awscli", "awscli", "aws/aws-cli"),
+    # The ` (Claude Code)` suffix is part of the assertion: a stub launcher that
+    # answered with a bare version would otherwise pass.
+    Tool("claude-code", "npm", "@anthropic-ai/claude-code",
+         "claude --version", r"^([^ ]+) \(Claude Code\)$"),
+    Tool("openspec", "npm", "@fission-ai/openspec",
+         "openspec --version", r"^([^ ]+)$"),
+    Tool("pnpm", "npm", "pnpm",
+         "pnpm --version", r"^([^ ]+)$"),
+    Tool("uv", "github", "astral-sh/uv",
+         "uv --version", r"^uv ([^ ]+)"),
+    Tool("glab", "gitlab", "gitlab-org/cli",
+         "glab --version", r"^glab ([^ ]+)"),
+    Tool("tfenv", "github", "tfutils/tfenv",
+         "tfenv --version", r"^tfenv ([^ ]+)$"),
+    Tool("awscli", "awscli", "aws/aws-cli",
+         "aws --version", r"^aws-cli/([^ ]+)"),
 ]
 
 
@@ -659,7 +687,7 @@ def run_list_npm_tools() -> int:
     Output columns (tab-separated, no header):
         name   package   env_file   var   version
     """
-    npm_tools = [(name, ref) for name, kind, ref in TOOLS if kind == "npm"]
+    npm_tools = [(t.name, t.ref) for t in TOOLS if t.kind == "npm"]
 
     # Validate all pins before emitting anything — fail-closed.
     rows = []
@@ -673,6 +701,31 @@ def run_list_npm_tools() -> int:
     # All present — emit the table.
     for name, pkg, env_file, var, ver in rows:
         print(f"{name}\t{pkg}\t{env_file}\t{var}\t{ver}")
+    return 0
+
+
+def run_list_tools() -> int:
+    """Print one TSV row per automated tool (name, probe, version_re, version).
+
+    Covers every tool, not just npm-backed ones: the caller is CI's runtime
+    version check, which runs each `probe` against the built image and matches
+    the output with `version_re`. Same fail-closed producer contract as
+    run_list_npm_tools() — validate every pin before emitting anything, and see
+    that function's note on why a consumer must capture with `$(...)`.
+
+    Output columns (tab-separated, no header):
+        name   probe   version_re   version
+    """
+    rows = []
+    for tool in TOOLS:
+        ver = read_current(tool.name)
+        if not ver:
+            print(f"::error::no pinned version for {tool.name}", file=sys.stderr)
+            return 1
+        rows.append((tool.name, tool.probe, tool.version_re, ver))
+
+    for row in rows:
+        print("\t".join(row))
     return 0
 
 
@@ -691,9 +744,10 @@ def run_audit(soak_days: int) -> int:
     now = now_utc()
     all_ok = True
 
-    for name, kind, ref in TOOLS:
-        if kind != "npm":
+    for tool in TOOLS:
+        if tool.kind != "npm":
             continue
+        name, ref = tool.name, tool.ref
         pinned = read_current(name)
         if not pinned:
             # Distinguish a missing pin from a yanked version (which soak_status
@@ -702,7 +756,7 @@ def run_audit(soak_days: int) -> int:
             all_ok = False
             continue
         try:
-            cand = candidates(kind, ref)
+            cand = candidates(tool.kind, ref)
             ok, age_days, reason = soak_status(pinned, cand, soak, now)
         except Exception as exc:  # noqa: BLE001 — fail-closed: any error = audit failure
             print(f"::error::{name}: could not determine soak status: {exc}", file=sys.stderr)
@@ -734,6 +788,9 @@ def parse_args(argv):
     p.add_argument("--list-npm-tools", action="store_true",
                    help="print one TSV row per npm-pinned tool (name, package, env_file, var,"
                         " version) then exit; no pin refresh; exits non-zero if any pin is missing")
+    p.add_argument("--list-tools", action="store_true",
+                   help="print one TSV row per automated tool (name, probe, version_re, version)"
+                        " then exit; no pin refresh; exits non-zero if any pin is missing")
     p.add_argument("--audit", action="store_true",
                    help="verify each npm-pinned tool's installed version passes the soak gate"
                         " (requires network); no pin refresh; exits non-zero if any tool fails")
@@ -741,7 +798,7 @@ def parse_args(argv):
     if args.soak < 0:
         p.error("--soak must be a non-negative integer")
     overrides = {}
-    tool_names = {name for name, _, _ in TOOLS}
+    tool_names = {t.name for t in TOOLS}
     for kv in args.pin:
         k, sep, v = kv.partition("=")
         if not sep or not v:
@@ -761,8 +818,15 @@ def main(argv=None) -> int:
     args, overrides = parse_args(sys.argv[1:] if argv is None else argv)
 
     # Early-return modes — run before the normal refresh flow (no pin writes).
-    # If both --list-npm-tools and --audit are passed, run list first then audit;
-    # a non-zero exit from list short-circuits (audit would have no useful input).
+    # Listings run before --audit; a non-zero exit from one short-circuits, since
+    # a later mode would have no useful input.
+    if args.list_tools:
+        rc = run_list_tools()
+        if rc != 0:
+            return rc
+        if not (args.list_npm_tools or args.audit):
+            return 0
+
     if args.list_npm_tools:
         rc = run_list_npm_tools()
         if rc != 0:
@@ -779,10 +843,12 @@ def main(argv=None) -> int:
     stage = Path(tempfile.mkdtemp(prefix=".pins-stage.", dir=REPO_DIR))
     try:
         rows = []
-        for name, kind, ref in TOOLS:
+        for tool in TOOLS:
+            name = tool.name
             current = read_current(name)
             try:
-                r = resolve(name, kind, ref, current, args.soak, args.block_major_bumps, overrides)
+                r = resolve(name, tool.kind, tool.ref, current,
+                            args.soak, args.block_major_bumps, overrides)
             except Exception as e:  # noqa: BLE001 — any failure aborts, pins untouched
                 print(f"  ✗ {name}: {e} — aborting, pins/ left untouched", file=sys.stderr)
                 return 1

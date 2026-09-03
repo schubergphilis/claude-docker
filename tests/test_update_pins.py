@@ -9,7 +9,9 @@ imports as a normal module. Run with:
 import contextlib
 import gzip
 import io
+import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -272,6 +274,106 @@ class TestListNpmTools(unittest.TestCase):
             self.assertIn("::error::", err_buf.getvalue())
 
 
+# One recorded sample per tool, carrying the real output shape with a sentinel
+# version substituted. Sentinels, not live versions, so a pin bump doesn't
+# rewrite this table — the shape is what's under test, and CI's runtime check is
+# what proves the shape still matches reality.
+SENTINEL = "9.8.7"
+VERSION_OUTPUT_SAMPLES = {
+    "claude-code": f"{SENTINEL} (Claude Code)",
+    "openspec": SENTINEL,
+    "pnpm": SENTINEL,
+    "uv": f"uv {SENTINEL} (aarch64-unknown-linux-gnu)",
+    "glab": f"glab {SENTINEL} (4d7c6cda7)",
+    "tfenv": f"tfenv {SENTINEL}",
+    "awscli": f"aws-cli/{SENTINEL} Python/3.14.6 Linux/6.8.0 exe/aarch64.ubuntu.26",
+}
+
+# Constructs Python's re accepts but bash's [[ =~ ]] does not. A rule using one
+# would pass every test here and silently never match in CI.
+PYTHON_ONLY_REGEX = re.compile(r"\\[dwsDWSbAZ]|\(\?|\*\?|\+\?")
+
+
+class TestToolRegistry(unittest.TestCase):
+    """Every Tool record must carry a usable probe and version_re."""
+
+    def test_every_tool_has_a_probe_and_rule(self):
+        for tool in up.TOOLS:
+            self.assertTrue(tool.probe, f"{tool.name} has no probe")
+            self.assertTrue(tool.version_re, f"{tool.name} has no version_re")
+
+    def test_probe_is_plain_argv(self):
+        """The probe is split on whitespace by the CI consumer, so it must
+        survive that round-trip — no embedded, leading, or doubled spaces."""
+        for tool in up.TOOLS:
+            self.assertEqual(" ".join(tool.probe.split()), tool.probe,
+                             f"{tool.name}: probe does not round-trip through whitespace splitting")
+
+    def test_version_re_has_exactly_one_group(self):
+        for tool in up.TOOLS:
+            self.assertEqual(re.compile(tool.version_re).groups, 1,
+                             f"{tool.name}: version_re must capture exactly one group")
+
+    def test_version_re_stays_in_the_shared_subset(self):
+        for tool in up.TOOLS:
+            self.assertIsNone(PYTHON_ONLY_REGEX.search(tool.version_re),
+                              f"{tool.name}: version_re uses a construct bash [[ =~ ]] cannot read")
+
+    def test_every_tool_has_a_recorded_sample(self):
+        self.assertEqual(sorted(VERSION_OUTPUT_SAMPLES), sorted(t.name for t in up.TOOLS))
+
+    def test_rule_extracts_the_version_from_its_own_sample(self):
+        for tool in up.TOOLS:
+            m = re.search(tool.version_re, VERSION_OUTPUT_SAMPLES[tool.name])
+            self.assertIsNotNone(m, f"{tool.name}: version_re did not match its recorded output")
+            self.assertEqual(m.group(1), SENTINEL, f"{tool.name}: extracted the wrong field")
+
+    def test_rule_rejects_a_different_version(self):
+        """Guards against a rule that matches the shape but captures a constant
+        field — e.g. awscli's Python/ or distro version instead of the CLI's."""
+        for tool in up.TOOLS:
+            mutated = VERSION_OUTPUT_SAMPLES[tool.name].replace(SENTINEL, "1.0.0", 1)
+            m = re.search(tool.version_re, mutated)
+            got = m.group(1) if m else None
+            self.assertNotEqual(got, SENTINEL, f"{tool.name}: rule ignores the version it should read")
+
+
+class TestListTools(unittest.TestCase):
+    """--list-tools / run_list_tools(): TSV output, no network."""
+
+    def _capture_list(self):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            rc = up.run_list_tools()
+        return rc, buf.getvalue().splitlines()
+
+    def test_every_tool_emitted_in_registry_order(self):
+        rc, lines = self._capture_list()
+        self.assertEqual(rc, 0)
+        self.assertEqual([ln.split("\t")[0] for ln in lines], [t.name for t in up.TOOLS])
+
+    def test_columns_match_the_registry_and_the_fragments(self):
+        rc, lines = self._capture_list()
+        self.assertEqual(rc, 0)
+        for line, tool in zip(lines, up.TOOLS):
+            cols = line.split("\t")
+            self.assertEqual(len(cols), 4, f"expected 4 columns, got {len(cols)}: {line!r}")
+            name, probe, version_re, ver = cols
+            self.assertEqual((name, probe, version_re), (tool.name, tool.probe, tool.version_re))
+            self.assertEqual(ver, up.read_current(tool.name))
+            self.assertTrue(ver, f"version must be non-empty for {name}")
+
+    def test_empty_version_exits_nonzero_without_partial_output(self):
+        with unittest.mock.patch.object(up, "read_current", return_value=""):
+            buf = io.StringIO()
+            err_buf = io.StringIO()
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(err_buf):
+                rc = up.run_list_tools()
+            self.assertNotEqual(rc, 0)
+            self.assertEqual(buf.getvalue(), "", "no partial output must appear on stdout")
+            self.assertIn("::error::", err_buf.getvalue())
+
+
 class TestSoakStatus(unittest.TestCase):
     """soak_status() is pure — no network, fixed NOW like TestSelectVersion."""
 
@@ -335,8 +437,8 @@ class TestAudit(unittest.TestCase):
         return (self.NOW - timedelta(days=days_ago)).isoformat()
 
     def _npm_tools(self):
-        """Return [(name, kind, ref), ...] for npm tools only."""
-        return [(n, k, r) for n, k, r in up.TOOLS if k == "npm"]
+        """Return the npm-backed Tool records only."""
+        return [t for t in up.TOOLS if t.kind == "npm"]
 
     def _build_cand(self, pinned_version, age_days):
         """Build a minimal candidate list where pinned_version is age_days old."""
@@ -348,7 +450,7 @@ class TestAudit(unittest.TestCase):
 
         def fake_candidates(kind, ref):
             # Find the pinned version for this ref by looking up the name.
-            name = next(n for n, k, r in up.TOOLS if r == ref and k == "npm")
+            name = next(t.name for t in up.TOOLS if t.ref == ref and t.kind == "npm")
             pinned = up.read_current(name)
             return self._build_cand(pinned, 20)  # well soaked
 
@@ -365,7 +467,7 @@ class TestAudit(unittest.TestCase):
 
         def fake_candidates(kind, ref):
             call_count[0] += 1
-            name = next(n for n, k, r in up.TOOLS if r == ref and k == "npm")
+            name = next(t.name for t in up.TOOLS if t.ref == ref and t.kind == "npm")
             pinned = up.read_current(name)
             # First tool is inside soak (3d); rest are soaked (20d).
             age = 3 if call_count[0] == 1 else 20
@@ -622,6 +724,127 @@ class TestPrintReminders(unittest.TestCase):
         out = self._capture("3.53.1")
         for pin in ("nodejs", "task", "go", "ubuntu base"):
             self.assertIn(pin, out, f"{pin} missing from the manual-pin reminder block")
+
+
+class TestCIVersionCheckStep(unittest.TestCase):
+    """Runs the real shell from ci.yml's runtime version check against a stub
+    `docker`. Nothing else covers this script: action-shellcheck scans .sh files
+    and shebang scripts, not `run:` blocks embedded in workflow YAML."""
+
+    WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml"
+    STEP_NAME = "Smoke test — every pinned CLI reports its pinned version"
+
+    @classmethod
+    def setUpClass(cls):
+        cls.script = cls._extract_run_block()
+
+    @classmethod
+    def _extract_run_block(cls):
+        """Pull the step's `run: |` body out of the workflow and dedent it."""
+        lines = cls.WORKFLOW.read_text().splitlines()
+        start = next(i for i, ln in enumerate(lines) if cls.STEP_NAME in ln)
+        run_at = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
+        body_indent = len(lines[run_at + 1]) - len(lines[run_at + 1].lstrip())
+        body = []
+        for ln in lines[run_at + 1:]:
+            if ln.strip() and len(ln) - len(ln.lstrip()) < body_indent:
+                break
+            body.append(ln[body_indent:] if ln.strip() else "")
+        return "\n".join(body)
+
+    def _run(self, overrides=None):
+        """Execute the step with a stub docker whose per-tool output comes from
+        the recorded samples, with `overrides` replacing chosen tools."""
+        overrides = overrides or {}
+        rows = []
+        for tool in up.TOOLS:
+            exe = tool.probe.split()[0]
+            rc, out = overrides.get(
+                tool.name,
+                (0, VERSION_OUTPUT_SAMPLES[tool.name].replace(SENTINEL, up.read_current(tool.name))),
+            )
+            rows.append(f"{exe}\t{rc}\t{out}")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            fixture = tmp / "fixture.tsv"
+            fixture.write_text("\n".join(rows) + "\n")
+            docker = tmp / "docker"
+            docker.write_text(
+                "#!/usr/bin/env bash\n"
+                'exe="$4"\n'
+                'while IFS=$\'\\t\' read -r e rc out; do\n'
+                '  if [ "$e" = "$exe" ]; then\n'
+                '    [ -n "$out" ] && printf \'%s\\n\' "$out"\n'
+                '    exit "$rc"\n'
+                "  fi\n"
+                'done < "$DOCKER_FIXTURE"\n'
+                "exit 127\n"
+            )
+            docker.chmod(0o755)
+            env = {
+                **os.environ,
+                "PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}",
+                "DOCKER_FIXTURE": str(fixture),
+            }
+            return subprocess.run(
+                ["bash", "-c", self.script], cwd=str(self.WORKFLOW.parents[2]),
+                env=env, capture_output=True, text=True,
+            )
+
+    def test_all_tools_matching_passes_and_logs_every_tool(self):
+        res = self._run()
+        self.assertEqual(res.returncode, 0, res.stdout + res.stderr)
+        for tool in up.TOOLS:
+            self.assertIn(f"PASS  {tool.name}", res.stdout)
+            self.assertIn(f"pinned={up.read_current(tool.name)}", res.stdout)
+
+    def test_unrunnable_tool_fails_without_skipping_later_tools(self):
+        res = self._run({"openspec": (1, "")})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("FAIL  openspec", res.stdout)
+        self.assertIn("<probe failed>", res.stdout)
+        self.assertIn("PASS  awscli", res.stdout)  # last tool still probed
+
+    def test_unreadable_version_fails_without_skipping_later_tools(self):
+        res = self._run({"openspec": (0, "command not found: openspec")})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("FAIL  openspec", res.stdout)
+        self.assertIn("PASS  awscli", res.stdout)
+
+    def test_mismatching_version_fails_without_skipping_later_tools(self):
+        res = self._run({"openspec": (0, "0.0.1")})
+        self.assertNotEqual(res.returncode, 0)
+        self.assertIn("FAIL  openspec", res.stdout)
+        self.assertIn("reported=0.0.1", res.stdout)
+        self.assertIn("PASS  awscli", res.stdout)
+
+    def test_every_failing_tool_is_reported_in_one_run(self):
+        res = self._run({"openspec": (0, "0.0.1"), "uv": (1, ""), "tfenv": (0, "junk")})
+        self.assertNotEqual(res.returncode, 0)
+        for name in ("openspec", "uv", "tfenv"):
+            self.assertIn(f"FAIL  {name}", res.stdout)
+        self.assertIn("PASS  awscli", res.stdout)
+
+    def test_failure_emits_a_github_error_annotation(self):
+        res = self._run({"pnpm": (0, "0.0.1")})
+        self.assertIn("::error::pnpm:", res.stdout)
+
+    def test_a_failing_tool_listing_aborts_before_verifying_anything(self):
+        """--list-tools is fail-closed; the step must inherit that rather than
+        loop over an empty list and report success having checked nothing."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            py = tmp / "python3"
+            py.write_text("#!/usr/bin/env bash\nexit 1\n")
+            py.chmod(0o755)
+            env = {**os.environ, "PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}"}
+            res = subprocess.run(
+                ["bash", "-c", self.script], cwd=str(self.WORKFLOW.parents[2]),
+                env=env, capture_output=True, text=True,
+            )
+        self.assertNotEqual(res.returncode, 0)
+        self.assertNotIn("PASS", res.stdout)
 
 
 if __name__ == "__main__":
