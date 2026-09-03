@@ -17,7 +17,7 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # it alone and only reminds the operator to check it.
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_24.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
-ARG NODE_VERSION=24.19.0-1nodesource1
+ARG NODE_VERSION=24.20.0-1nodesource1
 
 # task (go-task) is the same class of MANUAL pin as nodejs above: it installs from
 # a signed apt repo (Cloudsmith), and update_pins.py only knows how to pin direct
@@ -65,9 +65,20 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
 RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
  && if getent group  ubuntu >/dev/null; then groupdel  ubuntu; fi
 
+# pebble (github.com/letsencrypt/pebble, an ACME test-only server) ships in
+# the base image's default package set but nothing in claude-docker uses it —
+# the entrypoint is tini + runuser + claude. Purging it drops a Go binary
+# whose statically-linked stdlib trails current CVE fixes. Guarded so a base
+# image that no longer ships it doesn't break the build.
+RUN if dpkg -s pebble >/dev/null 2>&1; then apt-get purge -y pebble; fi
+
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
 # NodeSource's distro-independent codename (works on any Debian/Ubuntu).
+# npm is force-upgraded past whatever NodeSource bundles: its own vendored
+# tar/brace-expansion/ip-address trail their upstream fixes by one release
+# each until NodeSource's nodejs package catches up — drop the extra
+# install once it does.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
@@ -87,6 +98,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       less \
       openssh-client \
       unzip \
+ && npm install -g --ignore-scripts npm@11.19.1 \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
 
