@@ -111,17 +111,45 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=min
 
-      - name: Smoke test — claude --version matches Dockerfile pin
-        # Catches the 2.1.x failure mode where the JS launcher is installed
-        # but the native-binary postinstall isn't run, leaving `claude` as a
-        # stub that errors at exec time. Asserts the actual reported version
-        # matches the CLAUDE_CODE_VERSION pin in pins/claude-code.env.
+      - name: Smoke test — every pinned CLI reports its pinned version
+        # A successful install says nothing about whether the executable runs:
+        # claude-code 2.1.x can install cleanly and leave `claude` a stub that
+        # errors at exec time (see Dockerfile). Nothing else in CI invokes a
+        # pinned tool, so without this a pin bump can ship a broken or
+        # version-mismatched CLI on green.
+        # The tool set, each tool's version probe, and the rule for reading a
+        # version out of that probe all come from update_pins.py's registry, so
+        # a newly pinned tool is covered without editing this file.
+        # This step must live in docker-build: it is the only job whose local
+        # daemon holds the image the build step loaded.
         run: |
           set -euo pipefail
-          EXPECTED=$(python3 update_pins.py --list-npm-tools | awk -F'\t' '$1=="claude-code"{print $5}')
-          ACTUAL=$(docker run --rm claude-docker:ci claude --version)
-          echo "Expected: ${EXPECTED}  Actual: ${ACTUAL}"
-          [[ "$ACTUAL" == "${EXPECTED} (Claude Code)" ]]
+          # Capture before looping. --list-tools is fail-closed, and `$(...)`
+          # propagates its non-zero exit under `set -e` where a
+          # `done < <(cmd)` process substitution would not.
+          tools=$(python3 update_pins.py --list-tools)
+          fail=0
+          while IFS=$'\t' read -r name probe version_re pinned; do
+            read -ra argv <<< "$probe"
+            # One conditional chain, not three statements: an unrunnable tool,
+            # an unreadable version and a wrong version must each land in the
+            # `else` instead of tripping `set -e` and skipping the tools after
+            # it. $version_re is deliberately unquoted — quoting the right-hand
+            # side of =~ makes bash match it as a literal string, not a regex.
+            # </dev/null keeps docker away from the loop's here-string.
+            if actual=$(docker run --rm claude-docker:ci "${argv[@]}" </dev/null) \
+               && [[ "$actual" =~ $version_re ]] \
+               && [ "${BASH_REMATCH[1]}" = "$pinned" ]; then
+              status=PASS
+            else
+              status=FAIL
+              fail=1
+            fi
+            echo "  ${status}  ${name}  pinned=${pinned}  reported=${actual:-<probe failed>}"
+            [ "$status" = PASS ] \
+              || echo "::error::${name}: pinned ${pinned}, image reported '${actual:-<probe failed>}'"
+          done <<< "$tools"
+          exit "$fail"
 
       - name: Cross-platform smoke (Linux)
         # Drives smoke.sh across a matrix of cells, all reusing the already-loaded
