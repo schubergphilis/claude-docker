@@ -68,9 +68,12 @@ RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
 # pebble (github.com/letsencrypt/pebble, an ACME test-only server) ships in
 # the base image's default package set but nothing in claude-docker uses it —
 # the entrypoint is tini + runuser + claude. Purging it drops a Go binary
-# whose statically-linked stdlib trails current CVE fixes. Guarded so a base
-# image that no longer ships it doesn't break the build.
-RUN if dpkg -s pebble >/dev/null 2>&1; then apt-get purge -y pebble; fi
+# whose statically-linked stdlib trails current CVE fixes. The dpkg guard
+# tolerates a future base image that no longer ships the package at all, but
+# the final assertion is fail-closed against the other case: pebble present
+# by some route the dpkg check doesn't recognize.
+RUN if dpkg -s pebble >/dev/null 2>&1; then apt-get purge -y pebble; fi \
+ && ! test -e /usr/bin/pebble
 
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
