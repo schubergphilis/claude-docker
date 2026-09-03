@@ -22,22 +22,31 @@
   `unpinned-uses`, so a tag would fail that job
   (spec: *The scanner is pinned to an immutable revision*)
 - [ ] 2.2 Add the advisory step first: `scan-type: image`, `scan-ref: claude-docker:ci`,
-  `severity: HIGH,CRITICAL`, `exit-code: 0`, `trivyignores: .trivyignore.yaml`. Verify by
-  inspection that it cannot fail the job, and that `vuln-type` and `scanners` are left unset
-  so the action's `os,library` default keeps language packages in scope
+  `severity: HIGH,CRITICAL`, `scanners: vuln`, `exit-code: 0`,
+  `trivyignores: .trivyignore.yaml`. Verify by inspection that it cannot fail the job, and
+  that `vuln-type` is left unset so the action's `os,library` default keeps language packages
+  in scope
   (spec: *an unfixed HIGH does not block*, *a vulnerable language package*)
-- [ ] 2.3 Add the gate step second, identical but with `ignore-unfixed: true` and
+- [ ] 2.3 Set `scanners: vuln` explicitly on every invocation rather than relying on the
+  default. An unset input exports no `TRIVY_SCANNERS`, so Trivy's own `vuln,secret` default
+  applies and secret scanning runs against the whole image filesystem; a secret finding
+  carries a severity but has no fixed version, so `ignore-unfixed` cannot filter it and it
+  would block every merge under a check the spec defines as vulnerabilities only. Verify
+  against `ScannersFlag.Default` in `pkg/flag/scan_flags.go` at the Trivy release the pinned
+  action installs, and by asserting `scanners: vuln` is present on all four scan steps
+  (spec: *a file matching a secret-detection rule does not fail the pipeline*)
+- [ ] 2.4 Add the gate step second, identical but with `ignore-unfixed: true` and
   `exit-code: 1`. Verify by inspection that the two steps differ in exactly those two inputs,
   so the advisory table and the gate cannot disagree about severity or suppressions
   (spec: *a fixable CRITICAL blocks*, *severities below the threshold do not block*)
-- [ ] 2.4 Place both steps after the version-probe and smoke-matrix steps, and comment why
+- [ ] 2.5 Place both steps after the version-probe and smoke-matrix steps, and comment why
   the scan lives in `docker-build` rather than a job of its own: that job's local daemon is
   the only one holding the loaded `claude-docker:ci`, and `main`'s ruleset requires the
   `Docker build (validate, no push)` context, so a separate job would gate nothing until an
   operator edited the ruleset. Verify by reading the rendered job that no step between the
   build and the scan replaces or re-tags the image
   (spec: *the scanned artifact is the built artifact*)
-- [ ] 2.5 Cross-check every `with:` key used in 2.2 and 2.3 against the `inputs:` block of
+- [ ] 2.6 Cross-check every `with:` key used in 2.2 and 2.4 against the `inputs:` block of
   the action's `action.yaml` at the pinned SHA. Verify programmatically, not by eye: GitHub
   Actions silently ignores an unknown `with:` key, so a misspelled `ignore-unfixed` would
   leave the gate blocking on unfixed findings with nothing reporting the mistake
@@ -57,11 +66,11 @@
   pinned in `ci.yml` rather than introducing second pins for the same actions. Verify every
   `uses:` SHA in the new file matches the one `ci.yml` uses for that action
   (spec: *An unchanged image is re-scanned on a schedule* — the build-not-pull clause)
-- [ ] 3.3 Add the same advisory and gate steps as 2.2/2.3 so the scheduled run blocks on
+- [ ] 3.3 Add the same advisory and gate steps as 2.2/2.4 so the scheduled run blocks on
   exactly what the next PR will block on, and comment that a failing run is the whole
   notification — no issue is filed and no report is uploaded. Verify by diffing the two
-  files' scan steps that severity, `ignore-unfixed`, `exit-code` and `trivyignores` are
-  identical in both workflows
+  files' scan steps that severity, `scanners`, `ignore-unfixed`, `exit-code` and
+  `trivyignores` are identical in both workflows
   (spec: *a CVE is disclosed against a static image*, *scheduled scan finding nothing*,
   and the same-threshold clause of *Fixable high-severity findings block the merge*)
 - [ ] 3.4 Set `cache-to` off (read-only cache use) so the scheduled run cannot evict or
@@ -98,11 +107,11 @@
 
 - [ ] 5.1 Parse `ci.yml`, `.github/workflows/image-scan.yml` and `.trivyignore.yaml` with
   PyYAML and assert the structure the tasks above claim: both scan steps present in
-  `docker-build`, the advisory/gate input pairs, identical scan inputs across the two
-  workflows, and an empty-list `vulnerabilities` key. No yamllint, actionlint or zizmor is
-  available in this environment, so this parse plus 2.5's input cross-check are the only
-  local backstops; `general.yml`'s yamllint and zizmor jobs are the real gate and run on the
-  PR
+  `docker-build`, the advisory/gate input pairs, `scanners: vuln` on all four scan steps,
+  identical scan inputs across the two workflows, and an empty-list `vulnerabilities` key. No
+  yamllint, actionlint or zizmor is available in this environment, so this parse plus 2.6's
+  input cross-check are the only local backstops; `general.yml`'s yamllint and zizmor jobs
+  are the real gate and run on the PR
 - [ ] 5.2 Record that the scan's runtime behaviour cannot be verified locally: neither docker
   nor trivy is available in this environment, so the first real evidence that the gate fires
   and the advisory step does not is CI's `docker-build` on the PR. Do not tick any task

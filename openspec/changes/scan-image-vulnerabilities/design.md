@@ -100,7 +100,17 @@ job. The duplication between the two tables is deliberate and small.
 
 `vuln-type` stays at the action's `os,library` default — that default is precisely the
 whole-filesystem coverage the spec requires, so overriding it would only risk narrowing it.
-`scanners` likewise stays unset, which is vulnerabilities only.
+
+`scanners: vuln` is set **explicitly** on every invocation. Leaving it unset does not mean
+vulnerabilities only: the action exports no `TRIVY_SCANNERS` when the input is empty, so
+Trivy's own default applies, and that default is `vuln,secret` (`ScannersFlag.Default` in
+`pkg/flag/scan_flags.go` at v0.70.0, the release the pinned action installs). Secret
+scanning would then run against the whole image filesystem, where the Go distribution's
+crypto test data and vendored `node_modules` test fixtures routinely carry dummy keys. A
+secret finding is not a vulnerability, so `ignore-unfixed` cannot filter it — nothing about
+a matched key has a "fixed version" — and it would count against `severity: HIGH,CRITICAL`
+with `exit-code: 1` and block every merge under a check the spec defines as vulnerabilities
+only.
 
 The image is addressed as `scan-type: image` plus `scan-ref`, not `image-ref`: the action's
 own metadata labels `image-ref` "(for backward compatibility)" and its entrypoint merely
