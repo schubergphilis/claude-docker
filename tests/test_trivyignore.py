@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Schuberg Philis
 """Enforce the .trivyignore entry contract: every accepted risk carries a
 reason and an expiry.
 
