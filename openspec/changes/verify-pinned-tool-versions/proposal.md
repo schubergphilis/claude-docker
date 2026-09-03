@@ -65,7 +65,9 @@ None.
   step becomes a loop over every automated pin.
 - `tests/test_update_pins.py` — coverage for the new mode and the registry's
   extraction rules.
-- `README.md` — the refresh section gains the new mode in its command list.
+- `README.md` — the refresh section describes the new mode in prose as CI-consumed,
+  leaving the operator command block alone, where its sibling `--list-npm-tools`
+  is likewise absent.
 - No change to the Dockerfile, the built image, `smoke/`, `run.sh`, or
   `entrypoint.sh`. Nothing a container user can observe changes; the audience is
   a contributor bumping a pin.

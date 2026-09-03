@@ -130,13 +130,31 @@ Every tool is probed, then the step exits non-zero if any failed — the same sh
 as `run_audit`'s `all_ok` and `assert-in-container.sh`'s per-check tally. A pin
 bump that breaks three tools should say so once, not three CI runs in a row.
 
-`set -euo pipefail` defeats this if written naively. A bare `out=$(docker run …)`
-whose command exits non-zero is a simple command with a non-zero status, so the
-shell exits *there* — and a tool that errors when invoked is precisely the
-"installed but non-functional executable" case being tested. Every probe is
-therefore run inside a conditional (`if out=$(…); then … else fail=1; fi`), which
-is the context `set -e` exempts; `assert-in-container.sh` guards each of its
-checks the same way and for the same reason.
+`set -euo pipefail` defeats this if written naively, and it defeats it three
+times, not once. Each of a tool's three steps — capturing the probe output,
+extracting the version, comparing it to the pin — is a command that returns
+non-zero on exactly the condition being tested, and a command returning non-zero
+outside a condition context makes `set -e` exit the step there. Guarding only the
+`docker run` capture moves the abort one line down rather than removing it: the
+bare `[[ "$out" =~ $re ]]` inside the `then` body kills the step just as dead.
+
+All three are therefore written as one conditional chain per tool:
+
+```bash
+if out=$(docker run --rm "$IMAGE" "${argv[@]}") \
+   && [[ "$out" =~ $version_re ]] \
+   && [ "${BASH_REMATCH[1]}" = "$pinned" ]; then …; else fail=1; fi
+```
+
+Every failure mode the spec names — unrunnable tool, unreadable version, wrong
+version — lands in the same `else`, and the loop continues to the next tool.
+`assert-in-container.sh` puts the comparison itself inside the `if` for the same
+reason; guarding the setup but not the assertion would miss the point.
+
+One expansion must **not** be quoted: the right-hand side of `=~`. Quoting it
+turns the regex into a literal string to match, so every tool silently stops
+matching. This is the one deliberate exception to quoting everything, and it is
+invisible to review precisely because it looks like the safer spelling.
 
 The step echoes each tool's name, pinned version, and reported version on every
 run, pass or fail — the existing claude-code step's unconditional

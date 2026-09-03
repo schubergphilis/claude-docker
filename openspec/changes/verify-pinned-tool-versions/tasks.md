@@ -50,25 +50,34 @@
   here-string (never a process substitution), a tool whose version cannot be extracted
   treated as a failure, and failures accumulated so every bad tool is reported in one run
   rather than only the first; verify each property is present by inspection of the step
-- [ ] 4.3 Run every probe inside a conditional (`if out=$(...); then ... else fail=1; fi`)
-  so a tool that errors when invoked does not abort the step under `set -e` before the
-  remaining tools are probed; verify with a local bash harness that a middle tool exiting
-  non-zero still leaves the later tools probed and the step's final exit non-zero
+- [ ] 4.3 Write each tool's whole check as one conditional chain — `if out=$(docker run
+  ...) && [[ "$out" =~ $version_re ]] && [ "${BASH_REMATCH[1]}" = "$pinned" ]; then ...
+  else fail=1; fi` — so that none of the three steps can abort the step under `set -e`;
+  guarding only the capture leaves the bare `[[ =~ ]]` in the `then` body just as fatal.
+  Verify with a local bash harness covering all three failure modes independently — a
+  tool that exits non-zero when invoked, one that runs but whose output the rule cannot
+  match, and one that reports a version differing from its pin — asserting for each that
+  the later tools are still probed and the step's final exit is non-zero
 - [ ] 4.4 Echo each tool's name, pinned version, and reported version on every run
   regardless of outcome, preserving the unconditional `Expected/Actual` echo the replaced
   step had (`ci.yml:123`); verify by inspection that the echo sits outside the pass/fail
   branch so a fully green run still logs all seven versions
-- [ ] 4.5 Keep the step lint-clean by construction — split `probe` with `read -ra` into
-  an array rather than relying on unquoted word-splitting, quote every other expansion,
-  and keep lines within the file's existing conventions; verify by inspection, noting
-  that `shellcheck`, `hadolint` and `yamllint` are not installed in this environment and
-  the authoritative check is CI's `validate` job on the PR
+- [ ] 4.5 Keep the step correct by construction — split `probe` with `read -ra` into an
+  array rather than relying on unquoted word-splitting, and quote every expansion except
+  the right-hand side of `=~`, which must stay unquoted or bash matches the pattern as a
+  literal string and every tool silently stops matching. Verify by inspection plus the
+  4.3 harness, which exercises the real quoting: nothing in CI lints this shell, because
+  `action-shellcheck` scans `.sh` files and shebang scripts and does not read `run:`
+  blocks embedded in workflow YAML — so no automated backstop exists for this step and
+  the harness is the only check
 
 ## 5. Docs
 
-- [ ] 5.1 Document `--list-tools` in `README.md`'s pinned-tool-versions section next to
-  the existing modes, describing what CI uses it for; verify the section reads correctly
-  and the surrounding command list stays accurate
+- [ ] 5.1 Describe `--list-tools` in `README.md`'s pinned-tool-versions section as prose
+  naming it a CI-consumed mode, **not** as a bullet in the operator command block: that
+  block lists modes an operator runs by hand, and `--list-npm-tools` — the structurally
+  identical CI-only listing mode — is deliberately absent from it. Verify the operator
+  block is unchanged and the new prose makes the CI-facing role explicit
 
 ## 6. Verification
 
