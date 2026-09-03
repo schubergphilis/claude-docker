@@ -50,7 +50,15 @@
   here-string (never a process substitution), a tool whose version cannot be extracted
   treated as a failure, and failures accumulated so every bad tool is reported in one run
   rather than only the first; verify each property is present by inspection of the step
-- [ ] 4.3 Keep the step lint-clean by construction — split `probe` with `read -ra` into
+- [ ] 4.3 Run every probe inside a conditional (`if out=$(...); then ... else fail=1; fi`)
+  so a tool that errors when invoked does not abort the step under `set -e` before the
+  remaining tools are probed; verify with a local bash harness that a middle tool exiting
+  non-zero still leaves the later tools probed and the step's final exit non-zero
+- [ ] 4.4 Echo each tool's name, pinned version, and reported version on every run
+  regardless of outcome, preserving the unconditional `Expected/Actual` echo the replaced
+  step had (`ci.yml:123`); verify by inspection that the echo sits outside the pass/fail
+  branch so a fully green run still logs all seven versions
+- [ ] 4.5 Keep the step lint-clean by construction — split `probe` with `read -ra` into
   an array rather than relying on unquoted word-splitting, quote every other expansion,
   and keep lines within the file's existing conventions; verify by inspection, noting
   that `shellcheck`, `hadolint` and `yamllint` are not installed in this environment and

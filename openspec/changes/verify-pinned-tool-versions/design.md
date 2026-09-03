@@ -87,9 +87,14 @@ Alternative considered: a field index (`awk '{print $2}'`). Rejected —
 `aws-cli/2.36.29` has the version inside field 1, and a bare `11.23.0` has no
 prefix at all.
 
-Each rule is anchored on the tool's literal prefix and captures one field. The
-rule is applied with a search over the probe's stdout rather than an equality
-test on the whole stream, so a future entrypoint line cannot break the check.
+Each rule is anchored on the tool's literal prefix and captures one field, and is
+applied to the probe's stdout alone. Only the tool writes there: the entrypoint's
+two diagnostics both go to stderr (`entrypoint.sh:43,80`), which is left to flow
+into the step log. Note that bash's `[[ =~ ]]` has no multiline mode, so a rule
+ending in `$` anchors against the whole capture — unexpected extra stdout makes
+the match fail rather than be tolerated. That is the right direction for a check
+whose job is to distrust the image, and it matches the strictness of the
+whole-output equality test being replaced.
 
 **`claude-code` keeps its suffix.** Today's step asserts the *entire* output
 equals `<version> (Claude Code)`; the suffix is part of what proves a working
@@ -119,11 +124,25 @@ better.
 `read -ra` rather than left to unquoted word-splitting. No tool needs an argument
 containing a space; a unit test holds that invariant.
 
-### Failures accumulate
+### Failures accumulate, which `set -e` fights
 
 Every tool is probed, then the step exits non-zero if any failed — the same shape
 as `run_audit`'s `all_ok` and `assert-in-container.sh`'s per-check tally. A pin
 bump that breaks three tools should say so once, not three CI runs in a row.
+
+`set -euo pipefail` defeats this if written naively. A bare `out=$(docker run …)`
+whose command exits non-zero is a simple command with a non-zero status, so the
+shell exits *there* — and a tool that errors when invoked is precisely the
+"installed but non-functional executable" case being tested. Every probe is
+therefore run inside a conditional (`if out=$(…); then … else fail=1; fi`), which
+is the context `set -e` exempts; `assert-in-container.sh` guards each of its
+checks the same way and for the same reason.
+
+The step echoes each tool's name, pinned version, and reported version on every
+run, pass or fail — the existing claude-code step's unconditional
+`echo "Expected: … Actual: …"` (`ci.yml:123`), kept and extended to seven tools.
+A green run that logs nothing would make the next version-drift investigation
+start from zero.
 
 Only stdout is captured; stderr is left to flow into the step log. Merging them
 would let entrypoint noise reach the regex, and an error message is more useful
