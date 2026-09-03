@@ -65,14 +65,18 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
 RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
  && if getent group  ubuntu >/dev/null; then groupdel  ubuntu; fi
 
-# pebble (github.com/letsencrypt/pebble, an ACME test-only server) ships in
-# the base image's default package set but nothing in claude-docker uses it —
-# the entrypoint is tini + runuser + claude. Purging it drops a Go binary
-# whose statically-linked stdlib trails current CVE fixes. The dpkg guard
-# tolerates a future base image that no longer ships the package at all, but
-# the final assertion is fail-closed against the other case: pebble present
-# by some route the dpkg check doesn't recognize.
-RUN if dpkg -s pebble >/dev/null 2>&1; then apt-get purge -y pebble; fi \
+# pebble (github.com/canonical/pebble, a service manager) ships as a bare
+# /usr/bin/pebble binary baked into Canonical's OCI rootfs — no dpkg package
+# owns it (`dpkg -S` finds nothing; its embedded Go module paths are all
+# github.com/canonical/pebble/...), so there is nothing for `apt-get purge`
+# to remove. It's inert here: no systemd unit or init hook references it,
+# the base image's own Cmd is plain /bin/bash, and claude-docker sets its
+# own tini + runuser + claude entrypoint regardless. Its statically-linked
+# stdlib is the source of all 8 pebble findings; removal is the only fix
+# since no rebuild against a patched stdlib exists yet. Purges an owning
+# package instead, in case a future base image ships it that way.
+RUN owner="$(dpkg -S /usr/bin/pebble 2>/dev/null | cut -d: -f1 || true)" \
+ && if [ -n "$owner" ]; then apt-get purge -y "$owner"; else rm -f /usr/bin/pebble; fi \
  && ! test -e /usr/bin/pebble
 
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
