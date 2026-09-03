@@ -1,0 +1,17 @@
+# Accepted vulnerability risk. Read by the Trivy scans in .github/workflows/ci.yml
+# and .github/workflows/image-scan.yml; the contract below is enforced by
+# tests/test_trivyignore.py, not by Trivy, which accepts an entry with no expiry
+# and then suppresses it forever.
+#
+# One finding per line, immediately preceded by a comment giving the reason:
+#
+#   # ubuntu has no fixed package yet; revisit at the next base-image bump
+#   CVE-2026-12345 exp:2026-12-01
+#
+# The expiry is mandatory and must be yyyy-mm-dd. Past it, Trivy stops
+# suppressing and the finding blocks the gate again — which is the point: an
+# acceptance with no end date is indistinguishable from a forgotten one.
+#
+# Suppression is per-ID and nothing else is an accepted-risk mechanism. Lowering
+# the scans' `severity`, dropping the gate step, or setting its `exit-code` to 0
+# silences every finding at once and is not the same decision as accepting one.

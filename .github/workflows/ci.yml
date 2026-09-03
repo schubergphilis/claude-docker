@@ -211,3 +211,64 @@ jobs:
           #     path with a GID that differs from the runner's (asserts the
           #     dropped process lands in exactly that primary group).
           run_cell --uid=501 --gid=501 --volstate=cold --ephemeral=0
+
+      # Known-CVE scanning of the image, in two passes over the same artifact.
+      # Like the steps above, these must live in docker-build: Trivy resolves an
+      # unqualified reference against the local daemon first, and this is the
+      # only job whose daemon holds the image the build step loaded. Putting
+      # them in a job of their own would also mean gating nothing — main's
+      # ruleset requires the `Validate` and `Docker build (validate, no push)`
+      # contexts, so a third context blocks no merge until an operator adds it.
+      #
+      # Consequence worth knowing when this job goes red: a failure here is a
+      # CVE, not a broken build. The step names say which.
+      #
+      # `scanners: vuln` is explicit on both passes and must stay that way. An
+      # unset input exports no TRIVY_SCANNERS, so Trivy's own default of
+      # `vuln,secret` applies and secret detection runs over the whole image
+      # filesystem — where the Go distribution's crypto test data and vendored
+      # node_modules fixtures carry dummy keys. A secret finding has no fixed
+      # version, so `ignore-unfixed` cannot filter it, and it would block every
+      # merge under a check that is meant to be about vulnerabilities.
+      #
+      # `vuln-type` is deliberately left at the action's `os,library` default:
+      # that default is the OS-plus-language coverage we want, and the npm
+      # supply-chain audit in `validate` proves tarball provenance, not that the
+      # code inside a pinned CLI is free of disclosed CVEs.
+      - name: Vulnerability scan — HIGH/CRITICAL, advisory (includes unfixed)
+        # Runs first so the full picture is already in the log when the gate
+        # below fails. `exit-code: 0` rather than continue-on-error: Trivy has
+        # its own exit-code control, and continue-on-error would decorate the
+        # step with a failure annotation while it is doing exactly its job.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          exit-code: 0
+          # Passed explicitly on both passes, not left to Trivy's auto-detection:
+          # the action errors when the named file is missing, so deleting or
+          # renaming it fails the build instead of silently scanning with no
+          # suppressions, and it cats the file into the log so a suppression is
+          # visible to anyone reading a scan. On this pass too, so a suppressed
+          # finding does not reappear here and read as unsuppressed.
+          trivyignores: .trivyignore
+
+      - name: Vulnerability scan — HIGH/CRITICAL with a fix available (gate)
+        # Identical to the advisory pass except for ignore-unfixed and
+        # exit-code, so the two cannot disagree about severity or suppressions.
+        # Only fixable findings gate: an unfixed upstream CVE cannot be actioned
+        # by whoever opens the next unrelated PR, and blocking on one would hold
+        # a required check red for every contributor until somebody silenced it.
+        # Accept a finding in .trivyignore (reason + expiry required); do not
+        # weaken severity or exit-code here.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore
