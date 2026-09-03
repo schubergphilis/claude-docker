@@ -14,7 +14,7 @@
 ## 3. Negative-surface verification
 
 - [x] 3.1 Verify `run.sh` gained no openspec flag, mount, or env-var forward: `grep -i openspec run.sh entrypoint.sh` returns no hits.
-- [x] 3.2 Verify the bind-mount and env-forward set is unchanged by construction — with no openspec reference anywhere in `run.sh` or `entrypoint.sh` there is no code path that could add one, which covers every flag combination rather than the single container a `docker inspect` diff would sample.
+- [x] 3.2 Verify no openspec-*named* mount or env-forward exists: `grep -i openspec run.sh entrypoint.sh` returns no hits, across every flag combination rather than the single container a `docker inspect` diff would sample. This proves no mount or variable literally named for openspec exists; it does not prove no mount or forward under an unrelated name incidentally affects it (e.g. a broad `/root` mount) — none does, per inspection of the same two files.
 - [x] 3.3 Verify zero host dependency: `openspec --version` and `openspec --help` both succeed against the image's own binary (2.1), so no host install or host config is consulted.
 
 ## 4. Documentation

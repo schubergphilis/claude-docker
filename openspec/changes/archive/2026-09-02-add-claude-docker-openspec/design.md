@@ -48,9 +48,9 @@ The claude-code install is already an `npm install -g --ignore-scripts`; extend 
 
 `external-cli-tools`' purpose statement is scoped to auth-bearing CLIs (`gh`, `glab`, `aws`) with credential passthrough and tmpfs masking. `openspec` has none of that. Rationale: adding it there would muddy the spec's purpose and require contortions to document "no credentials" scenarios. A separate, minimal capability keeps each spec single-concern.
 
-Kept minimal for the same reason. Two requirements this change originally carried were dropped once the surrounding specs landed, because they had acquired other owners:
-- *Install uses the existing npm pattern* → `package-managers` § "npm-backed installs preserve `--ignore-scripts`", whose scenario already names `openspec` as sharing the single `npm install -g --ignore-scripts` invocation.
-- *Builds on amd64 and arm64* → openspec is pure JS in the shared npm layer, so it has no arch-specific behaviour of its own to assert; that layer's arch coverage lives in `package-managers`.
+Kept minimal for the same reason. Two requirements this change originally carried were dropped:
+- *Install uses the existing npm pattern* → re-homed. `package-managers` § "npm-backed installs preserve `--ignore-scripts`" already names `openspec` as sharing the single `npm install -g --ignore-scripts` invocation, so this capability doesn't need to restate it.
+- *Builds on amd64 and arm64* → retired outright, not re-homed. `package-managers`' arch requirement (`openspec/specs/package-managers/spec.md`) scopes its assertion to `uv`, `uvx`, `pnpm`, and `pnpx` only — it does not cover `openspec`. Dropping this requirement means no spec asserts anything arch-specific about `openspec` going forward. Accepted because the package is pure JS with no arch-specific artifact of its own to assert about; if that ever changes (e.g. a per-arch optional dependency, the same pattern `claude-code` uses), this capability would need its own arch requirement rather than relying on `package-managers`.
 
 Likewise the pin's "single edit point" guarantee is not restated here: `version-pin-refresh` § "Build consumes fragments without hand-authored pins" already requires that the Dockerfile carry no literal version for any automated tool. Following the precedent that capability sets for the manual pins, each tool's own capability binds it to the mechanism instead of duplicating it, so the rule has exactly one owner.
 
