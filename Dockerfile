@@ -17,7 +17,7 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # it alone and only reminds the operator to check it.
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_24.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
-ARG NODE_VERSION=24.19.0-1nodesource1
+ARG NODE_VERSION=24.20.0-1nodesource1
 
 # task (go-task) is the same class of MANUAL pin as nodejs above: it installs from
 # a signed apt repo (Cloudsmith), and update_pins.py only knows how to pin direct
@@ -65,9 +65,27 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
 RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
  && if getent group  ubuntu >/dev/null; then groupdel  ubuntu; fi
 
+# pebble (github.com/canonical/pebble, a service manager) ships as a bare
+# /usr/bin/pebble binary baked into Canonical's OCI rootfs — no dpkg package
+# owns it (`dpkg -S` finds nothing; its embedded Go module paths are all
+# github.com/canonical/pebble/...), so there is nothing for `apt-get purge`
+# to remove. It's inert here: no systemd unit or init hook references it,
+# the base image's own Cmd is plain /bin/bash, and claude-docker sets its
+# own tini + runuser + claude entrypoint regardless. Its statically-linked
+# stdlib is the source of all 8 pebble findings; removal is the only fix
+# since no rebuild against a patched stdlib exists yet. Purges an owning
+# package instead, in case a future base image ships it that way.
+RUN owner="$(dpkg -S /usr/bin/pebble 2>/dev/null | cut -d: -f1 || true)" \
+ && if [ -n "$owner" ]; then apt-get purge -y "$owner"; else rm -f /usr/bin/pebble; fi \
+ && ! test -e /usr/bin/pebble
+
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
 # NodeSource's distro-independent codename (works on any Debian/Ubuntu).
+# npm is force-upgraded past whatever NodeSource bundles: its own vendored
+# tar/brace-expansion/ip-address trail their upstream fixes by one release
+# each until NodeSource's nodejs package catches up — drop the extra
+# install once it does.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
@@ -87,6 +105,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       less \
       openssh-client \
       unzip \
+ && npm install -g --ignore-scripts npm@11.19.1 \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
 
