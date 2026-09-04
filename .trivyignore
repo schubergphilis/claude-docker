@@ -15,6 +15,15 @@
 # Suppression is per-ID and nothing else is an accepted-risk mechanism. Lowering
 # the scans' `severity`, dropping the gate step, or setting its `exit-code` to 0
 # silences every finding at once and is not the same decision as accepting one.
+#
+# Per-ID means the ID is matched ANYWHERE in the image, not scoped to the target
+# it was found in — the plain format has no `paths:` field. Before adding an entry,
+# check no other target carries the same ID where it would be fixable: hiding a
+# bumpable finding is the failure mode this cannot express.
+#
+# If the gate goes red on an ID listed below, suspect a lapsed expiry first. Trivy
+# stops suppressing silently on that date and reports the finding as if it were
+# new, with nothing pointing back at this file.
 
 # gh vendors golang.org/x/mod v0.39.0 and the fix needs 0.40.0, which shipped
 # 2026-08-13, three weeks before gh 2.99.0 — upstream skipped it once already.

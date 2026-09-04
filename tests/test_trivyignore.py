@@ -82,8 +82,8 @@ class RealFileTests(unittest.TestCase):
 
 
 class ContractTests(unittest.TestCase):
-    """Fixtures, not the real file: it has no entries yet, so passing on it
-    alone would make a parser that accepts everything look green."""
+    """Fixtures, not the real file: two well-formed entries would not
+    distinguish this parser from one that accepts everything."""
 
     def test_header_only_passes(self):
         self.assertEqual(violations(HEADER), [])
