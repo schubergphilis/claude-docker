@@ -1,0 +1,29 @@
+---
+# The action hardcodes severity-cutoff=high, fail-build=true and
+# only-fixed=false, and the scan runs before the push — so without these rules
+# nothing can ever publish. Rules are scoped by package type or location rather
+# than by CVE so they do not go stale. deb findings, and npm findings outside
+# npm's own bundle, stay enforced.
+ignore:
+  # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries,
+  # which only an upstream rebuild moves. Scoped to /usr/bin so it does NOT
+  # cover the Go toolchain this repo pins itself at /usr/local/go — a stdlib
+  # CVE there is fixable by bumping ARG GO_VERSION and stays enforced.
+  - package:
+      type: go-module
+      location: /usr/bin/**
+    reason: Vendored code inside prebuilt upstream binaries.
+
+  # AWS CLI v2's bundled interpreter, distinct from the distro python3 deb.
+  - package:
+      name: python
+      type: binary
+    reason: AWS CLI v2's vendored interpreter; moves with pins/awscli.env.
+
+  # npm's own bundled tree, which arrives with the nodejs deb and is not
+  # resolved by anything under pins/. Scoped by location so the globals
+  # installed beside it keep their dependencies enforced. No released Node
+  # clears these: 24.20.0 still ships ip-address@10.2.0 and tar@7.5.19.
+  - package:
+      location: "**/node_modules/npm/**"
+    reason: npm's bundled deps ship with the nodejs deb; only Node moves them.

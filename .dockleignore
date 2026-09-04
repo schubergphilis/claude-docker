@@ -1,0 +1,11 @@
+# Only WARN and FATAL checkpoints gate at the action's exit-level=warn, so this
+# list is short. CIS-DI-0008 and DKL-LI-0003 report as INFO and are left
+# visible. The action already ignores CIS-DI-0005 and CIS-DI-0006.
+
+# No USER by design: the entrypoint needs root to chown /root to the host UID
+# before dropping via runuser. See the comment above WORKDIR in the Dockerfile.
+CIS-DI-0001
+
+# False positive on the glab layer, which apt-get installs a local .deb and so
+# never populates /var/lib/apt/lists. Drop once that RUN gains the cleanup.
+DKL-DI-0005

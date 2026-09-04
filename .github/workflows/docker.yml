@@ -1,0 +1,54 @@
+# yamllint disable rule:line-length
+---
+name: Docker
+
+# The action's push step is gated on a tag push, so the `tags:` filter is what
+# makes this publish at all. Branch and PR runs build and scan without pushing.
+"on":
+  push:
+    branches: [main]
+    tags: [v*]
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  docker:
+    # Not a required check, and should stay that way: grype runs with
+    # only-fixed=false, so an unrelated upstream CVE can turn this red.
+    name: Docker build and push (amd64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # amd64 only — the action has no `platforms` input:
+      # schubergphilis/mcvs-docker-action#31.
+      #
+      # Do NOT add docker/setup-buildx-action before this step. The action
+      # builds with push:false and no load:true, so the image only reaches
+      # dockle, dive and `docker push` while the default docker driver is used.
+      #
+      # Scanner thresholds are fixed inside the action and steered from
+      # .hadolint.yaml, .dockleignore and .grype.yaml. Tagging is
+      # metadata-action's defaults with latest=false, so a v0.1.0 tag publishes
+      # :v0.1.0 and nothing else.
+      - uses: schubergphilis/mcvs-docker-action@1de6c6ce1dd24cdea3b1964a13ac902a7cd57128 # v0.11.6
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # The action passes an empty sensitive-word, which makes dockle's
+          # CIS-DI-0010 regex end in an `.*` alternative — so EVERY NAME=value
+          # token in layer history is FATAL and this list is the only
+          # suppression. It reports one key per line per run, so this is the
+          # exhaustive set: the base image's own tokens (Canonical's
+          # rockcraft/umoci build) plus this Dockerfile's.
+          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,--chmod,--strip-components,ARCH,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,GOBIN,GOPATH,GOROOT,GO_SHA256_AMD64,GO_SHA256_ARM64,GO_VERSION,IS_SANDBOX,LANG,LC_ALL,NODE_VERSION,SHA,TASK_VERSION,URL,nodejs,task
+          token: ${{ secrets.GITHUB_TOKEN }}
