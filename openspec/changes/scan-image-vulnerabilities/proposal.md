@@ -75,7 +75,8 @@ code-fetch paths and the sha256-verified download list, neither of which this to
 
 - `.github/workflows/ci.yml` — two new steps in `docker-build`, advisory then gate.
 - `.github/workflows/image-scan.yml` — new.
-- `.trivyignore` — new; empty of entries at first, with the contract in a header comment.
+- `.trivyignore` — new; the contract in a header comment, plus two time-boxed entries for
+  the `gh` `golang.org/x/mod` pair that no available `gh` release fixes.
 - `tests/test_trivyignore.py` — new; enforces that contract. Stdlib only, so CI's existing
   no-install unit-test step needs no change.
 - `README.md` — new subsection under CI documentation, plus a build-time hardening line in

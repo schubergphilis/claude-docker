@@ -1,6 +1,6 @@
 ## 1. Accepted-risk record
 
-- [x] 1.1 Create `.trivyignore` with no entries and a header comment stating the entry
+- [x] 1.1 Create `.trivyignore` with a header comment stating the entry
   contract: one finding per line as `<ID> exp:<yyyy-mm-dd>`, immediately preceded by a `#`
   comment giving the reason it was accepted. State in the same header that lowering
   `severity` or dropping the gate is not an accepted-risk mechanism, and that suppression is
@@ -14,8 +14,8 @@
   asserting each entry has a parseable `exp:` date and a non-empty reason comment directly
   above it. Verify by running the suite, and by asserting the test rejects three hand-built
   fixtures — an entry with no `exp:`, one with an unparseable date, and one with no reason
-  comment — rather than only passing on the real file, which has no entries yet and would
-  make a broken test look green
+  comment — rather than only passing on the real file, since a file whose entries all
+  happen to be well-formed would make a broken test look green
   (spec: *an entry with no expiry is rejected before it can suppress*)
 - [x] 1.3 Assert in that test that expiry is checked for presence and parseability only, not
   for being in the future: an expired entry is Trivy's to act on (it stops suppressing and
@@ -24,6 +24,15 @@
   long-past `exp:` date that the test accepts
   (spec: *an expired acceptance stops suppressing*)
 
+- [x] 1.4 Record the two `gh` `golang.org/x/mod` findings (`CVE-2026-56864`,
+  `CVE-2026-56865`) as accepted risk with `exp:2026-11-04` — roughly two `gh` release
+  cycles. They are the only findings the CVE-backlog fix could not clear: the version is
+  compiled into the `gh` binary, `x/mod` 0.40.0 shipped three weeks before `gh` 2.99.0 and
+  upstream still vendors 0.39.0, so no available release fixes them and nothing on our side
+  can be bumped. Each entry carries its own reason comment, since the contract is per-ID.
+  Verify the contract test passes against the committed file — it caught a shared-reason
+  block on the first attempt, which is the rule working
+  (spec: *a recorded finding is suppressed*)
 ## 2. PR gate in `docker-build`
 
 - [x] 2.1 Resolve `aquasecurity/trivy-action`'s newest release to its commit SHA and add both

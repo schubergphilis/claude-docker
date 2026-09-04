@@ -15,3 +15,14 @@
 # Suppression is per-ID and nothing else is an accepted-risk mechanism. Lowering
 # the scans' `severity`, dropping the gate step, or setting its `exit-code` to 0
 # silences every finding at once and is not the same decision as accepting one.
+
+# gh vendors golang.org/x/mod v0.39.0 and the fix needs 0.40.0, which shipped
+# 2026-08-13, three weeks before gh 2.99.0 — upstream skipped it once already.
+# The version is compiled into the binary, so there is nothing to bump here;
+# only a new gh release can clear it. At expiry, check whether gh has picked
+# up x/mod 0.40.0 and drop this if so.
+CVE-2026-56864 exp:2026-11-04
+# Same upstream gap, same binary: gh's vendored golang.org/x/mod v0.39.0
+# against a fix that needs 0.40.0. Each entry carries its own reason because
+# suppression is per-ID and the two are only incidentally related.
+CVE-2026-56865 exp:2026-11-04
