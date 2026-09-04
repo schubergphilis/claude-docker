@@ -1,0 +1,90 @@
+# yamllint disable rule:line-length
+---
+name: Image vulnerability scan
+
+"on":
+  schedule:
+    # Mondays, 06:23 UTC — an hour after the pins refresh. Deliberate adjacency:
+    # the week's pin-bump PR and the week's CVE report land in the same window,
+    # so whoever triages the pins diff already knows whether it clears a
+    # finding. Offset from Dependabot's weekly window for the same reason
+    # pins-updater.yml is.
+    - cron: 23 6 * * 1
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  # One scan at a time. Never cancel a run in flight: a scan that is killed
+  # halfway reports nothing, and a failing run is this workflow's only
+  # notification channel.
+  group: image-scan
+  cancel-in-progress: false
+
+jobs:
+  scan:
+    name: Scan the main image for known vulnerabilities
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+
+      - name: Build (amd64, no push)
+        # Builds rather than pulls: nothing publishes this image to a registry,
+        # so there is no artifact to fetch. `load: true` puts it in the local
+        # daemon, which is where Trivy resolves an unqualified reference first.
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          context: .
+          load: true
+          tags: claude-docker:ci
+          platforms: linux/amd64
+          # cache-from with NO cache-to, on purpose — do not "fix" this by
+          # copying ci.yml's `cache-to: type=gha,mode=min` across. This run
+          # consumes the layer cache that PR builds import from; the repo-wide
+          # Actions cache is a fixed budget under LRU eviction, so a second
+          # weekly writer of multi-gigabyte layers can evict entries PR builds
+          # were relying on, which surfaces only as slower builds with nothing
+          # pointing at the cause.
+          cache-from: type=gha
+
+      # The same two passes, with the same policy, as the docker-build job in
+      # ci.yml — so this run blocks on exactly what the next PR will block on.
+      # What it covers that a PR scan structurally cannot: a CVE disclosed
+      # against an image whose pins never moved.
+      #
+      # A failing run is the whole notification. Nothing files an issue and
+      # nothing uploads a report: both would need write scopes this workflow
+      # deliberately does not take, and Code Scanning alerts on a public repo
+      # are a separate visibility decision. The findings table is the last
+      # thing in the job log.
+      #
+      # `scanners: vuln` is explicit here for the same reason as in ci.yml:
+      # unset means Trivy's `vuln,secret` default, and a secret finding has no
+      # fixed version for `ignore-unfixed` to filter.
+      - name: Vulnerability scan — HIGH/CRITICAL, advisory (includes unfixed)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          exit-code: 0
+          trivyignores: .trivyignore
+
+      - name: Vulnerability scan — HIGH/CRITICAL with a fix available (gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore

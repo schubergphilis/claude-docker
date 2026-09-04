@@ -1,0 +1,37 @@
+# Accepted vulnerability risk. Read by the Trivy scans in .github/workflows/ci.yml
+# and .github/workflows/image-scan.yml; the contract below is enforced by
+# tests/test_trivyignore.py, not by Trivy, which accepts an entry with no expiry
+# and then suppresses it forever.
+#
+# One finding per line, immediately preceded by a comment giving the reason:
+#
+#   # ubuntu has no fixed package yet; revisit at the next base-image bump
+#   CVE-2026-12345 exp:2026-12-01
+#
+# The expiry is mandatory and must be yyyy-mm-dd. Past it, Trivy stops
+# suppressing and the finding blocks the gate again — which is the point: an
+# acceptance with no end date is indistinguishable from a forgotten one.
+#
+# Suppression is per-ID and nothing else is an accepted-risk mechanism. Lowering
+# the scans' `severity`, dropping the gate step, or setting its `exit-code` to 0
+# silences every finding at once and is not the same decision as accepting one.
+#
+# Per-ID means the ID is matched ANYWHERE in the image, not scoped to the target
+# it was found in — the plain format has no `paths:` field. Before adding an entry,
+# check no other target carries the same ID where it would be fixable: hiding a
+# bumpable finding is the failure mode this cannot express.
+#
+# If the gate goes red on an ID listed below, suspect a lapsed expiry first. Trivy
+# stops suppressing silently on that date and reports the finding as if it were
+# new, with nothing pointing back at this file.
+
+# gh vendors golang.org/x/mod v0.39.0 and the fix needs 0.40.0, which shipped
+# 2026-08-13, three weeks before gh 2.99.0 — upstream skipped it once already.
+# The version is compiled into the binary, so there is nothing to bump here;
+# only a new gh release can clear it. At expiry, check whether gh has picked
+# up x/mod 0.40.0 and drop this if so.
+CVE-2026-56864 exp:2026-11-04
+# Same upstream gap, same binary: gh's vendored golang.org/x/mod v0.39.0
+# against a fix that needs 0.40.0. Each entry carries its own reason because
+# suppression is per-ID and the two are only incidentally related.
+CVE-2026-56865 exp:2026-11-04
