@@ -45,12 +45,19 @@ Host credentials (files or env vars) SHALL NOT reach the container unless the us
 
 All credential bind-mounts SHALL be read-only so a compromised container cannot rewrite host config or tokens. `~/.aws/credentials` and `~/.aws/cli/cache/` SHALL NEVER be mounted, even under `--aws`.
 
+The container's own `/root/.aws/cli/cache/` SHALL NOT survive the session that
+wrote it. The AWS CLI caches assume-role and SSO-derived STS credentials there,
+and `/root` is a persistent volume shared by every session, so without a mask
+that cache outlives the run whose opt-in produced it. This mirrors the reason
+the host path is never mounted: the same material is at stake whether it was
+copied in from the host or derived inside the container.
+
 #### Scenario: No flags means no credentials
 
 - **GIVEN** host has `~/.aws/config`, `~/.config/glab-cli/config.yml`, `~/.terraform.d/credentials.tfrc.json`, and `GH_TOKEN=ghp_x` and `TF_TOKEN_app_terraform_io=tfc_x` exported
 - **AND** a prior container run completed `gh auth login` (state persisted in `claude-code-root`)
 - **WHEN** user runs `claude-docker ~/repo`
-- **THEN** `/root/.aws/` does not exist inside the container
+- **THEN** `/root/.aws/` is empty inside the container
 - **AND** `/root/.config/glab-cli/` is empty inside the container
 - **AND** `/root/.terraform.d/` is empty inside the container
 - **AND** `echo $GH_TOKEN` inside the container is empty
@@ -63,7 +70,9 @@ All credential bind-mounts SHALL be read-only so a compromised container cannot 
 - **WHEN** user runs `claude-docker --aws ~/repo`
 - **THEN** `aws sts get-caller-identity` inside the container returns the host's identity
 - **AND** `~/.aws/credentials` is not present inside the container
-- **AND** writes to `/root/.aws/` from inside the container fail with EROFS
+- **AND** writes to `/root/.aws/config` from inside the container fail with EROFS
+- **AND** writes to `/root/.aws/sso/` from inside the container fail with EROFS
+- **AND** `/root/.aws/cli/cache/` is empty at session start and its contents do not persist to a later session
 
 #### Scenario: --glab grants read-only token access
 
@@ -132,6 +141,19 @@ All credential bind-mounts SHALL be read-only so a compromised container cannot 
 
 Because macOS `gh` uses the Keychain (no host file to mount), the container SHALL support a fresh `gh auth login` whose resulting `~/.config/gh/` persists across runs via the existing `claude-code-root` volume. Access to that persisted state SHALL be gated on the current run actually needing it: `/root/.config/gh/` inside the container MUST appear empty (achieved by overlaying a tmpfs mask) unless the run is `--gh` with no host token found (in-container login is the remaining auth path) or `--gh-direct`. In particular, the mask SHALL stay ON when the auth proxy sidecar is active — the placeholder env token makes persisted login state unnecessary, and leaving it accessible would reintroduce a persisted in-container secret. When `--gh` is absent entirely, the mask applies as before. The same masking rule SHALL apply to `/root/.config/glab-cli/` when `--glab` is not set, and to `/root/.terraform.d/` when `--tfe` is not set (covering tokens written by an in-container `terraform login` that would otherwise persist via `claude-code-root`).
 
+The rule SHALL extend to `/root/.aws/` when `--aws` is not set. AWS has no
+in-container `auth login` step, so it was omitted when this requirement was
+written for the CLIs that do, but the persistence is identical: an `--aws`
+session's derived credential cache is written under `/root`, and `/root` is the
+shared volume. Under `--aws` the mask SHALL narrow to `/root/.aws/cli/cache/`
+rather than covering the whole directory, so the read-only host mounts at
+`/root/.aws/config` and `/root/.aws/sso/` remain visible to the session that
+asked for them.
+
+Masking SHALL NOT be conditional on any host-side path existing. A mask whose
+presence depends on host state protects some machines and not others, and gives
+the user no way to tell which.
+
 #### Scenario: gh login survives container exit under --gh without a host token
 
 - **GIVEN** the host has no GitHub token (no env vars, `gh auth token` fails)
@@ -167,6 +189,20 @@ Because macOS `gh` uses the Keychain (no host file to mount), the container SHAL
 - **WHEN** user runs `claude-docker ~/repo` without `--tfe`
 - **THEN** `/root/.terraform.d/` inside the container is empty
 - **AND** no `credentials.tfrc.json` from the prior session is readable inside the container
+
+#### Scenario: prior AWS credential cache is hidden without --aws
+
+- **GIVEN** a prior container run used `--aws` and the AWS CLI cached STS credentials under `/root/.aws/cli/cache/` on the `claude-code-root` volume
+- **WHEN** user runs `claude-docker ~/repo` without `--aws`
+- **THEN** `/root/.aws/` inside the container is empty
+- **AND** no cached credential from the prior session is readable inside the container
+
+#### Scenario: an --aws session leaves no credential cache behind
+
+- **GIVEN** the host has completed `aws sso login` and `~/.aws/sso/` exists
+- **WHEN** user runs `claude-docker --aws ~/repo` and the AWS CLI derives and caches STS credentials
+- **THEN** `/root/.aws/config` is readable inside that container
+- **AND** on the next `claude-docker --aws ~/repo`, `/root/.aws/cli/cache/` is empty at session start
 
 ### Requirement: git-lfs installed and LFS filters registered
 
@@ -229,4 +265,3 @@ The container image SHALL ship with `tfenv` on the default PATH so users can fet
 - **WHEN** the user runs `tfenv install` inside the container
 - **THEN** tfenv downloads terraform 1.9.5 from `releases.hashicorp.com` and installs it
 - **AND** subsequent `terraform version` invocations report `1.9.5`
-
