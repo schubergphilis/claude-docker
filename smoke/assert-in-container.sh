@@ -368,6 +368,78 @@ check_credentials() {
   done
 }
 
+# AWS needs its own check, and cannot be folded into the loop above.
+# optin_config_path returns /root/.aws/config, and that value is shared with the
+# granted branch, which asserts the path is read-only. /root/.aws is not — only
+# the two entries mounted inside it are — so repointing the mapping at the
+# directory would make the granted branch fail.
+#
+# The loop is also blind to what matters here: without --aws, /root/.aws/config
+# is absent whether or not a mask exists, so the masked-aws assertion passed
+# vacuously and the credential cache beside it went unexamined.
+check_aws_state_masking() {
+  local granted=0
+  case ",${EXPECT_OPTINS:-}," in
+    *,aws,*) granted=1 ;;
+  esac
+
+  local path label
+  if [ "$granted" = "1" ]; then
+    # Under --aws the mask narrows to the credential cache: the AWS CLI writes
+    # assume-role/SSO-derived STS there, and /root is a shared persistent
+    # volume, so it must not outlive this session.
+    path="/root/.aws/cli/cache"
+    label="aws-cache-masked"
+  else
+    path="/root/.aws"
+    label="masked-aws-dir"
+  fi
+
+  if [ ! -e "$path" ]; then
+    fail "${label}: ${path} does not exist (expected an empty tmpfs mask)"
+    return
+  fi
+
+  local entry_count
+  entry_count=$(find "$path" -mindepth 1 2>/dev/null | wc -l)
+  if [ "$entry_count" -eq 0 ]; then
+    pass "${label}: ${path} is present and empty (tmpfs mask)"
+  else
+    fail "${label}: ${path} unexpectedly populated ($entry_count entries)"
+  fi
+
+  # A tmpfs, not merely an empty directory on the volume. Without this the
+  # assertion above would pass on a first-ever run, before any session had
+  # written anything, and report a mask that is not there.
+  if grep -qE "[[:space:]]${path}[[:space:]]+tmpfs[[:space:]]" /proc/self/mounts; then
+    pass "${label}-mount: ${path} is a tmpfs mount"
+  else
+    fail "${label}-mount: ${path} is not a tmpfs mount (no mask applied)"
+  fi
+
+  # Under --aws the read-only host mounts must survive the narrower mask.
+  if [ "$granted" = "1" ]; then
+    if [ -f /root/.aws/config ]; then
+      pass "aws-cache-masked-scope: /root/.aws/config still visible under the cache mask"
+    else
+      fail "aws-cache-masked-scope: /root/.aws/config hidden — mask is too broad"
+    fi
+
+    # This is the one mask that must stay WRITABLE. Every other mask exists to
+    # deny access, but the AWS CLI writes its derived STS credentials into this
+    # directory, so an unwritable mask would break `aws` under the very flag
+    # that grants it. Nothing else guarantees it: entrypoint.sh's chown walk
+    # runs `find /root ... -xdev`, which by design does not descend into a
+    # tmpfs, so ownership here is whatever the mount gave us.
+    if touch /root/.aws/cli/cache/__smoke_write_test 2>/dev/null; then
+      pass "aws-cache-writable: the cache mask accepts writes from the session user"
+      rm -f /root/.aws/cli/cache/__smoke_write_test
+    else
+      fail "aws-cache-writable: cannot write to /root/.aws/cli/cache as $(id -u):$(id -g) — the AWS CLI would fail to cache credentials under --aws"
+    fi
+  fi
+}
+
 # ---------------------------------------------------------------------------
 # 6. Seeded settings — must be a writable copy, not a mount
 # ---------------------------------------------------------------------------
@@ -452,6 +524,7 @@ check_security
 check_path_order
 check_workspace_write
 check_credentials
+check_aws_state_masking
 check_settings
 
 echo "==="

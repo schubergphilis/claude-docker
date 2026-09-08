@@ -258,6 +258,14 @@ if [ "${EPHEMERAL}" = "0" ]; then
   VOLUME_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "${WITH_GLAB}" = "0" ] && VOLUME_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   [ "${WITH_TFE}"  = "0" ] && VOLUME_ARGS+=("--tmpfs" "/root/.terraform.d")
+  # AWS is masked in both directions, only the scope changes (see run.sh).
+  # tests/test_masks.py asserts this mirror stays in step with run.sh — the
+  # mirror is why a mask missing from run.sh cannot fail this suite on its own.
+  if [ "${WITH_AWS}" = "0" ]; then
+    VOLUME_ARGS+=("--tmpfs" "/root/.aws")
+  else
+    VOLUME_ARGS+=("--tmpfs" "/root/.aws/cli/cache")
+  fi
 fi
 
 # ---------------------------------------------------------------------------
