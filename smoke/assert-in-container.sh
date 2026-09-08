@@ -383,6 +383,21 @@ check_aws_state_masking() {
     *,aws,*) granted=1 ;;
   esac
 
+  # --ephemeral mounts no named volumes, so there is nothing to mask and run.sh
+  # adds no tmpfs (the whole mask block is inside its EPHEMERAL=0 branch). The
+  # property still worth asserting is the one the masks exist to provide: no
+  # AWS state carried in from anywhere. Requiring a tmpfs here would fail the
+  # ephemeral cell for doing exactly what it is supposed to do.
+  if [ "${EXPECT_EPHEMERAL:-0}" = "1" ]; then
+    local cache="/root/.aws/cli/cache"
+    if [ ! -e "$cache" ] || [ "$(find "$cache" -mindepth 1 2>/dev/null | wc -l)" -eq 0 ]; then
+      pass "ephemeral-aws: no AWS credential cache present (no volumes mounted)"
+    else
+      fail "ephemeral-aws: ${cache} is populated in an --ephemeral session"
+    fi
+    return
+  fi
+
   local path label
   if [ "$granted" = "1" ]; then
     # Under --aws the mask narrows to the credential cache: the AWS CLI writes
