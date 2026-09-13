@@ -3,18 +3,25 @@
 name: Docker
 
 # The action's push step is gated on a tag push, so the `tags:` filter is what
-# makes this publish at all. Branch and PR runs build and scan without pushing.
+# makes this publish at all. A run on main builds and scans without pushing.
+#
+# No `pull_request` trigger on purpose. ci.yml's `Docker build (validate, no
+# push)` already builds the image on every PR, with a gha layer cache this
+# action does not use, and now builds one architecture where this builds two —
+# the second under QEMU. Running both on every PR pays 3-4x the build time for a
+# second answer to "does it build". A branch that needs the scan before merge
+# gets it from `workflow_dispatch`; otherwise the first run is on main, before
+# any tag exists to publish.
 "on":
   push:
     branches: [main]
     tags: [v*]
-  pull_request:
-    branches: [main]
   workflow_dispatch: {}
 
 concurrency:
   group: docker-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  # Never cancel in flight: a superseded run may be mid-push to ghcr.
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -24,26 +31,36 @@ jobs:
   docker:
     # Not a required check, and should stay that way: grype runs with
     # only-fixed=false, so an unrelated upstream CVE can turn this red.
-    name: Docker build and push (amd64)
+    name: Docker build, scan and publish
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # amd64 only — the action has no `platforms` input:
-      # schubergphilis/mcvs-docker-action#31.
+      # The action sets up QEMU and buildx itself and pushes a multi-arch
+      # manifest list with buildx rather than `docker push`, so do NOT add a
+      # setup-buildx step here — it would replace the builder whose layer cache
+      # the action's build and push steps share.
       #
-      # Do NOT add docker/setup-buildx-action before this step. The action
-      # builds with push:false and no load:true, so the image only reaches
-      # dockle, dive and `docker push` while the default docker driver is used.
+      # `platforms` is passed explicitly even though it matches the action's
+      # current default: it names what gets published, and this is an -rc pin
+      # whose default may still move before GA.
+      #
+      # Only ONE platform is scanned — the action loads a single image into the
+      # docker store and prefers linux/amd64, so dockle, dive and grype cover
+      # amd64 while arm64 is built and published unscanned. Scanning both needs
+      # the action run in a matrix with one platform per job, which conflicts
+      # with publishing a single manifest list from one job. See the README's
+      # GHCR section for the tradeoff as accepted.
       #
       # Scanner thresholds are fixed inside the action and steered from
       # .hadolint.yaml, .dockleignore and .grype.yaml. Tagging is
       # metadata-action's defaults with latest=false, so a v0.1.0 tag publishes
       # :v0.1.0 and nothing else.
-      - uses: schubergphilis/mcvs-docker-action@006747742805f19e0f5a97eeeeed8cac6cf45130 # v0.11.6
+      - uses: schubergphilis/mcvs-docker-action@3323a5f9234b86b1faf3e6d43cca6d4ff984da47 # v0.11.8-rc.1
         with:
           images: ghcr.io/${{ github.repository }}
+          platforms: linux/amd64,linux/arm64
           # The action passes an empty sensitive-word, which makes dockle's
           # CIS-DI-0010 regex end in an `.*` alternative — so EVERY NAME=value
           # token in layer history is FATAL and this list is the only
