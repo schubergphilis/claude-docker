@@ -62,9 +62,9 @@
 
 ## 5. Close-out
 
-- [ ] 5.1 Note on [#53](https://github.com/schubergphilis/claude-docker/issues/53) which of
+- [x] 5.1 Note on [#53](https://github.com/schubergphilis/claude-docker/issues/53) which of
   its residual items this change lands, and that its rejected alternatives (major-version
   ceiling, hand-placing the binary) stay rejected with the reasons recorded in `design.md`
-- [ ] 5.2 Close [#67](https://github.com/schubergphilis/claude-docker/pull/67) with a pointer
+- [x] 5.2 Close [#67](https://github.com/schubergphilis/claude-docker/pull/67) with a pointer
   to this PR, stating that its pins are carried here unmodified and that it was superseded
   because the pnpm bump it proposed needed the Dockerfile work to not ship degraded
