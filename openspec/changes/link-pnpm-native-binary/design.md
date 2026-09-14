@@ -47,6 +47,12 @@ Two facts that matter for the implementation and are easy to get wrong:
   not a partial one.
 - `package.json#bin` keeps all four names pointing at extensionless paths, so npm's existing
   global symlinks stay valid across the rewrite. No relinking is needed on Linux.
+- **Only `pnpm` is the native binary.** `pn`, `pnpx` and `pnx` are committed two-line
+  `#!/bin/sh` scripts (`exec pnpm "$@"`, `exec pnpm dlx "$@"`), so they dispatch through
+  whatever `pnpm` **PATH** resolves to rather than through a sibling path. The image has
+  exactly one `pnpm` on PATH, so this is correct there; it is recorded because it means the
+  assertion on `bin.pnpm` covers all four bins, and because testing an alias outside the image
+  can silently exercise a different pnpm.
 
 ## Goals / Non-Goals
 

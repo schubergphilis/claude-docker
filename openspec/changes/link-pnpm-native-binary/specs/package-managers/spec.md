@@ -91,5 +91,6 @@ The container's threat model documentation SHALL explicitly note that `npx`, `pn
 
 #### Scenario: bundled CLIs list includes new tools
 
-- **WHEN** a reader inspects the top of `claude-docker/README.md`
-- **THEN** the "Bundled CLIs on the default PATH" line lists `uv`, `uvx`, `pnpm`, `pnpx`, `pn`, `pnx`, and `tfenv` alongside the existing entries
+- **WHEN** a reader inspects the preinstalled-CLI list at the top of `claude-docker/README.md`
+- **THEN** the line names `uv`, `pnpm`, and `tfenv` alongside the existing entries
+- **AND** alias bins that ship with those tools (`uvx`; `pnpx`, `pn`, `pnx`) are documented under the command they alias rather than enumerated in that line, which lists one entry per tool

@@ -229,11 +229,28 @@ RUN ARCH=$(dpkg --print-architecture); \
 # npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
 # run `npm audit signatures <pkg>@<ver>` when bumping.
 # --ignore-scripts blocks lifecycle hooks for every package + transitive dep
-# (hard security boundary, kept on). claude-code 2.1.x ships its real binary
-# in a per-arch optional-dep package; the launcher's postinstall (install.cjs)
-# copies it over bin/claude.exe. Without it `claude` is a stub that errors at
-# exec. We invoke that one script ourselves — platform-detect + file copy,
-# no network/exec, audit-verified for 2.1.131; re-read on each bump.
+# (hard security boundary, kept on). Exactly two packages are unusable without
+# their own install script, so we invoke those two by hand — named here, each
+# platform-detect + file moves only, no network/exec, re-read on each bump.
+# Nothing else, and no transitive dep, ever gets a script run.
+#  1. claude-code 2.1.x ships its real binary in a per-arch optional-dep
+#     package; the launcher's postinstall (install.cjs) copies it over
+#     bin/claude.exe. Without it `claude` is a stub that errors at exec.
+#     Audit-verified for 2.1.131.
+#  2. pnpm 12.x ships bin.pnpm as a shebang-less placeholder; install.js
+#     hard-links the platform binary from the @pnpm/exe.linux-* optional dep
+#     over it (copyFileSync fallback if the link fails). Its only spawnSync is
+#     inside relinkNpmWindowsShims(), which returns unless platform is win32.
+#     It branches on npm_lifecycle_event, unset here, so a manual call takes
+#     the setup() path that does the linking. Skipping it *degrades* rather
+#     than breaks: the placeholder execs bin/pnpm.mjs, paying a node startup
+#     per call, nagging on stderr whenever stderr is a TTY, and — if the
+#     optional dep were ever absent — downloading an unpinned binary from the
+#     registry on first use. Hence the assertion below, which is the only
+#     thing that can catch that state: pnpm prints its correct version and
+#     exits 0 either way, and the nag is TTY-gated, so CI's version probe
+#     (docker run, no TTY) cannot tell the two apart. Assert on ELF magic, not
+#     on link count — a copyFileSync fallback is healthy with nlink 1.
 # `npm root -g` over a hardcoded path so we don't break on a different prefix.
 # npm tools carry version-only pins (no sha256): npm install verifies the
 # registry-advertised dist.integrity (registry-integrity, not provenance; CI
@@ -245,6 +262,13 @@ RUN . /tmp/claude-code.env && . /tmp/openspec.env && . /tmp/pnpm.env \
       "@fission-ai/openspec@${OPENSPEC_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
  && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
+ && node "$(npm root -g)/pnpm/install.js" \
+ && magic=$(od -An -tx1 -N4 "$(npm root -g)/pnpm/pnpm" | tr -d ' \n') \
+ && if [ "$magic" != "7f454c46" ]; then \
+      echo "pnpm ${PNPM_VERSION}: bin.pnpm is not a native binary (magic ${magic});" >&2; \
+      echo "install.js did not replace the placeholder — pnpm would run through node." >&2; \
+      exit 1; \
+    fi \
  && rm /tmp/claude-code.env /tmp/openspec.env /tmp/pnpm.env
 
 # tfenv — pure-bash terraform version manager. Arch-independent (just
