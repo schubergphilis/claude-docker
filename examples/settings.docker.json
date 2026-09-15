@@ -5,6 +5,6 @@
   },
   "effortLevel": "high",
   "autoUpdates": false,
-  "model": "opus[1m]",
+  "model": "fable",
   "teammateMode": "tmux"
 }
