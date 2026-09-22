@@ -49,11 +49,11 @@ See `proposal.md` § Why for the motivation. The constraints that shape the appr
 
 ## Decisions
 
-### Pin `v0.11.8-rc.1`, a pre-release
+### Pin `v0.12.0`
 
 `platforms` — the input that makes multi-arch publishing possible — landed in the action as
-`0067477 feat: build and scan linux/arm64 images (Closes #31)` on 2026-09-06. The newest
-stable release, `v0.11.7` (2026-08-31), predates it. So the options were:
+`0067477 feat: build and scan linux/arm64 images (Closes #31)` on 2026-09-06, after the then
+newest stable release `v0.11.7` (2026-08-31). The options were:
 
 1. **Publish amd64-only on `v0.11.7`** and revisit. Rejected: it ships a worse artifact to a
    large fraction of users with no warning at pull time, and "revisit later" for a published
@@ -72,20 +72,29 @@ stable release, `v0.11.7` (2026-08-31), predates it. So the options were:
    `push-to-container-registry: ''` and a hand-rolled push of an arch-suffixed tag beside the
    action, plus a third job to assemble the list. That is three jobs and a bespoke tagging
    scheme to work around an input the action now has.
-4. **Pin `v0.11.8-rc.1`** — the released tag containing that commit, resolving to
-   `3323a5f9234b86b1faf3e6d43cca6d4ff984da47`. Chosen.
+4. **Pin `v0.12.0`** — the GA release carrying that input, resolving to
+   `ed30e5db799a279ec1062bc3ff237462c7ae797e`. Chosen.
 
-An rc is a real cost and worth naming: it can be superseded by a GA tag with different
-behaviour, and the `platforms` default could still move before then. Two things bound it —
-the tag is immutable and SHA-pinned like every other action here, and `platforms` is passed
-explicitly rather than inherited from the default, so a default change cannot silently alter
-what gets published. Bumping to `v0.11.8` when it ships is a one-line follow-up, and
-Dependabot will open it.
+An earlier revision of this change pinned `v0.11.8-rc.1`, the first tag to carry `platforms`,
+and accepted the pre-release as a cost. `v0.12.0` retires that: same inputs, same spelling, so
+the only edit the bump needs is the pin itself. Two of its behaviours differ from the rc and
+both are improvements here. The scanned platform is now derived from `RUNNER_ARCH` rather than
+hardcoded to prefer `linux/amd64` — no change on this repo's `ubuntu-24.04` runner, but it is
+what makes option 3 viable should arm64 ever need real scan coverage. And every platform is
+now built on every run, with only the *push* tag-gated, where the rc skipped the multi-arch
+build entirely on a branch push. That costs a `main` run an emulated arm64 build it previously
+did not pay, and buys the thing worth paying for: an arch-specific build failure lands on
+`main` instead of on the tag that was supposed to release it.
+
+`platforms` is still passed explicitly rather than inherited, even though it matches the GA
+default. The value names what this repo publishes; a later release of the action moving its
+default must not be able to change that without a diff here.
 
 ### Publish two architectures, scan one
 
 The action loads exactly one image into the docker store for dockle, dive and grype, because
-only one can be, and it prefers `linux/amd64` since that needs no emulation. `linux/arm64` is
+only one can be, and it prefers the platform the runner provides natively since that needs no
+emulation — `linux/amd64` on the `ubuntu-24.04` runner this job uses. `linux/arm64` is
 therefore built by buildx, pushed inside the manifest list, and never passed through those
 three scanners.
 
@@ -169,9 +178,9 @@ every merge, and a tag is only ever cut from a `main` that has already been thro
 
 ## Risks / Trade-offs
 
-- **The rc could be superseded or yanked.** Mitigated by the SHA pin (immutable), the explicit
-  `platforms` value (a default change cannot alter the publish set), and Dependabot opening
-  the bump to GA.
+- **The action's defaults could move under us.** Mitigated by the SHA pin (immutable), the
+  explicit `platforms` value (a default change cannot alter the publish set), and Dependabot
+  opening each bump for review.
 - **arm64 ships unscanned.** Bounded by one Dockerfile, one set of pins, arch-independent
   findings, and the pre-existing amd64-only Trivy coverage. Documented in three places rather
   than absorbed.
@@ -179,7 +188,9 @@ every merge, and a tag is only ever cut from a `main` that has already been thro
   grype run fails publishes nothing. Stated in the README's GHCR section, since "the tag
   exists but the package does not" is otherwise a confusing failure.
 - **QEMU-emulated arm64 builds are slow and can surface arch-specific build failures on
-  `main` rather than on the PR.** Accepted as the price of not doubling PR cost;
+  `main` rather than on the PR.** Since `v0.12.0` this is paid on every `main` push, not only
+  on a tag: the action builds every platform unconditionally and gates only the push. Accepted
+  as the price of not doubling PR cost, and the tag is the worse place to find out;
   `workflow_dispatch` is the pre-merge escape hatch.
 - **The scanner suppressions could hide a real regression.** Bounded by scoping: nothing is
   suppressed by CVE ID, the Go rule excludes our own toolchain, and the npm rule excludes the

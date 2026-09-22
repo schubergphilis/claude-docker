@@ -2,8 +2,11 @@
 ---
 name: Docker
 
-# The action's push step is gated on a tag push, so the `tags:` filter is what
-# makes this publish at all. A run on main builds and scans without pushing.
+# The action's push is gated on a tag push, so the `tags:` filter is what makes
+# this publish at all. A run on main builds every architecture and scans one,
+# without pushing — building is unconditional in the action, only the push is
+# tag-gated, so an arch-specific build failure surfaces on main and not on the
+# tag that was meant to release it.
 #
 # No `pull_request` trigger on purpose. ci.yml's `Docker build (validate, no
 # push)` already builds the image on every PR, with a gha layer cache this
@@ -43,11 +46,12 @@ jobs:
       # the action's build and push steps share.
       #
       # `platforms` is passed explicitly even though it matches the action's
-      # current default: it names what gets published, and this is an -rc pin
-      # whose default may still move before GA.
+      # current default: it names what this repo publishes, so a later release
+      # of the action cannot change that set without a diff here.
       #
       # Only ONE platform is scanned — the action loads a single image into the
-      # docker store and prefers linux/amd64, so dockle, dive and grype cover
+      # docker store and prefers the platform the runner provides natively,
+      # which on ubuntu-24.04 is linux/amd64. So dockle, dive and grype cover
       # amd64 while arm64 is built and published unscanned. Scanning both needs
       # the action run in a matrix with one platform per job, which conflicts
       # with publishing a single manifest list from one job. See the README's
@@ -57,7 +61,7 @@ jobs:
       # .hadolint.yaml, .dockleignore and .grype.yaml. Tagging is
       # metadata-action's defaults with latest=false, so a v0.1.0 tag publishes
       # :v0.1.0 and nothing else.
-      - uses: schubergphilis/mcvs-docker-action@3323a5f9234b86b1faf3e6d43cca6d4ff984da47 # v0.11.8-rc.1
+      - uses: schubergphilis/mcvs-docker-action@ed30e5db799a279ec1062bc3ff237462c7ae797e # v0.12.0
         with:
           images: ghcr.io/${{ github.repository }}
           platforms: linux/amd64,linux/arm64
@@ -67,5 +71,5 @@ jobs:
           # suppression. It reports one key per line per run, so this is the
           # exhaustive set: the base image's own tokens (Canonical's
           # rockcraft/umoci build) plus this Dockerfile's.
-          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,--chmod,--strip-components,ARCH,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,GOBIN,GOPATH,GOROOT,GO_SHA256_AMD64,GO_SHA256_ARM64,GO_VERSION,IS_SANDBOX,LANG,LC_ALL,NODE_VERSION,SHA,TASK_VERSION,URL,nodejs,task,owner
+          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,--chmod,--strip-components,ARCH,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,GOBIN,GOPATH,GOROOT,GO_SHA256_AMD64,GO_SHA256_ARM64,GO_VERSION,IS_SANDBOX,LANG,LC_ALL,NODE_VERSION,SHA,TASK_VERSION,URL,magic,nodejs,task,owner
           token: ${{ secrets.GITHUB_TOKEN }}
