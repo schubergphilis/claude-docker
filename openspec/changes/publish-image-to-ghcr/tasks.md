@@ -24,22 +24,26 @@
 
 ## 2. Multi-architecture publishing
 
-- [x] 2.1 Resolve the action version that carries a `platforms` input. Verify the release tag
-  → SHA mapping through the API rather than trusting a comment:
-  `gh api repos/schubergphilis/mcvs-docker-action/git/ref/tags/v0.11.8-rc.1` returns
-  `3323a5f9234b86b1faf3e6d43cca6d4ff984da47`, and that tag is the first containing
-  `0067477 feat: build and scan linux/arm64 images (Closes #31)`
+- [x] 2.1 Resolve the GA release that carries a `platforms` input. Verify the release tag
+  → SHA mapping against the ref advertisement rather than trusting a comment:
+  `git ls-remote https://github.com/schubergphilis/mcvs-docker-action refs/tags/v0.12.0`
+  returns `ed30e5db799a279ec1062bc3ff237462c7ae797e`. `v0.11.8-rc.1` was the first tag to
+  carry the input (`0067477 feat: build and scan linux/arm64 images (Closes #31)`); `v0.12.0`
+  is the GA release that supersedes it, with the same inputs and the same spelling
   (spec: *the published image covers every architecture the build supports*)
-- [x] 2.2 Repin from `006747742805f19e0f5a97eeeeed8cac6cf45130 # v0.11.6` to
-  `3323a5f9234b86b1faf3e6d43cca6d4ff984da47 # v0.11.8-rc.1`. The old pin was a loose commit on
-  the action's default branch carrying a version comment that resolved to a different SHA
+- [x] 2.2 Pin `ed30e5db799a279ec1062bc3ff237462c7ae797e # v0.12.0`. Two earlier pins are worth
+  recording, because the first is the defect this change exists to have fixed: the branch
+  originally referenced the loose commit `006747742805f19e0f5a97eeeeed8cac6cf45130` with a
+  `# v0.11.6` comment that resolved to a different SHA entirely
   (`v0.11.6` is `1de6c6ce1dd24cdea3b1964a13ac902a7cd57128`) — the two zizmor code-scanning
-  alerts on `docker.yml:44`. Verify both the SHA and the comment resolve to the same release
+  alerts on `docker.yml:44`. It then moved to the pre-release
+  `3323a5f9234b86b1faf3e6d43cca6d4ff984da47 # v0.11.8-rc.1`, now superseded by GA. Verify both
+  the SHA and the comment resolve to the same release
   (spec: *a version comment that does not match its pin is rejected*,
   *a mutable reference is rejected*)
 - [x] 2.3 Pass `platforms: linux/amd64,linux/arm64` explicitly rather than inheriting the
-  action's identical default, and comment why: this is an rc pin whose default may move before
-  GA, and this value names what gets published. Verify the input exists at the pinned SHA and
+  action's identical default, and comment why: this value names what this repo publishes, so a
+  later release of the action moving its default cannot change that without a diff here. Verify the input exists at the pinned SHA and
   is spelled as the action declares it — GitHub Actions silently ignores an unknown `with:`
   key, so a misspelling would publish the default with nothing reporting it
   (spec: *the published architecture set is explicit*)
@@ -49,8 +53,9 @@
   step must still not be added here — it would replace the builder whose layer cache the
   action's build and push steps share (`action.yml:66-68`, `191-195`)
 - [x] 2.5 Record in the workflow comment that only one platform is scanned: the action loads a
-  single image into the docker store and prefers `linux/amd64` (`action.yml:74-89`), so
-  dockle, dive and grype cover amd64 while arm64 is published unscanned. Verify by reading the
+  single image into the docker store and prefers the platform the runner provides natively,
+  derived from `RUNNER_ARCH`, which on `ubuntu-24.04` is `linux/amd64`. So dockle, dive and
+  grype cover amd64 while arm64 is published unscanned. Verify by reading the
   action's scan steps that they all target the single `mcvs-docker-action:scan` tag built at
   `steps.platform.outputs.scan_platform`
   (spec: *an architecture is published without being scanned*)
@@ -94,7 +99,9 @@
   an empty sensitive-word, which makes dockle's `CIS-DI-0010` regex end in an `.*`
   alternative, so every `NAME=value` token in layer history is FATAL. Verify the list against
   the keys dockle reports one-per-line per run — the base image's own rockcraft/umoci tokens
-  plus this Dockerfile's — and drop entries that cannot occur
+  plus this Dockerfile's — and drop entries that cannot occur. Re-check the list whenever the
+  Dockerfile gains a shell assignment: `magic` was added for the `od`-based pnpm binary
+  assertion (`Dockerfile:266`) that landed on `main` after this branch was first written
 
 ## 4. PR-path cost
 
@@ -153,8 +160,8 @@
   High/Critical before the rules; 0 remaining, 202 of 531 matches ignored across 1962
   packages) come from this branch's own CI runs, not from a local scan
 - [x] 7.3 Verify every action SHA in the new workflow resolves to the release its comment
-  names, through the API rather than by eye — `actions/checkout` v7.0.1 and
-  `mcvs-docker-action` v0.11.8-rc.1. This is the check the previous pin failed
+  names, against the ref advertisement rather than by eye — `actions/checkout` v7.0.1 and
+  `mcvs-docker-action` v0.12.0. This is the check the original pin failed
   (spec: *the publishing action is referenced immutably*)
 - [x] 7.4 Run `openspec validate publish-image-to-ghcr --type change --strict
   --no-interactive` and confirm it passes

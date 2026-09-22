@@ -32,7 +32,8 @@ an entrypoint privilege-drop rework alongside it.
   is a large share of this tool's audience. `platforms` is passed explicitly rather than left
   to the action's default, because it names what gets published.
 - **Accept that only one architecture is scanned.** The action loads a single image into the
-  docker store for dockle, dive and grype and prefers `linux/amd64`; arm64 is built and
+  docker store for dockle, dive and grype and prefers the runner's native platform, which on
+  `ubuntu-24.04` is `linux/amd64`; arm64 is built and
   published without passing those scanners. Scanning both requires running the action in a
   matrix with one platform per job, which cannot also publish one manifest list from one job.
   Recorded as a limitation in the README and as a follow-up, not silently absorbed.
@@ -102,8 +103,10 @@ exists as the supported override.
 - It transitively adds hadolint, dockle, dive, grype and `docker/metadata-action` to the
   pipeline. Their thresholds are fixed inside the action and cannot be relaxed from here; the
   two suppression files are the only lever.
-- The pin is a **pre-release** (`v0.11.8-rc.1`). It is the first tag carrying the `platforms`
-  input that makes multi-arch publishing possible; `design.md` records why an rc was accepted
-  over waiting for GA or over the alternatives.
-- Build time on `main` grows: two architectures, the second emulated under QEMU. Nothing on
-  the PR path changes, because there is no PR trigger.
+- The pin is `v0.12.0`, the GA release carrying the `platforms` input that makes multi-arch
+  publishing possible. `platforms` is passed explicitly rather than inherited from the
+  identical default, so a later release of the action cannot change the published set without
+  a diff here; `design.md` records the alternatives that were rejected.
+- Build time on `main` grows: two architectures, the second emulated under QEMU, on every
+  `main` push rather than only on a tag — the action builds every platform unconditionally
+  and gates only the push. Nothing on the PR path changes, because there is no PR trigger.
