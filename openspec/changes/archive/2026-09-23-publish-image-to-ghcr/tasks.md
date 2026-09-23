@@ -59,11 +59,13 @@
   action's scan steps that they all target the single `mcvs-docker-action:scan` tag built at
   `steps.platform.outputs.scan_platform`
   (spec: *an architecture is published without being scanned*)
-- [ ] 2.6 Confirm on a real run that the manifest list carries both architectures:
-  `docker buildx imagetools inspect ghcr.io/schubergphilis/claude-docker:<tag>` lists
-  `linux/amd64` and `linux/arm64` and no `unknown/unknown` entry (the action sets
-  `provenance: false` for exactly that reason). Blocked until §5's first tag is pushed — no
-  docker daemon in the authoring environment, and nothing is published yet
+- [x] 2.6 Confirm on a real run that the manifest list carries both architectures. Verified
+  against the `v0.1.0-rc.6` tag run: `ghcr.io/schubergphilis/claude-docker:v0.1.0-rc.6` is
+  an `application/vnd.oci.image.index.v1+json` index listing `linux/amd64`
+  (`sha256:a74244e5…`) and `linux/arm64` (`sha256:e89f6fdb…`) and no `unknown/unknown`
+  entry (the action sets `provenance: false` for exactly that reason). Read from the
+  registry API rather than `docker buildx imagetools inspect` — still no docker daemon in
+  the authoring environment
   (spec: *pulling on a covered architecture*)
 
 ## 3. Scanner suppression records
@@ -138,15 +140,21 @@
   confusing failure to diagnose
   (spec: *the failure mode is documented*)
 - [ ] 5.4 After the first release, confirm the documented pull command works verbatim against
-  the public package on both architectures. Blocked until 6.1-6.2
+  the public package on both architectures. `v0.1.0-rc.6` already shows the package is
+  public and carries both architectures, but the README documents `:v0.1.0`, which is not
+  cut yet. Blocked until 6.1
 
 ## 6. Release (operator)
 
 - [ ] 6.1 Push the first `v*` tag from a `main` commit whose Docker run is green, and confirm
-  the push step reports success rather than `skipped`
-- [ ] 6.2 Flip the newly created GHCR package from private to public. GHCR creates a package
-  private on first push and nothing in CI can change that
-- [ ] 6.3 Close [#17](https://github.com/schubergphilis/claude-docker/pull/17) in favour of
+  the push step reports success rather than `skipped`. The push step itself is already
+  proven: `v0.1.0-rc.1` through `v0.1.0-rc.6` were cut from this branch to exercise the
+  pipeline, and `rc.6` (run 35726478387, at the head commit, on the `v0.12.0` pin) went
+  green and published. The release tag still has to come off a green `main`
+- [x] 6.2 Flip the newly created GHCR package from private to public. GHCR creates a package
+  private on first push and nothing in CI can change that. Done — an anonymous pull token
+  fetches the `v0.1.0-rc.6` manifest with no credentials
+- [x] 6.3 Close [#17](https://github.com/schubergphilis/claude-docker/pull/17) in favour of
   this change
 
 ## 7. Verification
