@@ -858,6 +858,20 @@ if [ "$EPHEMERAL" = "0" ]; then
   [ "$gh_config_unmask" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "$WITH_GLAB" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   [ "$WITH_TFE" = "0" ]  && MOUNT_ARGS+=("--tmpfs" "/root/.terraform.d")
+  # AWS has no in-container `login` step to preserve, so unlike gh it needs no
+  # unmask state — the mask is on in both directions, only its scope changes.
+  # Without --aws the whole directory is masked. With it, just the credential
+  # cache, so the :ro host mounts at /root/.aws/config and /root/.aws/sso stay
+  # visible to the session that asked for them. That cache is the point: the
+  # scoped host mount above deliberately refuses to import ~/.aws/cli/cache
+  # because it holds assume-role STS, and the CLI writes the same material to
+  # the container's own copy — which, unmasked, persists on claude-code-root
+  # and reintroduces it by the back door.
+  if [ "$WITH_AWS" = "0" ]; then
+    MOUNT_ARGS+=("--tmpfs" "/root/.aws")
+  else
+    MOUNT_ARGS+=("--tmpfs" "/root/.aws/cli/cache")
+  fi
   MOUNT_ARGS=(-v claude-code-root:/root -v claude-code-home:/root/.claude "${MOUNT_ARGS[@]}")
 fi
 
