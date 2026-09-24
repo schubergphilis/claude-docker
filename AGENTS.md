@@ -12,7 +12,8 @@ most often missed:
   before opening a PR.
 - **Keep the container's security posture intact** — the privilege-drop,
   capability set, and credential opt-in model are load-bearing (see [Threat
-  model](README.md#threat-model)).
+  model](docs/security.md#threat-model)).
 
-Architecture, threat model, and the version-pin refresh workflow are in
-[`README.md`](README.md).
+[`README.md`](README.md) is the quickstart; the reference material lives in
+[`docs/`](docs/) — [auth](docs/auth.md), [security](docs/security.md),
+[maintenance](docs/maintenance.md), [workflows](docs/workflows.md).

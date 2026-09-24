@@ -81,9 +81,9 @@ Wrapper flags:
                       ~/.config/uv/uv.toml, and pip.conf (:ro) when present and
                       forwards UV_INDEX_* / npm_config_registry / PIP_* env
                       when set. Runtime only; the image build is unaffected.
-                      ~/.netrc is NOT mounted (too broad — see README); npmrc
-                      and pip.conf are whole-file mounts, so scope them to the
-                      registry. See README "Private package registries".
+                      ~/.netrc is NOT mounted (too broad); npmrc and pip.conf
+                      are whole-file mounts, so scope them to the registry.
+                      See docs/auth.md, "Private package registries".
   --api               Opt in to a custom model endpoint (LiteLLM, gateway):
                       forward ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
                       ANTHROPIC_API_KEY / ANTHROPIC_CUSTOM_HEADERS /
@@ -859,7 +859,7 @@ fi
 # refuses an extensions entry on a v0 repo ("v1-only extension found").
 # Overlay is NOT mounted :ro: container-side `git config` / `git remote add`
 # need to succeed; those writes land in the ephemeral overlay and are dropped
-# at exit, which matches the trade-off documented in the README.
+# at exit, which matches the trade-off documented in docs/security.md.
 # Counter loop for bash 3.2 (no "${!arr[@]}" on indexed arrays).
 n=${#SEEN_NAMES[@]}
 i=0
