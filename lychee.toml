@@ -1,5 +1,11 @@
 offline = true
-include_fragments = true
+
+# Enum since lychee v0.24 (none|anchor-only|text-only|full) — it was a bool
+# before, and `include_fragments = true` made lychee exit 3 on a config parse
+# error rather than check anything. `anchor-only` is what bare
+# `--include-fragments` in ci.yml resolves to; no link here uses a text
+# fragment.
+include_fragments = "anchor-only"
 
 include = [
     "*.md",

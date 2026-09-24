@@ -88,6 +88,12 @@ jobs:
       - name: Broken relative links (offline)
         uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
         with:
+          # Pinned: the action's own default for this input floats, and lychee
+          # reads lychee.toml. v0.24 turned include_fragments from a bool into
+          # an enum, which is a config parse error (exit 3) on the old
+          # spelling — survivable while this step was advisory, a red build on
+          # an unrelated PR now that it gates.
+          lycheeVersion: v0.24.2
           args: --offline --include-fragments --no-progress .
 
   docker-build:
