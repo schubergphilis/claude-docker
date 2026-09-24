@@ -7,11 +7,10 @@ offline = true
 # fragment.
 include_fragments = "anchor-only"
 
-include = [
-    "*.md",
-    "**/*.md",
-]
-
+# No `include` key: lychee's include/exclude are regexes matched against the
+# *links*, not globs matched against the files, so `include = ["*.md"]` is an
+# invalid regex ("repetition operator missing expression"). File selection is
+# the path argument in ci.yml plus exclude_path below.
 exclude_path = [
     ".git",
     "node_modules",
