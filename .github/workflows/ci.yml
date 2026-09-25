@@ -55,19 +55,20 @@ jobs:
         # supply-chain attacks get yanked before we ingest.  The soak gate is
         # enforced by update_pins.py --audit, which is the single source of truth
         # for soak logic (including each tool's window).
-        # The tool list is provided by update_pins.py --list-npm-tools so CI never
-        # re-implements generator logic.
+        # The tool list is the kind == npm rows of update_pins.py --list-tools so
+        # CI never re-implements generator logic.
         run: |
           set -euo pipefail
           python3 update_pins.py --audit
           # Capture the tool list into a variable BEFORE looping: a process
           # substitution `done < <(cmd)` does NOT propagate cmd's non-zero exit
-          # under `set -e`, so a fail-closed --list-npm-tools (e.g. a missing pin)
+          # under `set -e`, so a fail-closed --list-tools (e.g. a missing pin)
           # would silently yield an empty loop and skip every signature check
           # (fail-open). `$(...)` assignment, by contrast, DOES abort the step
           # under `set -e`, so the here-string consumer below is fail-closed.
-          tools=$(python3 update_pins.py --list-npm-tools)
-          while IFS=$'\t' read -r name pkg env var ver; do
+          tools=$(python3 update_pins.py --list-tools)
+          while IFS=$'\t' read -r name _probe _re ver kind pkg; do
+            [ "$kind" = npm ] || continue
             [ -n "$ver" ] || { echo "::error::no pinned version for $name"; exit 1; }
             scratch=$(mktemp -d)
             ( cd "$scratch" && npm init -y >/dev/null \
@@ -129,7 +130,7 @@ jobs:
           # `done < <(cmd)` process substitution would not.
           tools=$(python3 update_pins.py --list-tools)
           fail=0
-          while IFS=$'\t' read -r name probe version_re pinned; do
+          while IFS=$'\t' read -r name probe version_re pinned _kind _ref; do
             read -ra argv <<< "$probe"
             # One conditional chain, not three statements: an unrunnable tool,
             # an unreadable version and a wrong version must each land in the
