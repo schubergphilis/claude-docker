@@ -17,23 +17,18 @@ not mention instruction files at all.
 
 - Record the evaluation in `design.md`: threat addressed, tool options
   (cosign, sigstore-python, gitsign, plus a no-Sigstore hash alternative),
-  keyless vs key-based, offline behaviour, UX, cost, and a recommendation.
+  keyless vs key-based, offline behaviour, and a recommendation.
 - Add a threat-model bullet to `docs/security.md` § Threat model naming host config
   instruction files and workspace `CLAUDE.md` / `.claude/` as **trusted,
   unverified input**.
 - No change to `run.sh`, the image, or any spec. `skip_specs: true`, because
   this change modifies no requirement. If the recommendation is later reversed,
   the implementing change adds a `host-config-parity` delta then.
+- This change is left unarchived on purpose, until the maintainers accept or
+  reverse the recommendation.
 
 ## Non-goals
 
 - Implementing signature or hash verification in `run.sh`.
 - Verifying workspace-supplied `CLAUDE.md` / `.claude/`.
 - Adopting nono or any other external sandbox (see #75).
-
-## Impact
-
-- `docs/security.md`: one threat-model bullet.
-- `openspec/changes/evaluate-instruction-file-signing/`: this evaluation. It is
-  left unarchived on purpose, until the maintainers accept or reverse the
-  recommendation.
