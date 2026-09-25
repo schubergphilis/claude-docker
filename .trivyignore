@@ -35,3 +35,14 @@ CVE-2026-56864 exp:2026-11-04
 # against a fix that needs 0.40.0. Each entry carries its own reason because
 # suppression is per-ID and the two are only incidentally related.
 CVE-2026-56865 exp:2026-11-04
+# az (/opt/az): azure-cli-core 2.90.0 pins msal==1.36.0, which caps
+# cryptography <49, so the venv resolves 48.0.1; the fix is 50.0.0. Full
+# azure-cli ships the same pin — only an azure-cli-core release that moves msal
+# can clear it (msal 1.39.0 already allows <51). PKCS#7 EnvelopedData
+# decryption, which the Azure DevOps commands never call. At expiry, check
+# whether pins/az.env's core release has moved msal and drop this if so.
+CVE-2026-69247 exp:2026-11-04
+# Same msal==1.36.0 cap on the same cryptography 48.0.1 in /opt/az (fix 49.0.0):
+# X.509 path building on duplicate self-signed intermediates. Its own entry
+# because suppression is per-ID.
+CVE-2026-69249 exp:2026-11-04

@@ -4,7 +4,7 @@
 
 ## Updating pinned tool versions
 
-`uv`, `glab`, `aws-cli`, and `tfenv` are downloaded directly from GitHub/GitLab/vendor sites rather than from a language package registry, so nothing else verifies the bytes. Each is pinned to a version **and** a per-architecture sha256 that the Dockerfile checks (`sha256sum -c`) before installing. The npm-installed tools (`claude-code`, `openspec`, `pnpm`) are pinned by version only — `npm install` already verifies the tarball against the registry's `dist.integrity`, and CI additionally runs `npm audit signatures`. Those checks are about *provenance* — where the bytes came from. Whether the pinned version has a disclosed CVE is a separate question, answered by [Image vulnerability scanning](security.md#image-vulnerability-scanning).
+`uv`, `glab`, `aws-cli`, `tfenv`, and the `azure-devops` extension wheel are downloaded directly from GitHub/GitLab/vendor sites rather than from a language package registry, so nothing else verifies the bytes. Each is pinned to a version **and** a per-architecture sha256 that the Dockerfile checks (`sha256sum -c`) before installing. The npm-installed tools (`claude-code`, `openspec`, `pnpm`) and the PyPI-installed `azure-cli-core` (pin `az`) are pinned by version only — `npm install` already verifies the tarball against the registry's `dist.integrity`, and CI additionally runs `npm audit signatures`. Those checks are about *provenance* — where the bytes came from. Whether the pinned version has a disclosed CVE is a separate question, answered by [Image vulnerability scanning](security.md#image-vulnerability-scanning).
 
 The pins live in version-controlled fragments under [`pins/`](../pins/), one `pins/<tool>.env` per tool, which the Dockerfile `COPY`s and sources at build time — so `docker build` is reproducible from the committed files.
 
@@ -36,7 +36,7 @@ isolation, file ownership — is exercised by a smoke harness
 ([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)).
 It runs in CI on **Linux** on every change (in the
 `docker-build` job, reusing the built image), across a matrix of cells: host UID
-1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` opt-ins
+1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins
 (singly and combined), `--ephemeral`, and `--ro`. Most of the container's
 behaviour lives inside Docker's Linux VM and is identical regardless of host OS,
 so Linux CI covers the bulk of it.
@@ -44,7 +44,7 @@ so Linux CI covers the bulk of it.
 Run a cell locally against a built image:
 
 ```bash
-IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe
+IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
 The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since `smoke.sh` never invokes `run.sh` and CI has no real GitHub credentials to test against.
@@ -61,7 +61,7 @@ macOS is **virtiofs collapsing `st_dev` across bind mounts**, which changes how
 (see `entrypoint.sh:30-45`). Verify it by hand on a real Mac with Docker Desktop
 before shipping changes to `entrypoint.sh` / `run.sh` / `Dockerfile`:
 
-- Run the smoke cells on macOS: `IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --volstate=warm` and `… --ro=1` and `… --optins=aws,glab,tfe` — the entrypoint must reach the dropped process with **no spurious `entrypoint: WARN`** despite the `:ro` mounts under `/root`.
+- Run the smoke cells on macOS: `IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --volstate=warm` and `… --ro=1` and `… --optins=aws,glab,tfe,api,az` — the entrypoint must reach the dropped process with **no spurious `entrypoint: WARN`** despite the `:ro` mounts under `/root`.
 - File ownership round-trips to the host user and is editable without `sudo` on a real `~/repo` bind mount.
 - macOS Keychain `gh` flow: `--gh` with no `GH_TOKEN`/`GITHUB_TOKEN` exported falls back to `gh auth token`; in-container `gh` is authenticated.
 - Real AWS SSO (`--aws`) and Terraform Cloud (`--tfe`) reach their endpoints from inside the container via the mounted config.

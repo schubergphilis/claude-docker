@@ -224,6 +224,31 @@ RUN ARCH=$(dpkg --print-architecture); \
  && rm /tmp/go.tar.gz \
  && /usr/local/go/bin/go version
 
+# Azure DevOps CLI: azure-cli-core + the azure-devops extension, not full
+# azure-cli (~500 MB of unused service modules). Extension wheel pinned by
+# sha256 instead of the unpinned extension index. `-I` keeps PYTHONPATH and the
+# volume-backed user site out of az. Bundled pip deleted: uv installs, and pip's
+# vendored deps are scanner findings. AZURE_DEVOPS_ORG_URL maps onto the
+# extension's default org. Before npm: az moves monthly, claude-code near-daily.
+COPY pins/az.env pins/azure-devops.env /tmp/
+RUN . /tmp/az.env && . /tmp/azure-devops.env \
+ && whl="/tmp/${AZURE_DEVOPS_URL##*/}" \
+ && curl -fsSL "$AZURE_DEVOPS_URL" -o "$whl" \
+ && echo "${AZURE_DEVOPS_SHA256}  ${whl}" | sha256sum -c - \
+ && UV_PYTHON_INSTALL_DIR=/opt/az/python uv venv --no-cache --managed-python --python 3.13 /opt/az/venv \
+ && rm -rf /opt/az/python/cpython-*/bin/pip* /opt/az/python/cpython-*/lib/python3*/site-packages/pip* \
+ && uv pip install --no-cache --python /opt/az/venv/bin/python \
+      "azure-cli-core==${AZ_VERSION}" python-dateutil msrest azure-common \
+ && uv pip install --no-cache --no-deps --python /opt/az/venv/bin/python \
+      --target /opt/az/cliextensions/azure-devops "$whl" \
+ && printf '%s\n' '#!/bin/sh' \
+      '[ -z "${AZURE_DEVOPS_ORG_URL:-}" ] || export AZURE_DEVOPS_EXT__DEFAULTS_ORGANIZATION="${AZURE_DEVOPS_EXT__DEFAULTS_ORGANIZATION:-$AZURE_DEVOPS_ORG_URL}"' \
+      'AZURE_EXTENSION_DIR=/opt/az/cliextensions exec /opt/az/venv/bin/python -I -c "import sys; from azure.cli.core import get_default_cli; sys.exit(get_default_cli().invoke(sys.argv[1:]))" "$@"' \
+      > /usr/local/bin/az \
+ && chmod 0755 /usr/local/bin/az \
+ && AZURE_CONFIG_DIR=/tmp/azcfg az devops -h > /dev/null \
+ && rm -rf "$whl" /tmp/azcfg /tmp/az.env /tmp/azure-devops.env
+
 # npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
 # run `npm audit signatures <pkg>@<ver>` when bumping.
 # --ignore-scripts blocks lifecycle hooks for every package + transitive dep
