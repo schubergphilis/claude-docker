@@ -74,8 +74,8 @@ jobs:
           # python3, not `uv run`: update_pins.py is stdlib-only
           # (`dependencies = []`) and the runner's python3.12 already satisfies
           # its `requires-python = ">=3.11"`, so uv would have nothing to
-          # resolve — this is the same invocation ci.yml uses. README documents
-          # `uv run` for operators because the image ships uv.
+          # resolve — this is the same invocation ci.yml uses. docs/maintenance.md
+          # documents `uv run` for operators because the image ships uv.
           # tee so the report lands both in the job log and in the PR body.
           # A non-zero exit from update_pins.py fails the job (pipefail); it
           # leaves pins/ untouched on any resolve/download failure.

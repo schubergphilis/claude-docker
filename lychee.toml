@@ -1,11 +1,16 @@
 offline = true
-include_fragments = true
 
-include = [
-    "*.md",
-    "**/*.md",
-]
+# Enum since lychee v0.24 (none|anchor-only|text-only|full) — it was a bool
+# before, and `include_fragments = true` made lychee exit 3 on a config parse
+# error rather than check anything. `anchor-only` is what bare
+# `--include-fragments` in ci.yml resolves to; no link here uses a text
+# fragment.
+include_fragments = "anchor-only"
 
+# No `include` key: lychee's include/exclude are regexes matched against the
+# *links*, not globs matched against the files, so `include = ["*.md"]` is an
+# invalid regex ("repetition operator missing expression"). File selection is
+# the path argument in ci.yml plus exclude_path below.
 exclude_path = [
     ".git",
     "node_modules",
