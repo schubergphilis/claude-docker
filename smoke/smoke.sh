@@ -364,6 +364,28 @@ if [ "${EGRESS}" = "1" ]; then
   grep -q "gh-auth-proxy sidecar 'claude-gh-proxy-" "${CONTAINER_STDERR}" \
     || die "host-side: gh-auth-proxy sidecar did not start in the --gh pass"
 
+  # Fail-closed negatives: both must abort before any container starts.
+  log "Egress pass 5: config-injection line in the project file"
+  printf 'example.com http_access allow all\n' >"${WORKSPACE_HOST}/.claude-docker/allowed-hosts"
+  if run_egress_pass "" 1 >/dev/null 2>&1; then
+    die "host-side: run.sh accepted a project file with an injection line"
+  fi
+  grep -q 'line 1: invalid host' "${CONTAINER_STDERR}" \
+    || die "host-side: injection line not reported by line number"
+  grep -q 'assert-in-container starting' "${CONTAINER_STDERR}" \
+    && die "host-side: agent container started despite an invalid project file"
+  log "host-side PASS: injection line aborted the run before any container"
+
+  log "Egress pass 6: CLAUDE_DOCKER_EGRESS typo"
+  # Assert on the message, not just the exit code: without a TTY an accepted
+  # value would also exit non-zero (docker run -it), masking a regression.
+  typo_err=$(CLAUDE_DOCKER_EGRESS=alowlist bash "${SCRIPT_DIR}/../run.sh" "${WORKSPACE_HOST}" </dev/null 2>&1 >/dev/null) || true
+  case "${typo_err}" in
+    *"CLAUDE_DOCKER_EGRESS must be 'allowlist'"*) ;;
+    *) die "host-side: CLAUDE_DOCKER_EGRESS=alowlist not rejected (got: ${typo_err})" ;;
+  esac
+  log "host-side PASS: CLAUDE_DOCKER_EGRESS typo rejected"
+
   if docker ps -a --format '{{.Names}}' | grep -qE '^claude-(egress|gh)-proxy-' \
      || docker network ls --format '{{.Name}}' | grep -qE '^claude-(egress|gh)-'; then
     die "host-side: claude-egress-* / claude-gh-* resources left behind after teardown"

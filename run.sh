@@ -154,11 +154,6 @@ WITH_GLAB=0
 WITH_TFE=0
 WITH_REGISTRY=0
 WITH_EGRESS=0
-case "${CLAUDE_DOCKER_EGRESS:-}" in
-  "")        ;;
-  allowlist) WITH_EGRESS=1 ;;
-  *) echo "claude-docker: CLAUDE_DOCKER_EGRESS must be 'allowlist' or unset, got '$CLAUDE_DOCKER_EGRESS'" >&2; exit 1 ;;
-esac
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
@@ -186,6 +181,14 @@ for arg in "$@"; do
   esac
 done
 [ "${#WORKSPACES[@]}" -eq 0 ] && WORKSPACES=("$PWD")
+
+# Sticky form of --egress-allowlist. Checked after the loop so --help always
+# works; a typo must not silently mean "open egress".
+case "${CLAUDE_DOCKER_EGRESS:-}" in
+  "")        ;;
+  allowlist) WITH_EGRESS=1 ;;
+  *) echo "claude-docker: CLAUDE_DOCKER_EGRESS must be 'allowlist' or unset, got '$CLAUDE_DOCKER_EGRESS'" >&2; exit 1 ;;
+esac
 
 # --gh (auth-proxy sidecar) and --gh-direct (legacy forwarding) are mutually
 # exclusive strategies for the same credential — picking one silently would
