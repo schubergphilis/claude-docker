@@ -48,6 +48,8 @@ Run a cell locally against a built image:
 IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
+The [egress allowlist](security.md#egress-allowlist) has its own `run.sh`-driven cell, [`smoke/egress.sh`](../smoke/egress.sh) (`IMAGE=claude-code:local bash smoke/egress.sh [--gh]`), which runs in CI. It proves that an allowlisted host is reachable and a non-allowlisted one is refused. It also proves that a proxy-unaware client has no route out, that metadata, loopback and private destinations are denied, that `--gh` traffic reaches the auth proxy through squid, and that teardown leaves nothing behind.
+
 The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against.
 
 ### Manual fallback checklist (macOS)

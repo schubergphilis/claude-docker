@@ -113,11 +113,12 @@ The wrapper runs `op read` on the **host** before launch and forwards the resolv
 | ------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | `--ephemeral` | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
 | `--ro`        | Mount every workspace read-only. Prevents the agent from modifying your code.                                               |
+| `--egress-allowlist` | Default-deny network egress: only allowlisted hosts are reachable, through a per-session proxy. See [Egress allowlist](docs/security.md#egress-allowlist). |
 
-`--ro` does **not** block credential flags or restrict network egress — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
+`--ro` does **not** block credential flags or restrict network egress. For an isolated review session, combine `--ephemeral`, `--ro` and `--egress-allowlist`, and pass no credential flags:
 
 ```bash
-claude-docker --ephemeral --ro ~/untrusted-repo
+claude-docker --ephemeral --ro --egress-allowlist ~/untrusted-repo
 ```
 
 For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](docs/workflows.md#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](docs/security.md#threat-model) for what it does and doesn't protect.
@@ -129,7 +130,7 @@ Conversation history persists in the shared `claude-code-home` volume (skipped u
 ## Documentation
 
 - [Auth model](docs/auth.md) — AWS SSO, GitHub auth proxy, Terraform Cloud, private registries, custom model endpoint
-- [Security](docs/security.md) — threat model, image vulnerability scanning
+- [Security](docs/security.md) — threat model, egress allowlist, image vulnerability scanning
 - [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests
 - [Workflows](docs/workflows.md) — host config parity, worktrees, split panes, extending the image
 

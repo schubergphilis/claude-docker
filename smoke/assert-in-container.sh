@@ -578,10 +578,91 @@ check_entrypoint_reached() {
 }
 
 # ---------------------------------------------------------------------------
+# 8. Egress allowlist (EXPECT_EGRESS=1, driven by smoke/egress.sh via run.sh)
+# ---------------------------------------------------------------------------
+# The proxy-unaware probes are the load-bearing ones. A proxy-aware client
+# failing to reach a blocked host only proves the proxy is configured. It says
+# nothing about whether a raw socket can walk around it, and the --internal
+# network exists to stop exactly that. smoke/egress.sh allowlists example.com
+# and localhost.
+
+# HTTP status for $2 via curl; $1 is the -w variable. Prints 000 on failure.
+egress_code() {
+  local out
+  out=$(curl -s -o /dev/null -m 20 -w "%{$1}" "${@:3}" "$2" 2>/dev/null) || true
+  printf '%s' "${out:-000}"
+}
+
+check_egress() {
+  if [ -n "${https_proxy:-}" ] && [ "${https_proxy:-}" = "${HTTPS_PROXY:-}" ]; then
+    pass "egress-env: https_proxy/HTTPS_PROXY set ($https_proxy)"
+  else
+    fail "egress-env: https_proxy/HTTPS_PROXY missing or inconsistent"
+  fi
+
+  assert_eq "egress-allowed: https://example.com via proxy" \
+    "$(egress_code http_code https://example.com/)" "200"
+  assert_eq "egress-denied: CONNECT example.org refused by proxy" \
+    "$(egress_code http_connect https://example.org/)" "403"
+
+  # No route: a public IP, without the proxy.
+  if curl -s -o /dev/null -m 10 --noproxy '*' http://1.1.1.1/ 2>/dev/null; then
+    fail "egress-bypass: proxy-unaware curl reached 1.1.1.1 by IP"
+  else
+    pass "egress-bypass: proxy-unaware curl to a public IP fails"
+  fi
+  if getent hosts example.org >/dev/null 2>&1; then
+    fail "egress-dns: example.org resolves inside the agent container (DNS side channel)"
+  else
+    pass "egress-dns: external names do not resolve inside the agent container"
+  fi
+
+  # Denies above the allowlist. no_proxy is cleared for the localhost probe so
+  # curl sends it to the proxy (where 'localhost' is allowlisted by name but
+  # resolves to loopback) instead of dialling the agent's own loopback.
+  assert_eq "egress-metadata: 169.254.169.254 refused by proxy" \
+    "$(egress_code http_code http://169.254.169.254/latest/meta-data/)" "403"
+  assert_eq "egress-private: 10.0.0.1 refused by proxy" \
+    "$(egress_code http_code http://10.0.0.1/)" "403"
+  assert_eq "egress-rebinding: allowlisted name resolving to loopback refused" \
+    "$(no_proxy='' NO_PROXY='' egress_code http_code http://localhost/)" "403"
+  assert_eq "egress-port: CONNECT to a non-443 port refused" \
+    "$(egress_code http_connect https://example.com:8443/)" "403"
+
+  if [ "${EXPECT_EGRESS_GH:-0}" = "1" ]; then
+    # --cacert replaces the default bundle, so a completed handshake proves the
+    # gh sidecar terminated TLS (squid routed api.github.com to it), and any
+    # GitHub status (401 for the smoke's fake token) proves the sidecar reached
+    # GitHub. A 502 would be the sidecar failing upstream, 000 the chain broken.
+    local gh_code
+    gh_code=$(egress_code http_code https://api.github.com/zen \
+      --cacert /usr/local/share/ca-certificates/claude-docker-gh-proxy.crt)
+    case "$gh_code" in
+      200|401|403) pass "egress-gh: api.github.com via proxy → gh sidecar → GitHub (HTTP $gh_code)" ;;
+      *)           fail "egress-gh: api.github.com via proxy → gh sidecar failed (HTTP $gh_code)" ;;
+    esac
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 echo "=== assert-in-container starting (UID=$(id -u) GID=$(id -g)) ==="
+
+if [ "${EXPECT_EGRESS:-0}" = "1" ]; then
+  # run.sh-driven cell: only the checks that hold for a run.sh session. The
+  # capability check stays in: the egress boundary must not cost a capability.
+  check_entrypoint_reached
+  check_identity
+  check_security
+  check_egress
+  echo "==="
+  echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"
+  [ "$FAIL_COUNT" -eq 0 ] || { echo "RESULT: FAIL"; exit 1; }
+  echo "RESULT: PASS"
+  exit 0
+fi
 
 check_entrypoint_reached
 check_identity
