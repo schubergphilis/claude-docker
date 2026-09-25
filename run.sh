@@ -82,8 +82,8 @@ Wrapper flags:
   --tmux              Wrap claude in plain tmux (works in any terminal).
                       Equivalent to CLAUDE_DOCKER_TMUX=1.
   --claude-dir=PATH   Use PATH as the host Claude config dir instead of
-                      ~/.claude. Affects agents, commands, skills, CLAUDE.md,
-                      and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
+                      ~/.claude. Affects agents, commands, skills, themes,
+                      CLAUDE.md, and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
 
 Separator:
   --                  Ends wrapper-flag parsing. Everything after is passed
@@ -344,7 +344,9 @@ EOF
 case "$CLAUDE_CONFIG_DIR" in "~/"*) CLAUDE_CONFIG_DIR="$HOME/${CLAUDE_CONFIG_DIR#\~/}" ;; esac
 
 MOUNT_ARGS=()
-ENV_ARGS=(-e TERM)
+# COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
+# the container and custom theme colours render rounded (host-config-parity).
+ENV_ARGS=(-e TERM -e COLORTERM)
 CONTAINER_PATHS=()
 
 ws_suffix=""
@@ -717,7 +719,7 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
 fi
 
-for item in agents commands skills; do
+for item in agents commands skills themes; do
   src="$CLAUDE_CONFIG_DIR/$item"
   # Resolve top-level symlink so cp -RL gets a real directory path, not a link.
   # Hop counter guards against pathological symlink cycles (a -> b -> a).
