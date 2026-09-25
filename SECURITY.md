@@ -44,7 +44,7 @@ it produces, the credential opt-in model, the privilege drop and capability set,
 the `gh` auth-proxy sidecar, and the persistent named-volume model.
 
 Out of scope, because they are documented properties rather than defects — read
-the [threat model](README.md#threat-model) before reporting:
+the [threat model](docs/security.md#threat-model) before reporting:
 
 - **Full outbound network with no egress filtering.** There is no network
   policy; a session can reach anything the host can.
