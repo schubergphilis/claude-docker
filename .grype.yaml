@@ -27,3 +27,13 @@ ignore:
   - package:
       location: "**/node_modules/npm/**"
     reason: npm's bundled deps ship with the nodejs deb; only Node moves them.
+
+  # az's cryptography, held at 48.x by azure-cli-core's exact msal==1.36.0 pin
+  # (msal <1.39 caps cryptography <49); only a core release moves it. Scoped to
+  # this version and /opt/az, so a newer resolution or any other copy of
+  # cryptography stays enforced. Mirrors the two .trivyignore entries.
+  - package:
+      name: cryptography
+      version: 48.0.1
+      location: "/opt/az/**"
+    reason: Held by azure-cli-core's msal pin; moves with pins/az.env.
