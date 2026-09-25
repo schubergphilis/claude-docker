@@ -49,32 +49,8 @@ jobs:
           failure-threshold: warning
 
       - name: npm-pinned tools supply-chain audit
-        # For EVERY npm-pinned tool enforce two policies: (1) tarball signed by
-        # npm's keyring over dist.integrity (`npm audit signatures`), (2) soak
-        # since publish (per-tool window: 7 days, 1 day for claude-code) so loud
-        # supply-chain attacks get yanked before we ingest.  The soak gate is
-        # enforced by update_pins.py --audit, which is the single source of truth
-        # for soak logic (including each tool's window).
-        # The tool list is the kind == npm rows of update_pins.py --list-tools so
-        # CI never re-implements generator logic.
-        run: |
-          set -euo pipefail
-          python3 update_pins.py --audit
-          # Capture the tool list into a variable BEFORE looping: a process
-          # substitution `done < <(cmd)` does NOT propagate cmd's non-zero exit
-          # under `set -e`, so a fail-closed --list-tools (e.g. a missing pin)
-          # would silently yield an empty loop and skip every signature check
-          # (fail-open). `$(...)` assignment, by contrast, DOES abort the step
-          # under `set -e`, so the here-string consumer below is fail-closed.
-          tools=$(python3 update_pins.py --list-tools)
-          while IFS=$'\t' read -r name _probe _re ver kind pkg; do
-            [ "$kind" = npm ] || continue
-            [ -n "$ver" ] || { echo "::error::no pinned version for $name"; exit 1; }
-            scratch=$(mktemp -d)
-            ( cd "$scratch" && npm init -y >/dev/null \
-              && npm install --ignore-scripts --no-audit --no-fund --silent "${pkg}@${ver}" \
-              && npm audit signatures )
-          done <<< "$tools"
+        # Signature + soak gate for every npm-pinned tool; see the script header.
+        run: bash scripts/audit-npm-pins.sh
 
       - name: Markdown lint (advisory)
         uses: DavidAnson/markdownlint-cli2-action@21c1be1b93ad9ed58fa840aacc3f279cde2a72ff # v24.2.0
@@ -118,39 +94,9 @@ jobs:
         # errors at exec time (see Dockerfile). Nothing else in CI invokes a
         # pinned tool, so without this a pin bump can ship a broken or
         # version-mismatched CLI on green.
-        # The tool set, each tool's version probe, and the rule for reading a
-        # version out of that probe all come from update_pins.py's registry, so
-        # a newly pinned tool is covered without editing this file.
         # This step must live in docker-build: it is the only job whose local
         # daemon holds the image the build step loaded.
-        run: |
-          set -euo pipefail
-          # Capture before looping. --list-tools is fail-closed, and `$(...)`
-          # propagates its non-zero exit under `set -e` where a
-          # `done < <(cmd)` process substitution would not.
-          tools=$(python3 update_pins.py --list-tools)
-          fail=0
-          while IFS=$'\t' read -r name probe version_re pinned _kind _ref; do
-            read -ra argv <<< "$probe"
-            # One conditional chain, not three statements: an unrunnable tool,
-            # an unreadable version and a wrong version must each land in the
-            # `else` instead of tripping `set -e` and skipping the tools after
-            # it. $version_re is deliberately unquoted — quoting the right-hand
-            # side of =~ makes bash match it as a literal string, not a regex.
-            # </dev/null keeps docker away from the loop's here-string.
-            if actual=$(docker run --rm claude-docker:ci "${argv[@]}" </dev/null) \
-               && [[ "$actual" =~ $version_re ]] \
-               && [ "${BASH_REMATCH[1]}" = "$pinned" ]; then
-              status=PASS
-            else
-              status=FAIL
-              fail=1
-            fi
-            echo "  ${status}  ${name}  pinned=${pinned}  reported=${actual:-<probe failed>}"
-            [ "$status" = PASS ] \
-              || echo "::error::${name}: pinned ${pinned}, image reported '${actual:-<probe failed>}'"
-          done <<< "$tools"
-          exit "$fail"
+        run: bash scripts/verify-pinned-versions.sh
 
       - name: Cross-platform smoke (Linux)
         # Drives smoke.sh across a matrix of cells, all reusing the already-loaded
