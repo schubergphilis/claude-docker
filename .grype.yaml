@@ -35,5 +35,5 @@ ignore:
   - package:
       name: cryptography
       version: 48.0.1
-      location: "/opt/az/**"
+      location: /opt/az/**
     reason: Held by azure-cli-core's msal pin; moves with pins/az.env.
