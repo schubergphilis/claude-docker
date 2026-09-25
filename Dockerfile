@@ -109,6 +109,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
 
+# squid is the forward proxy behind `run.sh --egress-allowlist`. It never runs
+# inside the agent container: run.sh starts this same image as a separate
+# sidecar with `--entrypoint squid`. Shipping it here rather than pulling a
+# second proxy image keeps the sidecar under this image's digest-pinned base
+# and CI's vulnerability scan (see openspec change add-egress-allowlist, D3).
+# The agent gains nothing from the binary: under the flag it has no route out.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends squid \
+ && squid -v >/dev/null \
+ && rm -rf /var/lib/apt/lists/*
+
 # GitHub CLI (keyring fetched at build; TODO: commit the keyring to the repo)
 RUN install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \

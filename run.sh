@@ -77,7 +77,17 @@ Wrapper flags:
                       ~/.netrc is NOT mounted (too broad — see README); npmrc
                       and pip.conf are whole-file mounts, so scope them to the
                       registry. See README "Private package registries".
-  --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
+  --egress-allowlist  Default-deny network egress: the agent container joins
+                      only an --internal network (no route out, no external
+                      DNS) and reaches the internet solely through a per-
+                      session squid sidecar that allows Anthropic hosts, the
+                      hosts of each active opt-in (--gh, --glab, --tfe,
+                      --aws), CLAUDE_DOCKER_EGRESS_ALLOW, and an approved
+                      <workspace>/.claude-docker/allowed-hosts. Cloud
+                      metadata is always denied. HTTPS/HTTP only (git+ssh
+                      stops working). Denied hosts are listed at exit.
+                      Docker only. Env: CLAUDE_DOCKER_EGRESS=allowlist.
+  --iterm            Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
                       Equivalent to CLAUDE_DOCKER_TMUX=1.
@@ -107,6 +117,14 @@ Environment:
   CLAUDE_DOCKER_GH_POLICY  Path to a Caddyfile snippet imported into the --gh
                            sidecar's api.github.com site block, to extend the
                            default request-filtering policy.
+  CLAUDE_DOCKER_EGRESS     allowlist → same as --egress-allowlist (make it
+                           sticky from your shell rc). Any other non-empty
+                           value is an error.
+  CLAUDE_DOCKER_EGRESS_ALLOW
+                           Extra hosts for --egress-allowlist, comma or space
+                           separated, `host`, `.suffix` or `host:port`.
+                           Trusted host-side input: may name internal /
+                           private-address hosts (registries, gateways).
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -135,6 +153,12 @@ WITH_GH_DIRECT=0
 WITH_GLAB=0
 WITH_TFE=0
 WITH_REGISTRY=0
+WITH_EGRESS=0
+case "${CLAUDE_DOCKER_EGRESS:-}" in
+  "")        ;;
+  allowlist) WITH_EGRESS=1 ;;
+  *) echo "claude-docker: CLAUDE_DOCKER_EGRESS must be 'allowlist' or unset, got '$CLAUDE_DOCKER_EGRESS'" >&2; exit 1 ;;
+esac
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
@@ -153,6 +177,7 @@ for arg in "$@"; do
     --glab)         WITH_GLAB=1 ;;
     --tfe)          WITH_TFE=1 ;;
     --registry)     WITH_REGISTRY=1 ;;
+    --egress-allowlist) WITH_EGRESS=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
     --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
     --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -192,6 +217,12 @@ if [ -z "$RUNTIME" ]; then
 elif ! command -v "$RUNTIME" >/dev/null 2>&1; then
   echo "claude-docker: requested runtime '$RUNTIME' not found on PATH" >&2; exit 1
 fi
+# The egress boundary rests on --internal + multi-network attach semantics that
+# are verified on Docker only; refuse rather than run an unverified boundary.
+if [ "$WITH_EGRESS" = "1" ] && [ "$RUNTIME" = "podman" ]; then
+  echo "claude-docker: --egress-allowlist is not yet supported on podman (its --internal network semantics are unverified) — use docker, or drop the flag" >&2
+  exit 1
+fi
 
 # Best-effort prune of gh-auth-proxy resources stranded by a prior run.sh that
 # died before its EXIT trap could run — the trap installed below (right after
@@ -206,13 +237,15 @@ fi
 # window can race and lose, which fails that session closed with a clear
 # error — rare, safe, retry succeeds. Every failure here is swallowed: a
 # stale resource that resists removal must never abort this run.
-"$RUNTIME" ps -aq --filter "name=^claude-gh-proxy-" \
+# The same applies verbatim to the --egress-allowlist sidecar/networks
+# (claude-egress-proxy-*, claude-egress-*); repeated name filters are OR'd.
+"$RUNTIME" ps -aq --filter "name=^claude-gh-proxy-" --filter "name=^claude-egress-proxy-" \
     --filter "status=exited" --filter "status=created" --filter "status=dead" \
     2>/dev/null | while IFS= read -r gh_stale_cid; do
   [ -z "$gh_stale_cid" ] && continue
   "$RUNTIME" rm -f "$gh_stale_cid" >/dev/null 2>&1 || true
 done || true
-"$RUNTIME" network ls -q --filter "name=^claude-gh-" 2>/dev/null | while IFS= read -r gh_stale_nid; do
+"$RUNTIME" network ls -q --filter "name=^claude-gh-" --filter "name=^claude-egress-" 2>/dev/null | while IFS= read -r gh_stale_nid; do
   [ -z "$gh_stale_nid" ] && continue
   "$RUNTIME" network rm "$gh_stale_nid" >/dev/null 2>&1 || true
 done || true
@@ -336,6 +369,77 @@ uploads.github.com {
 	}
 }
 EOF
+}
+
+# Emit the --egress-allowlist squid config (openspec change
+# add-egress-allowlist, design D6) to stdout. Like the Caddyfile above it is a
+# constant: every per-run value lives in the data files next to it (operator,
+# allowed, ports), which squid reads as plain value lists — validated host
+# strings never become squid syntax. Order is load-bearing: the metadata /
+# link-local denies sit above EVERY allow, operator (host-typed) entries are
+# exempt from the IP-literal and private-address denies, everything else is
+# not. `-n` stops dstdomain matching an IP-literal request against that IP's
+# attacker-controlled reverse-DNS name.
+gen_egress_squid_conf() {
+  cat <<'EOF'
+http_port 3128
+pid_filename none
+cache deny all
+logfile_rotate 0
+logformat claude_docker %ts %rm %ru %>Hs %Ss
+access_log stdio:/dev/stdout claude_docker
+cache_log /dev/stderr
+coredump_dir none
+netdb_filename none
+pinger_enable off
+shutdown_lifetime 0 seconds
+via off
+forwarded_for delete
+httpd_suppress_version_string on
+visible_hostname claude-docker-egress
+
+acl egress_ports port "/etc/claude-docker-egress/ports"
+acl metadata_names dstdomain -n metadata.google.internal metadata.azure.internal metadata
+acl metadata_dst dst 169.254.0.0/16 fe80::/10 fd00:ec2::254
+acl ip_literal dstdom_regex -n ^[0-9.]+$ :
+acl private_dst dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3 ::/127 fc00::/7 ff00::/8
+acl operator_hosts dstdomain -n "/etc/claude-docker-egress/operator"
+acl allowed_hosts dstdomain -n "/etc/claude-docker-egress/allowed"
+
+http_access deny metadata_names
+http_access deny metadata_dst
+http_access deny !egress_ports
+http_access allow operator_hosts
+http_access deny ip_literal
+http_access deny private_dst
+http_access allow allowed_hosts
+http_access deny all
+EOF
+}
+
+# Validate one allowlist host (design D5). $2=strict (1 for untrusted tiers:
+# project file) additionally requires a letter (no IP literals) and a dot
+# after any leading suffix dot (no bare TLD like `.com`). Charset + no leading
+# `-` is config-injection defence, not tidiness: the project file is
+# attacker-controllable.
+egress_valid_host() {
+  local h="$1" body
+  [ -n "$h" ] && [ "${#h}" -le 253 ] || return 1
+  case "$h" in *[!A-Za-z0-9.-]*|*..*|-*|.-*|*-|*.) return 1 ;; esac
+  body="${h#.}"
+  [ -n "$body" ] || return 1
+  if [ "${2:-0}" = "1" ]; then
+    case "$body" in *[A-Za-z]*) ;; *) return 1 ;; esac
+    case "$body" in *.*) ;; *) return 1 ;; esac
+  fi
+  return 0
+}
+
+# SHA-256 of stdin, hex only (GNU coreutils or macOS shasum).
+egress_sha256() {
+  if command -v sha256sum >/dev/null 2>&1; then sha256sum | cut -d' ' -f1
+  else shasum -a 256 | cut -d' ' -f1
+  fi
 }
 # Expand a leading ~/ in CLAUDE_CONFIG_DIR — needed when set via env var, where
 # the shell does not perform tilde expansion. Pattern is "~/" not "~" so a
@@ -520,6 +624,7 @@ DOCKER_FLAGS=()
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
 [ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
 [ "$WITH_REGISTRY" = "1" ] && DOCKER_FLAGS+=("registry")
+[ "$WITH_EGRESS" = "1" ]   && DOCKER_FLAGS+=("egress")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
 [ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
 if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
@@ -549,6 +654,12 @@ stage=$(mktemp -d "$stage_root/host.XXXXXX")
 gh_sid="${stage##*.}"
 GH_PROXY_NETWORK="claude-gh-$gh_sid"
 GH_PROXY_SIDECAR="claude-gh-proxy-$gh_sid"
+# --egress-allowlist resources, same derivation and same trap-before-create
+# rule. EGRESS_NETWORK is --internal (the agent's only network);
+# EGRESS_OUT_NETWORK is the sidecar's own plain bridge to the outside.
+EGRESS_NETWORK="claude-egress-$gh_sid"
+EGRESS_OUT_NETWORK="claude-egress-out-$gh_sid"
+EGRESS_SIDECAR="claude-egress-proxy-$gh_sid"
 
 # `case` instead of `[[ ]]` for bash 3.2 friendliness inside the trap string.
 # $HOME/$RUNTIME/$GH_PROXY_* are expanded at trap execution time, * is a glob
@@ -559,8 +670,188 @@ GH_PROXY_SIDECAR="claude-gh-proxy-$gh_sid"
 trap '
 case "$stage" in "$HOME/.cache/claude-docker/host."*) rm -rf "$stage" ;; esac
 "$RUNTIME" rm -f "$GH_PROXY_SIDECAR" >/dev/null 2>&1 || true
+if [ "$WITH_EGRESS" = "1" ]; then
+  "$RUNTIME" rm -f "$EGRESS_SIDECAR" >/dev/null 2>&1 || true
+  "$RUNTIME" network rm "$EGRESS_NETWORK" "$EGRESS_OUT_NETWORK" >/dev/null 2>&1 || true
+fi
 "$RUNTIME" network rm "$GH_PROXY_NETWORK" >/dev/null 2>&1 || true
 ' EXIT
+
+# --egress-allowlist (openspec change add-egress-allowlist). The agent joins
+# ONLY the --internal EGRESS_NETWORK, so it has no route off the host — that
+# network is the boundary; the squid sidecar (this same image, --entrypoint
+# squid) is merely the one allowlisted way out. Runs before the gh block so
+# the gh sidecar can join EGRESS_NETWORK too (design D8). Every failure
+# aborts: this must never degrade to open egress.
+AGENT_NETWORK=""
+EGRESS_NO_PROXY="localhost,127.0.0.1,::1"
+EGRESS_PROJECT_FILE="${SEEN_PATHS[0]}/.claude-docker/allowed-hosts"
+if [ "$WITH_EGRESS" = "1" ]; then
+  egress_dir="$stage/egress"
+  mkdir -p "$egress_dir"
+  # squid runs as the image's `proxy` user, not the host UID: the staged
+  # (non-secret) config must be world-readable through the 0700 stage dir's
+  # bind mount of this subdir.
+  chmod 0755 "$egress_dir"
+  # `.claude-docker.invalid` (RFC 6761: never resolves) keeps each list
+  # non-empty so squid never sees an entry-less ACL.
+  printf '.claude-docker.invalid\n' >"$egress_dir/operator"
+  printf '80\n443\n' >"$egress_dir/ports"
+
+  # Operator tier (design D4): host-typed, so exempt from the private-address
+  # and IP-literal denies. ANTHROPIC_BASE_URL is the --api gateway (PR #87);
+  # ponytail: applies whenever it is set on the host — gate on WITH_API once
+  # --api lands. Parsed as scheme://[userinfo@]host[:port][/path].
+  egress_add_operator() {
+    local e="$1" h p=""
+    h="${e#*://}"; h="${h%%/*}"; h="${h##*@}"
+    case "$h" in *:*) p="${h##*:}"; h="${h%:*}" ;; esac
+    if ! egress_valid_host "$h" 0; then
+      echo "claude-docker: invalid egress host '$h' (from $2) — use a hostname, .suffix or IPv4 address, optionally :port" >&2
+      exit 1
+    fi
+    if [ -n "$p" ]; then
+      case "$p" in ''|*[!0-9]*) echo "claude-docker: invalid port '$p' in egress entry '$e' (from $2)" >&2; exit 1 ;; esac
+      if [ "$p" -lt 1 ] || [ "$p" -gt 65535 ]; then
+        echo "claude-docker: invalid port '$p' in egress entry '$e' (from $2)" >&2; exit 1
+      fi
+      printf '%s\n' "$p" >>"$egress_dir/ports"
+    fi
+    printf '%s\n' "$h" >>"$egress_dir/operator"
+  }
+  # read -a, not an unquoted $(...) loop: no glob expansion of entries.
+  read -ra egress_allow <<<"$(printf '%s' "${CLAUDE_DOCKER_EGRESS_ALLOW:-}" | tr ',' ' ')"
+  if [ "${#egress_allow[@]}" -gt 0 ]; then
+    for e in "${egress_allow[@]}"; do
+      egress_add_operator "$e" CLAUDE_DOCKER_EGRESS_ALLOW
+    done
+  fi
+  [ -n "${ANTHROPIC_BASE_URL:-}" ] && egress_add_operator "$ANTHROPIC_BASE_URL" ANTHROPIC_BASE_URL
+
+  # Built-in tier: Claude Code's documented required hosts
+  # (code.claude.com/docs/en/network-config) plus each active opt-in's hosts.
+  # Subject to every deny.
+  {
+    printf '%s\n' .claude-docker.invalid .anthropic.com .claude.ai .claude.com
+    if [ "$WITH_GH" = "1" ] || [ "$WITH_GH_DIRECT" = "1" ]; then
+      printf '%s\n' github.com api.github.com uploads.github.com codeload.github.com .githubusercontent.com
+    fi
+    [ "$WITH_GLAB" = "1" ] && printf '%s\n' .gitlab.com
+    [ "$WITH_TFE" = "1" ]  && printf '%s\n' app.terraform.io
+    [ "$WITH_AWS" = "1" ]  && printf '%s\n' .amazonaws.com .awsapps.com
+    :
+  } >"$egress_dir/allowed"
+
+  # Project tier (design D5): a proposal from the (untrusted) repo. Validated
+  # line by line, normalised, and used only if its hash is host-approved.
+  if [ -f "$EGRESS_PROJECT_FILE" ]; then
+    proj_hosts=""
+    n=0
+    while IFS= read -r line || [ -n "$line" ]; do
+      n=$((n + 1))
+      line="${line%%#*}"
+      # Trim outer whitespace (and a CRLF's \r) only; inner whitespace stays
+      # and fails validation below.
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [ -z "$line" ] && continue
+      if ! egress_valid_host "$line" 1; then
+        hint=""
+        case "$line" in '*.'*) hint=" (write '.${line#\*.}' for a domain and its subdomains)" ;; esac
+        echo "claude-docker: $EGRESS_PROJECT_FILE line $n: invalid host '$line'$hint — hostnames only ([A-Za-z0-9.-], optional leading '.'), no IP literals or bare TLDs. Aborting." >&2
+        exit 1
+      fi
+      proj_hosts="$proj_hosts$line
+"
+    done <"$EGRESS_PROJECT_FILE"
+    proj_hosts="$(printf '%s' "$proj_hosts" | LC_ALL=C sort -u)"
+    if [ -n "$proj_hosts" ]; then
+      proj_hash="$(printf '%s\n' "$proj_hosts" | egress_sha256)"
+      approvals="${XDG_CONFIG_HOME:-$HOME/.config}/claude-docker/egress-approved"
+      # An approval store the agent can write is worthless (design D5).
+      approvals_ok=1
+      for p in "${SEEN_PATHS[@]}"; do
+        case "$approvals" in "$p"/*) approvals_ok=0 ;; esac
+      done
+      proj_ok=0
+      if [ "$approvals_ok" = "1" ] && [ -f "$approvals" ] && grep -qxF "$proj_hash" "$approvals"; then
+        proj_ok=1
+      elif [ -t 0 ] && [ -t 2 ]; then
+        {
+          echo "claude-docker: $EGRESS_PROJECT_FILE asks to allow egress to:"
+          printf '%s\n' "$proj_hosts" | sed 's/^/    /'
+          [ "$approvals_ok" = "0" ] && echo "  (approval store $approvals is inside a mounted workspace — this approval will not be remembered)"
+        } >&2
+        printf 'claude-docker: allow these hosts? [y/N] ' >&2
+        ans=""
+        read -r ans || ans=""
+        case "$ans" in
+          y|Y|yes|YES)
+            proj_ok=1
+            if [ "$approvals_ok" = "1" ]; then
+              mkdir -p "$(dirname "$approvals")"
+              printf '%s\n' "$proj_hash" >>"$approvals"
+            fi ;;
+        esac
+      fi
+      if [ "$proj_ok" = "1" ]; then
+        printf '%s\n' "$proj_hosts" >>"$egress_dir/allowed"
+      else
+        echo "claude-docker: WARN $EGRESS_PROJECT_FILE is not approved — its hosts are NOT allowed this session (run interactively to review and approve)" >&2
+      fi
+    fi
+  fi
+
+  gen_egress_squid_conf >"$egress_dir/squid.conf"
+  chmod 0644 "$egress_dir"/*
+
+  if ! "$RUNTIME" network create --internal "$EGRESS_NETWORK" >/dev/null \
+     || ! "$RUNTIME" network create "$EGRESS_OUT_NETWORK" >/dev/null; then
+    echo "claude-docker: failed to create the egress networks — aborting (egress would otherwise be unfiltered)" >&2
+    exit 1
+  fi
+  # Not --rm, for the same diagnosability reason as the gh sidecar below.
+  if ! "$RUNTIME" run -d \
+      --name "$EGRESS_SIDECAR" \
+      --network "$EGRESS_OUT_NETWORK" \
+      --user proxy \
+      --cap-drop ALL \
+      --security-opt no-new-privileges \
+      --entrypoint squid \
+      -v "$(hostpath "$egress_dir"):/etc/claude-docker-egress:ro" \
+      "$IMAGE" -N -f /etc/claude-docker-egress/squid.conf >/dev/null \
+     || ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$EGRESS_SIDECAR" >/dev/null; then
+    echo "claude-docker: failed to start the egress proxy sidecar from $IMAGE — aborting" >&2
+    exit 1
+  fi
+  egress_ready=0
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; then
+      egress_ready=1; break
+    fi
+    [ -z "$("$RUNTIME" ps -q --filter "name=^$EGRESS_SIDECAR$" 2>/dev/null)" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ "$egress_ready" != "1" ]; then
+    echo "claude-docker: the egress proxy sidecar did not come up — aborting. An image built before --egress-allowlist existed lacks squid: rebuild it. squid's output follows:" >&2
+    "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | tail -15 | sed 's/^/  | /' >&2
+    exit 1
+  fi
+  egress_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$EGRESS_NETWORK\").IPAddress}}" "$EGRESS_SIDECAR" 2>/dev/null)
+  if [ -z "$egress_ip" ]; then
+    echo "claude-docker: could not determine the egress proxy's internal address — aborting" >&2
+    exit 1
+  fi
+  AGENT_NETWORK="$EGRESS_NETWORK"
+  egress_url="http://$egress_ip:3128"
+  ENV_ARGS+=(
+    "-e" "HTTP_PROXY=$egress_url" "-e" "HTTPS_PROXY=$egress_url"
+    "-e" "http_proxy=$egress_url" "-e" "https_proxy=$egress_url"
+  )
+  echo "claude-docker: egress allowlist active via '$EGRESS_SIDECAR' ($(($(wc -l <"$egress_dir/allowed") + $(wc -l <"$egress_dir/operator") - 2)) entries) — live log: $RUNTIME logs -f $EGRESS_SIDECAR" >&2
+fi
 
 # GitHub auth-proxy sidecar: active only when --gh found a host token
 # (GH_HOST_TOKEN, computed above during token discovery). --gh-direct and
@@ -680,7 +971,18 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
     exit 1
   fi
 
-  gh_proxy_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$GH_PROXY_NETWORK\").IPAddress}}" "$GH_PROXY_SIDECAR" 2>/dev/null)
+  # Under --egress-allowlist the agent's only network is the internal one, so
+  # the gh sidecar joins it too and the agent reaches it there (design D8);
+  # the sidecar keeps GH_PROXY_NETWORK as its own route to GitHub.
+  gh_agent_net="$GH_PROXY_NETWORK"
+  if [ "$WITH_EGRESS" = "1" ]; then
+    gh_agent_net="$EGRESS_NETWORK"
+    if ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$GH_PROXY_SIDECAR" >/dev/null; then
+      echo "claude-docker: failed to attach the gh-auth-proxy sidecar to the egress network — aborting; the real GitHub token was never forwarded into any container." >&2
+      exit 1
+    fi
+  fi
+  gh_proxy_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$gh_agent_net\").IPAddress}}" "$GH_PROXY_SIDECAR" 2>/dev/null)
   if [ -z "$gh_proxy_ip" ]; then
     echo "claude-docker: could not determine the gh-auth-proxy sidecar's network address — aborting; the real GitHub token was never forwarded into any container." >&2
     exit 1
@@ -692,8 +994,11 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   # beats a network alias), trust the sidecar's CA, and hand `gh` a
   # placeholder that satisfies its "am I authenticated" check without being
   # a usable credential.
+  [ -z "$AGENT_NETWORK" ] && AGENT_NETWORK="$GH_PROXY_NETWORK"
+  # Clients must dial these three straight at the sidecar (--add-host), never
+  # CONNECT through squid, which would reach real GitHub without the token.
+  EGRESS_NO_PROXY="$EGRESS_NO_PROXY,github.com,api.github.com,uploads.github.com"
   MOUNT_ARGS+=(
-    "--network" "$GH_PROXY_NETWORK"
     "--add-host" "github.com:$gh_proxy_ip"
     "--add-host" "api.github.com:$gh_proxy_ip"
     "--add-host" "uploads.github.com:$gh_proxy_ip"
@@ -716,6 +1021,8 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   GH_SIDECAR_ACTIVE=1
   echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
 fi
+[ -n "$AGENT_NETWORK" ] && MOUNT_ARGS+=("--network" "$AGENT_NETWORK")
+[ "$WITH_EGRESS" = "1" ] && ENV_ARGS+=("-e" "NO_PROXY=$EGRESS_NO_PROXY" "-e" "no_proxy=$EGRESS_NO_PROXY")
 
 for item in agents commands skills; do
   src="$CLAUDE_CONFIG_DIR/$item"
@@ -884,6 +1191,7 @@ fi
 # under no-new-privileges, so claude itself runs with no usable caps.
 # --init wraps the process tree under tini so claude's bash/MCP children
 # get reaped — runuser would otherwise be PID 1 and wouldn't reap zombies.
+agent_rc=0
 "$RUNTIME" run --rm -it --init \
   --security-opt no-new-privileges \
   --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
@@ -892,4 +1200,23 @@ fi
   "${ENV_ARGS[@]}" \
   -w "$CWD" \
   "$IMAGE" \
-  "${CMD[@]}"
+  "${CMD[@]}" || agent_rc=$?
+
+# Denial feedback (design D9): list each host squid refused this session, read
+# from its access log (logformat claude_docker: ts method url status tag)
+# before the EXIT trap removes the sidecar. The URL is host:port for CONNECT
+# and scheme://host[:port]/path otherwise; reduce both to the host.
+if [ "$WITH_EGRESS" = "1" ]; then
+  egress_denied=$("$RUNTIME" logs "$EGRESS_SIDECAR" 2>/dev/null \
+    | awk '$5 ~ /^TCP_DENIED/ { u = $3; sub(/^[a-z]+:\/\//, "", u); sub(/\/.*/, "", u); sub(/:[0-9]+$/, "", u); print u }' \
+    | LC_ALL=C sort -u) || true
+  if [ -n "$egress_denied" ]; then
+    {
+      echo "claude-docker: egress allowlist denied these hosts this session:"
+      printf '%s\n' "$egress_denied" | sed 's/^/    /'
+      echo "  To allow one, add it to $EGRESS_PROJECT_FILE (per project, approved at next start)"
+      echo "  or to CLAUDE_DOCKER_EGRESS_ALLOW (host-side, trusted)."
+    } >&2
+  fi
+fi
+exit "$agent_rc"

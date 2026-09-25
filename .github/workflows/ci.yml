@@ -167,6 +167,8 @@ jobs:
         #   7. uid-0/cold/no-optins          — root-legacy path (HOST_UID=0 → exec directly)
         #   8. runner-uid/ephemeral          — --ephemeral mode (no named volumes)
         #   9. runner-uid/ro/no-optins       — read-only workspace (EROFS robustness)
+        #  10. uid-501/gid-501               — non-runner primary GID
+        #  11. runner-uid/egress             — run.sh --egress-allowlist boundary
         run: |
           set -euo pipefail
           export IMAGE=claude-docker:ci
@@ -211,6 +213,14 @@ jobs:
           #     path with a GID that differs from the runner's (asserts the
           #     dropped process lands in exactly that primary group).
           run_cell --uid=501 --gid=501 --volstate=cold --ephemeral=0
+
+          # 11. Egress allowlist: drives run.sh --egress-allowlist end-to-end.
+          #     Allowlisted host reachable via the squid sidecar; non-allowlisted
+          #     host, IP literal and 169.254.169.254 denied (403); a raw
+          #     --noproxy client and external DNS fail (the --internal network is
+          #     the boundary); project list ignored until approved, then honoured
+          #     from the recorded hash; no claude-egress-* resources left behind.
+          run_cell --uid="${RUNNER_UID}" --egress=1
 
       # Known-CVE scanning of the image, in two passes over the same artifact.
       # Like the steps above, these must live in docker-build: Trivy resolves an

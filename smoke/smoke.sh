@@ -19,6 +19,14 @@
 #                   against a rewritten fixture (V2 sentinel) to prove the
 #                   entrypoint re-seeds, then a final no-seed pass proves a
 #                   persisted settings.json is left as-is.
+#   --egress=0|1    1 = drive run.sh --egress-allowlist end-to-end instead of a
+#                   hand-built `docker run` (the boundary lives in run.sh's
+#                   network/sidecar lifecycle, so it must be exercised through
+#                   it). Three passes over the same project allowlist
+#                   (example.com): answer `n` at the approval prompt (list
+#                   ignored), answer `y` (list used, hash recorded), then no
+#                   input (recorded approval honoured). Runner UID only;
+#                   implies ephemeral, no opt-ins, no settings seed.
 #   --image=TAG     Docker image to run (default: claude-code:local)
 #   IMAGE=TAG       env var override for --image (checked if --image absent)
 #
@@ -34,6 +42,7 @@ VOLSTATE="cold"
 RO="0"
 EPHEMERAL="0"
 SETTINGS="1"
+EGRESS="0"
 IMAGE="${IMAGE:-claude-code:local}"
 
 # ---------------------------------------------------------------------------
@@ -49,6 +58,7 @@ for arg in "$@"; do
     --ro=*)        RO="${arg#--ro=}" ;;
     --ephemeral=*) EPHEMERAL="${arg#--ephemeral=}" ;;
     --settings=*)  SETTINGS="${arg#--settings=}" ;;
+    --egress=*)    EGRESS="${arg#--egress=}" ;;
     --image=*)     IMAGE="${arg#--image=}" ;;
     *) echo "smoke.sh: unknown argument '$arg'" >&2; exit 1 ;;
   esac
@@ -298,11 +308,57 @@ run_container() {
 # Execute
 # ---------------------------------------------------------------------------
 
-CELL_DESC="uid=${HOST_UID_ARG} gid=${HOST_GID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL} settings=${SETTINGS}"
+CELL_DESC="uid=${HOST_UID_ARG} gid=${HOST_GID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL} settings=${SETTINGS} egress=${EGRESS}"
 log "Cell: ${CELL_DESC}"
 log "Image: ${IMAGE}"
 
-if [ "${VOLSTATE}" = "warm" ]; then
+# One run.sh --egress-allowlist pass. $1 = line typed at the approval prompt
+# (empty = no input), $2 = EXPECT_EGRESS_PROJECT. run.sh's `docker run -it`
+# needs a PTY, hence script(1); its transcript lands in CONTAINER_STDERR so
+# the host-side WARN check below still applies.
+run_egress_pass() {
+  local answer="$1" expect_project="$2" rc=0 entry run_cmd
+  entry="env EXPECT_EGRESS=1 EXPECT_EGRESS_PROJECT=${expect_project} EXPECT_UID=${HOST_UID_ARG} EXPECT_GID=${HOST_GID_ARG} EXPECT_OPTINS= EXPECT_RO=0 EXPECT_EPHEMERAL=1 EXPECT_SETTINGS=0 WORKSPACE=${CONTAINER_WORKSPACE} ${CONTAINER_ASSERT}"
+  run_cmd="bash $(printf '%q' "${SCRIPT_DIR}/../run.sh") --ephemeral --egress-allowlist $(printf '%q' "${WORKSPACE_HOST}")"
+  { [ -n "${answer}" ] && printf '%s\n' "${answer}"; true; } \
+    | CLAUDE_DOCKER_IMAGE="${IMAGE}" CLAUDE_DOCKER_TEST_ENTRY="${entry}" \
+      CLAUDE_DOCKER_CONFIG_DIR="${TMPROOT}/no-claude-dir" XDG_CONFIG_HOME="${TMPROOT}/xdg" \
+      SHELL=/bin/bash timeout -k 10 300 script -qec "${run_cmd}" "${CONTAINER_STDERR}" \
+      >/dev/null 2>&1 || rc=$?
+  tr -d '\r' <"${CONTAINER_STDERR}" >&2 || true
+  return "${rc}"
+}
+
+if [ "${EGRESS}" = "1" ]; then
+  [ "${HOST_UID_ARG}" = "$(id -u)" ] || die "--egress=1 runs run.sh, which always uses the runner UID"
+  command -v script >/dev/null 2>&1 || die "--egress=1 needs script(1) for run.sh's PTY"
+  CONTAINER_WORKSPACE="/workspaces/$(basename "${WORKSPACE_HOST}")"
+  CONTAINER_ASSERT="${CONTAINER_WORKSPACE}/assert-in-container.sh"
+  mkdir -p "${WORKSPACE_HOST}/.claude-docker"
+  printf '# smoke fixture\nexample.com\n' >"${WORKSPACE_HOST}/.claude-docker/allowed-hosts"
+
+  log "Egress pass 1: decline the project list"
+  run_egress_pass n 0 || die "egress pass 1 (declined project list) failed"
+  grep -q 'is not approved' "${CONTAINER_STDERR}" \
+    || die "host-side: no 'not approved' warning for a declined project list"
+  grep -q '^ *example\.org' "${CONTAINER_STDERR}" \
+    || die "host-side: exit summary does not list the denied example.org"
+  log "host-side PASS: declined list warned; denied host listed at exit"
+
+  log "Egress pass 2: approve the project list"
+  run_egress_pass y 1 || die "egress pass 2 (approved project list) failed"
+  [ -s "${TMPROOT}/xdg/claude-docker/egress-approved" ] \
+    || die "host-side: approval was not recorded"
+
+  log "Egress pass 3: recorded approval, no prompt input"
+  run_egress_pass "" 1 || die "egress pass 3 (recorded approval) failed"
+
+  if docker ps -a --format '{{.Names}}' | grep -q '^claude-egress-proxy-' \
+     || docker network ls --format '{{.Name}}' | grep -q '^claude-egress-'; then
+    die "host-side: claude-egress-* resources left behind after teardown"
+  fi
+  log "host-side PASS: no claude-egress-* resources left behind"
+elif [ "${VOLSTATE}" = "warm" ]; then
   # First run: cold — populates the named volume.
   log "Warm cell: running cold pass first..."
   run_container

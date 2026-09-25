@@ -19,6 +19,9 @@
 #                     sentinel string the settings.json content must carry. Passed by
 #                     smoke.sh rather than hardcoded here: the warm cell changes it
 #                     between passes to prove re-seeding overwrites the previous copy.
+#   EXPECT_EGRESS     1 = running under run.sh --egress-allowlist; assert the boundary
+#   EXPECT_EGRESS_PROJECT
+#                     1 = the project allowlist (example.com) is approved, 0 = not
 # Accumulates per-check PASS/FAIL and exits non-zero at the end if any failed
 # (so one regression doesn't hide the rest of the report).
 set -euo pipefail
@@ -519,7 +522,76 @@ check_settings() {
 }
 
 # ---------------------------------------------------------------------------
-# 7. Robustness — entrypoint reached here, so it did not abort
+# 7. Egress allowlist (run.sh --egress-allowlist; smoke.sh --egress=1)
+# ---------------------------------------------------------------------------
+# The load-bearing assertions are the NON-proxy ones: a proxy-aware client
+# failing to reach a blocked host proves only that the proxy is configured;
+# `--noproxy '*'` proves a raw socket cannot walk around it (the --internal
+# network is the boundary). EXPECT_EGRESS_PROJECT: 1 = the project file's
+# example.com is approved, 0 = present but unapproved.
+
+# Proxy's answer to CONNECT for an https URL (000 = no proxy answer).
+egress_connect_code() {
+  curl -sS -o /dev/null --max-time 20 -w '%{http_connect}' "$1" 2>/dev/null || true
+}
+
+check_egress() {
+  if [ "${EXPECT_EGRESS:-0}" != "1" ]; then
+    return
+  fi
+  local code
+
+  if [ -n "${HTTPS_PROXY:-}" ] && [ -n "${https_proxy:-}" ]; then
+    pass "egress-env: HTTPS_PROXY/https_proxy set ($HTTPS_PROXY)"
+  else
+    fail "egress-env: HTTPS_PROXY/https_proxy not set"
+  fi
+
+  code=$(egress_connect_code https://api.anthropic.com/)
+  assert_eq "egress-allowed: CONNECT api.anthropic.com (base set)" "$code" "200"
+
+  code=$(egress_connect_code https://example.org/)
+  assert_eq "egress-denied: CONNECT example.org (not allowlisted)" "$code" "403"
+
+  code=$(egress_connect_code https://1.1.1.1/)
+  assert_eq "egress-denied: CONNECT to an IP literal" "$code" "403"
+
+  code=$(curl -sS -o /dev/null --max-time 20 -w '%{http_code}' http://169.254.169.254/latest/meta-data/ 2>/dev/null || true)
+  assert_eq "egress-denied: cloud metadata 169.254.169.254 via proxy" "$code" "403"
+
+  if [ "${EXPECT_EGRESS_PROJECT:-0}" = "1" ]; then
+    code=$(egress_connect_code https://example.com/)
+    assert_eq "egress-project: approved example.com allowed" "$code" "200"
+  else
+    code=$(egress_connect_code https://example.com/)
+    assert_eq "egress-project: unapproved example.com denied" "$code" "403"
+  fi
+
+  # Raw, non-proxy-aware clients: must fail even for allowlisted hosts.
+  if curl -sS -o /dev/null --noproxy '*' --max-time 5 https://api.anthropic.com/ 2>/dev/null; then
+    fail "egress-raw: --noproxy curl reached api.anthropic.com (network is not the boundary!)"
+  else
+    pass "egress-raw: --noproxy curl to allowlisted api.anthropic.com fails"
+  fi
+  if curl -sS -o /dev/null --noproxy '*' --max-time 5 http://1.1.1.1/ 2>/dev/null; then
+    fail "egress-raw: --noproxy curl reached 1.1.1.1 by IP (route off host exists!)"
+  else
+    pass "egress-raw: --noproxy curl to 1.1.1.1 by IP fails (no route)"
+  fi
+  if curl -sS -o /dev/null --noproxy '*' --max-time 5 http://169.254.169.254/ 2>/dev/null; then
+    fail "egress-raw: --noproxy curl reached 169.254.169.254"
+  else
+    pass "egress-raw: --noproxy curl to 169.254.169.254 fails"
+  fi
+  if getent hosts example.com >/dev/null 2>&1; then
+    fail "egress-dns: external name example.com resolved inside the agent (DNS channel open)"
+  else
+    pass "egress-dns: external name resolution fails inside the agent"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# 8. Robustness — entrypoint reached here, so it did not abort
 # ---------------------------------------------------------------------------
 
 check_entrypoint_reached() {
@@ -541,6 +613,7 @@ check_workspace_write
 check_credentials
 check_aws_state_masking
 check_settings
+check_egress
 
 echo "==="
 echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"
