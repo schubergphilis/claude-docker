@@ -73,11 +73,8 @@ RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
 # the base image's own Cmd is plain /bin/bash, and claude-docker sets its
 # own tini + runuser + claude entrypoint regardless. Its statically-linked
 # stdlib is the source of all 8 pebble findings; removal is the only fix
-# since no rebuild against a patched stdlib exists yet. Purges an owning
-# package instead, in case a future base image ships it that way.
-RUN owner="$(dpkg -S /usr/bin/pebble 2>/dev/null | cut -d: -f1 || true)" \
- && if [ -n "$owner" ]; then apt-get purge -y "$owner"; else rm -f /usr/bin/pebble; fi \
- && ! test -e /usr/bin/pebble
+# since no rebuild against a patched stdlib exists yet.
+RUN rm -f /usr/bin/pebble && ! test -e /usr/bin/pebble
 
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
