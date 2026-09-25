@@ -105,7 +105,11 @@ rebuild az, and an az bump leaves the apt/gh/glab/aws/uv/Go layers cached.
 
 - **Python CVEs.** A Python interpreter and ~40 PyPI packages are new scanner
   surface. Grype's existing `python`/`binary` rule already covers interpreter
-  binaries; any PyPI findings are handled per-ID if CI surfaces them.
+  binaries. First CI run: pip's vendored msgpack/setuptools in the
+  managed interpreter (fixed by deleting that pip — uv does the installing),
+  and cryptography 48.0.1, held below the fix by azure-cli-core's exact
+  `msal==1.36.0` pin; accepted with an expiry in `.trivyignore` and a
+  version-scoped `.grype.yaml` rule until a core release moves msal.
 - **Unsupported entry point.** The wrapper stands in for azure-cli's
   `__main__`; it skips telemetry upload (a feature here). A core release that
   changes `get_default_cli()` would break it — caught by the build-time
