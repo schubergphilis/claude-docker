@@ -109,3 +109,28 @@ The captured token freezes for the life of the container (a CodeArtifact token i
 **No Python is bundled.** `pip`/`pipenv` themselves are not in the image (uv fetches its own Python; project runtimes live in child images). Run a pip-based tool via `uvx pipenv …` — pipenv shells out to pip, which reads the forwarded `pip.conf` / `PIP_*`. Caveat: if your feed is fully locked down with no public upstream, `pipenv` itself must be mirrored there for `uvx` to fetch it.
 
 **Build vs. runtime.** `--registry` is **runtime-only**. The image _build_ always resolves its own tooling (claude-code, openspec, pnpm) against the public npm registry / PyPI regardless of any private registry configured on your host — your `~/.npmrc` and `npm_config_*` env are neither in the build context nor inherited by Dockerfile `RUN` steps. That isolation is what keeps the build reproducible from the committed pins. Routing the build itself through a private registry is intentionally out of scope.
+
+## Custom model endpoint
+
+`--api` points Claude Code at your own model endpoint — a LiteLLM proxy, an enterprise gateway — using [Claude Code's own env vars](https://code.claude.com/docs/en/env-vars). Export them on the host; the wrapper forwards each one that is set by name only (`-e NAME`), so values never appear on the `docker run` command line:
+
+```bash
+export ANTHROPIC_BASE_URL=https://litellm.internal
+export ANTHROPIC_AUTH_TOKEN=...                        # or ANTHROPIC_API_KEY
+export CLAUDE_DOCKER_API_CA=~/certs/internal-ca.pem    # only if the gateway uses a private CA
+claude-docker --api ~/repo
+```
+
+Forwarded: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, and the deprecated `ANTHROPIC_SMALL_FAST_MODEL`.
+
+**Private CA.** `CLAUDE_DOCKER_API_CA` (PEM) is mounted read-only and installed into the container's system trust store by the entrypoint, before privilege drop — the same step that installs the `--gh` sidecar CA. Claude Code trusts the OS store by default, so nothing else is needed. A set path that isn't a file is a startup error. Ignored without `--api`.
+
+**Not covered yet:** Amazon Bedrock and Google Vertex (`CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`) need cloud credentials as well as endpoint config, and are deferred to a follow-up.
+
+**File-based alternative.** Claude Code's settings accept an `env` block, so the same variables can live in `settings.docker.json` (see [Host config parity](workflows.md#host-config-parity)) without `--api`:
+
+```json
+{ "env": { "ANTHROPIC_BASE_URL": "https://litellm.internal", "ANTHROPIC_AUTH_TOKEN": "..." } }
+```
+
+This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager.
