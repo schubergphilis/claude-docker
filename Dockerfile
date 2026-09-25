@@ -224,30 +224,12 @@ RUN ARCH=$(dpkg --print-architecture); \
  && rm /tmp/go.tar.gz \
  && /usr/local/go/bin/go version
 
-# Azure DevOps CLI (`az devops` / `az repos` / `az boards` / `az pipelines`):
-# azure-cli-core plus the azure-devops extension, NOT the full azure-cli
-# distribution (~500 MB of per-service command modules this image has no use
-# for; this layer is ~145 MB, most of it the Python runtime). Core alone ships
-# no `az` entry point and no `az extension` command group, so both are done
-# here by hand: the wrapper below is a minimal stand-in for azure-cli's own
-# entry point, and the extension wheel is installed straight into the extension
-# dir that `az extension add` would write — but from a pinned URL + sha256
-# rather than the unpinned extension index. python-dateutil / msrest /
-# azure-common are what the extension imports that azure-cli (not core)
-# normally pulls in. Version-only pin for azure-cli-core, like the npm tools:
-# uv resolves it and its transitive deps from PyPI at build time.
-# Python is uv-managed (checksum-verified by uv, version fixed by the uv pin)
-# and lives under /opt/az with everything else — off PATH, so it adds no
-# `python3` to the image, and outside /root, which is a volume at runtime.
-# `-I` keeps PYTHONPATH and the volume-backed user site-packages out of az.
-# The interpreter's bundled pip is deleted: uv does the installing, and pip's
-# vendored deps (msgpack, setuptools) are scanner findings nothing here uses.
-# The extension has no AZURE_DEVOPS_ORG_URL of its own; the wrapper maps it onto
-# the extension's env override for `az devops configure --defaults organization`
-# (knack's <prefix>_<SECTION>_<OPTION>, hence the double underscore), so that
-# one variable names the org — and so the host: Services or an on-prem Server.
-# Placed before the npm layer for the same reason as Go: az moves monthly,
-# claude-code near-daily, so a claude-code bump does not rebuild this.
+# Azure DevOps CLI: azure-cli-core + the azure-devops extension, not full
+# azure-cli (~500 MB of unused service modules). Extension wheel pinned by
+# sha256 instead of the unpinned extension index. `-I` keeps PYTHONPATH and the
+# volume-backed user site out of az. Bundled pip deleted: uv installs, and pip's
+# vendored deps are scanner findings. AZURE_DEVOPS_ORG_URL maps onto the
+# extension's default org. Before npm: az moves monthly, claude-code near-daily.
 COPY pins/az.env pins/azure-devops.env /tmp/
 RUN . /tmp/az.env && . /tmp/azure-devops.env \
  && whl="/tmp/${AZURE_DEVOPS_URL##*/}" \
