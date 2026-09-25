@@ -718,30 +718,11 @@ class TestPrintReminders(unittest.TestCase):
 
 
 class TestCIVersionCheckStep(unittest.TestCase):
-    """Runs the real shell from ci.yml's runtime version check against a stub
-    `docker`. Nothing else covers this script: action-shellcheck scans .sh files
-    and shebang scripts, not `run:` blocks embedded in workflow YAML."""
+    """Runs scripts/verify-pinned-versions.sh (ci.yml's runtime version check)
+    against a stub `docker`."""
 
-    WORKFLOW = Path(__file__).resolve().parent.parent / ".github/workflows/ci.yml"
-    STEP_NAME = "Smoke test — every pinned CLI reports its pinned version"
-
-    @classmethod
-    def setUpClass(cls):
-        cls.script = cls._extract_run_block()
-
-    @classmethod
-    def _extract_run_block(cls):
-        """Pull the step's `run: |` body out of the workflow and dedent it."""
-        lines = cls.WORKFLOW.read_text().splitlines()
-        start = next(i for i, ln in enumerate(lines) if cls.STEP_NAME in ln)
-        run_at = next(i for i in range(start, len(lines)) if lines[i].strip() == "run: |")
-        body_indent = len(lines[run_at + 1]) - len(lines[run_at + 1].lstrip())
-        body = []
-        for ln in lines[run_at + 1:]:
-            if ln.strip() and len(ln) - len(ln.lstrip()) < body_indent:
-                break
-            body.append(ln[body_indent:] if ln.strip() else "")
-        return "\n".join(body)
+    ROOT = Path(__file__).resolve().parent.parent
+    SCRIPT = str(ROOT / "scripts/verify-pinned-versions.sh")
 
     def _run(self, overrides=None):
         """Execute the step with a stub docker whose per-tool output comes from
@@ -779,7 +760,7 @@ class TestCIVersionCheckStep(unittest.TestCase):
                 "DOCKER_FIXTURE": str(fixture),
             }
             return subprocess.run(
-                ["bash", "-c", self.script], cwd=str(self.WORKFLOW.parents[2]),
+                ["bash", self.SCRIPT], cwd=str(self.ROOT),
                 env=env, capture_output=True, text=True,
             )
 
@@ -831,7 +812,7 @@ class TestCIVersionCheckStep(unittest.TestCase):
             py.chmod(0o755)
             env = {**os.environ, "PATH": f"{tmp}{os.pathsep}{os.environ['PATH']}"}
             res = subprocess.run(
-                ["bash", "-c", self.script], cwd=str(self.WORKFLOW.parents[2]),
+                ["bash", self.SCRIPT], cwd=str(self.ROOT),
                 env=env, capture_output=True, text=True,
             )
         self.assertNotEqual(res.returncode, 0)
