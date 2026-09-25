@@ -170,7 +170,7 @@ jobs:
         #   1. runner-uid/cold/no-optins     — baseline privilege-drop to runner UID
         #   2. runner-uid/cold/aws           — AWS credential opt-in
         #   3. runner-uid/cold/glab          — GitLab credential opt-in
-        #   4. runner-uid/cold/aws+glab+tfe+api — all smoke opt-ins combined
+        #   4. runner-uid/cold/aws+glab+tfe+api+az — all smoke opt-ins combined
         #   5. runner-uid/warm               — warm volume (HOST_UID-owned /root traversal)
         #   6. uid-501/cold/no-optins        — macOS-style UID (<1000, below Ubuntu floor)
         #   7. uid-0/cold/no-optins          — root-legacy path (HOST_UID=0 → exec directly)
@@ -196,7 +196,7 @@ jobs:
           run_cell --uid="${RUNNER_UID}" --optins=glab --volstate=cold --ephemeral=0
 
           # 4. All smoke opt-ins combined (api: endpoint env + private CA install).
-          run_cell --uid="${RUNNER_UID}" --optins=aws,glab,tfe,api --volstate=cold --ephemeral=0
+          run_cell --uid="${RUNNER_UID}" --optins=aws,glab,tfe,api,az --volstate=cold --ephemeral=0
 
           # 5. Warm volume: first run populates the named volume, second run
           #    traverses the now HOST_UID-owned 0700 /root (exercises CAP_DAC_READ_SEARCH).

@@ -1,24 +1,22 @@
-# external-cli-tools
+## ADDED Requirements
 
-## Purpose
+### Requirement: az with the azure-devops extension installed
 
-Provide `gh`, `glab`, and AWS CLI v2 inside the container with minimal re-auth friction, using host credential passthrough where the tool's macOS storage is file-based and in-container persistence otherwise.
+The container image SHALL ship an `az` command on the default PATH that runs the `azure-devops` extension (`az devops`, `az repos`, `az boards`, `az pipelines`) on both `amd64` and `arm64`. It SHALL be built from `azure-cli-core` plus the extension, not the full `azure-cli` distribution. `azure-cli-core` SHALL be version-pinned via `pins/az.env`; the extension SHALL be installed from the wheel URL recorded in `pins/azure-devops.env` after verifying it against the sha256 recorded there, not via the unpinned extension index. The Python runtime and all az files SHALL live outside `/root` and SHALL NOT add a `python` / `python3` to the default PATH. The build SHALL fail if the extension does not load.
 
-## Requirements
-
-### Requirement: gh, glab, aws v2 installed
-
-The container image SHALL ship with `gh`, `glab`, and `aws` (v2) on the default PATH, built arch-aware for both `amd64` and `arm64`.
-
-#### Scenario: CLIs present
+#### Scenario: az devops present
 
 - **WHEN** the container launches
-- **THEN** `gh --version`, `glab --version`, and `aws --version` all succeed
+- **THEN** `az --version` reports the pinned `azure-cli-core` version and the pinned `azure-devops` extension version
+- **AND** `az devops -h` succeeds
 
-#### Scenario: Builds on Apple Silicon
+#### Scenario: build fails on a tampered extension wheel
 
-- **WHEN** `docker build -t claude-code:local ~/claude-docker` runs on arm64
-- **THEN** the build succeeds and no CLI fails with exec-format error
+- **GIVEN** a build where the downloaded wheel does not match `AZURE_DEVOPS_SHA256`
+- **WHEN** the Dockerfile runs `sha256sum -c`
+- **THEN** the build fails before anything is installed
+
+## MODIFIED Requirements
 
 ### Requirement: Credentials opt-in
 
@@ -225,157 +223,3 @@ the user no way to tell which.
 - **GIVEN** a prior container run used `--az` and ran `az devops configure --defaults project=X` (state persisted under `/root/.azure/` in `claude-code-root`)
 - **WHEN** user runs `claude-docker ~/repo` without `--az`
 - **THEN** `/root/.azure/` inside the container is empty
-
-### Requirement: git-lfs installed and LFS filters registered
-
-The container image SHALL ship with `git-lfs` on the default PATH so that git
-operations on LFS-backed repositories succeed instead of aborting on a missing
-filter program. The image SHALL register the LFS filters system-wide at build
-time (e.g. `git lfs install --system --skip-repo`) so that LFS smudge/clean
-filtering works whether the host kept its filter configuration repo-local — in
-which case `run.sh` copies it into the container's `.git/config` overlay — or
-only in the host's global `~/.gitconfig`, which the container does NOT inherit
-(only `user.name` / `user.email` are forwarded). The `git-lfs` package MAY be
-installed unpinned from the distribution archive, consistent with the existing
-`git` install.
-
-#### Scenario: git-lfs present on PATH
-
-- **WHEN** the container launches
-- **THEN** `git lfs version` succeeds
-- **AND** `git config --system --get filter.lfs.process` reports `git-lfs filter-process`
-
-#### Scenario: worktree creation on an LFS repo no longer aborts
-
-- **GIVEN** a mounted repository whose `.git/config` declares the `lfs` filter with `filter.lfs.required = true` (as carried into the container by the existing config overlay)
-- **WHEN** a worktree is created inside the container (e.g. `git worktree add .claude/worktrees/feature -b feature`)
-- **THEN** the checkout populating the new worktree completes without the `git: 'lfs' is not a git command` / `external filter 'git-lfs filter-process' failed` error
-- **AND** the container session starts normally
-
-#### Scenario: LFS filtering works when host config was global-only
-
-- **GIVEN** a repository tracking files via `.gitattributes` with `filter=lfs` whose `filter.lfs.*` definitions existed only in the host's global `~/.gitconfig` (and therefore are not present in the per-repo `.git/config` overlay)
-- **WHEN** git inside the container checks out an LFS-tracked file
-- **THEN** the system-registered LFS filter is invoked rather than the file being passed through as an unsmudged pointer
-
-### Requirement: tfenv installed and version-pinned
-
-The container image SHALL ship with `tfenv` on the default PATH so users can fetch a project-pinned `terraform` binary on demand. The `tfenv` install SHALL pin the upstream version via a Dockerfile `ARG` and verify the downloaded artifact against an `ARG`-pinned sha256 before installation. The pinned hash SHALL live in version control, not be fetched from the source URL at build time. The image SHALL NOT pre-install any `terraform` binary version; version selection is the project's responsibility, exercised at runtime via `tfenv install` (typically driven by a `.terraform-version` file in the workspace). The `terraform` dispatcher shim that tfenv ships (a bash script, not a terraform binary) MAY be on PATH so that `terraform <subcommand>` works after `tfenv install` without further PATH manipulation.
-
-#### Scenario: tfenv present on PATH, no terraform binary version installed
-
-- **WHEN** the container launches
-- **THEN** `tfenv --version` succeeds
-- **AND** running `terraform version` before any `tfenv install` exits non-zero (the dispatcher reports no version available, and no real terraform binary exists under tfenv's versions directory)
-
-#### Scenario: build fails on tampered tfenv archive
-
-- **GIVEN** a build where the tfenv source archive does not match the pinned `TFENV_SHA256` ARG
-- **WHEN** the Dockerfile runs `sha256sum -c`
-- **THEN** the build fails with a non-zero exit code before installation
-- **AND** no `tfenv` binary is installed onto the default PATH
-
-#### Scenario: version bumps require sha256 bumps in the same commit
-
-- **WHEN** a contributor changes `TFENV_VERSION` without updating `TFENV_SHA256`
-- **THEN** the next build fails sha256 verification
-- **AND** the failure surfaces in CI before merge
-
-#### Scenario: tfenv install fetches a project-pinned terraform at runtime
-
-- **GIVEN** a workspace containing a `.terraform-version` file with the contents `1.9.5`
-- **WHEN** the user runs `tfenv install` inside the container
-- **THEN** tfenv downloads terraform 1.9.5 from `releases.hashicorp.com` and installs it
-- **AND** subsequent `terraform version` invocations report `1.9.5`
-
-### Requirement: Custom model endpoint opt-in
-
-Claude Code endpoint configuration SHALL NOT reach the container unless the user passes `--api`. Under `--api`, `run.sh` SHALL forward each of `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, and `ANTHROPIC_SMALL_FAST_MODEL` that is set on the host, by bare name (`-e NAME`) so no value appears on the wrapper's `docker run` argv. The mode SHALL surface as an `api` entry in `CLAUDE_DOCKER_FLAGS`.
-
-Under `--api`, when the host sets `CLAUDE_DOCKER_API_CA` to a PEM file, `run.sh` SHALL mount it read-only at `/usr/local/share/ca-certificates/claude-docker-api.crt`, and the entrypoint SHALL install it into the system trust store as root before the privilege drop. When `CLAUDE_DOCKER_API_CA` is set but does not name a file, `run.sh` SHALL exit with an error before starting a container. `CLAUDE_DOCKER_API_CA` SHALL have no effect without `--api`.
-
-Bedrock, Vertex, and Foundry provider selection (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_FOUNDRY`) is out of scope for this opt-in.
-
-#### Scenario: No flag means no endpoint config
-
-- **GIVEN** the host exports `ANTHROPIC_BASE_URL=https://llm.internal` and `ANTHROPIC_AUTH_TOKEN=tok`
-- **WHEN** user runs `claude-docker ~/repo`
-- **THEN** neither variable is set inside the container
-
-#### Scenario: --api forwards endpoint config by name
-
-- **GIVEN** the host exports `ANTHROPIC_BASE_URL=https://llm.internal` and `ANTHROPIC_AUTH_TOKEN=tok`
-- **WHEN** user runs `claude-docker --api ~/repo`
-- **THEN** both variables carry the host values inside the container
-- **AND** the `docker run` argv contains `-e ANTHROPIC_AUTH_TOKEN` but not the token value
-
-#### Scenario: --api trusts a private gateway CA
-
-- **GIVEN** the host sets `CLAUDE_DOCKER_API_CA` to a PEM CA certificate
-- **WHEN** user runs `claude-docker --api ~/repo`
-- **THEN** the certificate is present in `/etc/ssl/certs/ca-certificates.crt` inside the container
-
-#### Scenario: Missing CA file fails loudly
-
-- **GIVEN** the host sets `CLAUDE_DOCKER_API_CA=/nonexistent.pem`
-- **WHEN** user runs `claude-docker --api ~/repo`
-- **THEN** `run.sh` exits non-zero with an error naming the path and starts no container
-
-### Requirement: Secret-manager references in forwarded credentials
-
-When an env var that an active opt-in forwards holds a value beginning with `op://`,
-`run.sh` SHALL resolve it on the host with `op read` before starting any container and
-SHALL forward the resolved value in its place, by bare name (`-e NAME`) so it never
-appears in argv. Under `--gh`, `GH_TOKEN` and `GITHUB_TOKEN` SHALL be resolved the same
-way before they are handed to the auth-proxy sidecar. Values not beginning with `op://`
-SHALL be forwarded unchanged.
-
-If `op` is not on the host PATH, or `op read` fails, `run.sh` SHALL exit with status 1
-without starting any container. Its error message SHALL name the variable and SHALL NOT
-contain the reference or the resolved value.
-
-The 1Password CLI SHALL NOT be installed in the image, and no 1Password credential SHALL
-be forwarded into the container by this mechanism.
-
-#### Scenario: Reference resolved and forwarded by name
-
-- **GIVEN** `GITLAB_TOKEN=op://Private/GitLab/token` on the host and `op` on PATH
-- **WHEN** user runs `claude-docker --glab ~/repo`
-- **THEN** `run.sh` runs `op read` for that reference on the host
-- **AND** the container's `GITLAB_TOKEN` is the resolved value
-- **AND** neither the reference nor the resolved value appears in the container runtime's argv
-
-#### Scenario: op missing
-
-- **GIVEN** `GITLAB_TOKEN=op://Private/GitLab/token` on the host and no `op` on PATH
-- **WHEN** user runs `claude-docker --glab ~/repo`
-- **THEN** `run.sh` exits 1 with an error naming `GITLAB_TOKEN` and no container starts
-
-#### Scenario: Read fails
-
-- **GIVEN** `GITLAB_TOKEN` holds an `op://` reference that `op read` cannot resolve
-- **WHEN** user runs `claude-docker --glab ~/repo`
-- **THEN** `run.sh` exits 1 with an error naming `GITLAB_TOKEN` but not the reference
-- **AND** no container starts
-
-#### Scenario: Not forwarded without the opt-in
-
-- **GIVEN** `GITLAB_TOKEN=op://Private/GitLab/token` on the host
-- **WHEN** user runs `claude-docker ~/repo` without `--glab`
-- **THEN** `op` is not invoked and `GITLAB_TOKEN` does not reach the container
-
-### Requirement: az with the azure-devops extension installed
-
-The container image SHALL ship an `az` command on the default PATH that runs the `azure-devops` extension (`az devops`, `az repos`, `az boards`, `az pipelines`) on both `amd64` and `arm64`. It SHALL be built from `azure-cli-core` plus the extension, not the full `azure-cli` distribution. `azure-cli-core` SHALL be version-pinned via `pins/az.env`; the extension SHALL be installed from the wheel URL recorded in `pins/azure-devops.env` after verifying it against the sha256 recorded there, not via the unpinned extension index. The Python runtime and all az files SHALL live outside `/root` and SHALL NOT add a `python` / `python3` to the default PATH. The build SHALL fail if the extension does not load.
-
-#### Scenario: az devops present
-
-- **WHEN** the container launches
-- **THEN** `az --version` reports the pinned `azure-cli-core` version and the pinned `azure-devops` extension version
-- **AND** `az devops -h` succeeds
-
-#### Scenario: build fails on a tampered extension wheel
-
-- **GIVEN** a build where the downloaded wheel does not match `AZURE_DEVOPS_SHA256`
-- **WHEN** the Dockerfile runs `sha256sum -c`
-- **THEN** the build fails before anything is installed
