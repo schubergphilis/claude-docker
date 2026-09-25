@@ -33,7 +33,8 @@ The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinn
 
 The container's runtime behaviour — privilege-drop, capability set, credential
 isolation, file ownership — is exercised by a smoke harness
-([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)).
+([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)),
+which drives the real `run.sh` with fixture credentials under a fake `$HOME`.
 It runs in CI on **Linux** on every change (in the
 `docker-build` job, reusing the built image), across a matrix of cells: host UID
 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins
@@ -47,7 +48,7 @@ Run a cell locally against a built image:
 IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
-The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since `smoke.sh` never invokes `run.sh` and CI has no real GitHub credentials to test against.
+The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against.
 
 ### Manual fallback checklist (macOS)
 

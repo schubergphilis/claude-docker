@@ -5,7 +5,7 @@
 # assert-in-container.sh — runs INSIDE the container as the dropped user.
 # Invoked as the container command: entrypoint.sh calls
 #   exec runuser -u claude -- /workspaces/smoke/assert-in-container.sh
-# Reads expectations from env vars set by smoke.sh:
+# Reads expectations from env vars set by smoke.sh (via CLAUDE_DOCKER_TEST_ENTRY):
 #   EXPECT_UID        expected numeric UID (matches HOST_UID forwarded by smoke.sh)
 #   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe api az), or empty
 #   WORKSPACE         path to the bind-mounted workspace inside the container
@@ -316,7 +316,7 @@ check_credentials() {
     fi
 
     if [ "$granted" = "1" ]; then
-      # Config path must exist and be read-only (mounted :ro by smoke.sh).
+      # Config path must exist and be read-only (mounted :ro by run.sh).
       if [ -e "$config_path" ]; then
         pass "optin-${optin}: config path exists: $config_path"
       else
@@ -424,15 +424,6 @@ check_aws_state_masking() {
     fail "${label}: ${path} unexpectedly populated ($entry_count entries)"
   fi
 
-  # A tmpfs, not merely an empty directory on the volume. Without this the
-  # assertion above would pass on a first-ever run, before any session had
-  # written anything, and report a mask that is not there.
-  if grep -qE "[[:space:]]${path}[[:space:]]+tmpfs[[:space:]]" /proc/self/mounts; then
-    pass "${label}-mount: ${path} is a tmpfs mount"
-  else
-    fail "${label}-mount: ${path} is not a tmpfs mount (no mask applied)"
-  fi
-
   # Under --aws the read-only host mounts must survive the narrower mask.
   if [ "$granted" = "1" ]; then
     if [ -f /root/.aws/config ]; then
@@ -485,6 +476,33 @@ check_api() {
       fi
       ;;
   esac
+}
+
+# The full tmpfs mask set under /root, by equality: a mask run.sh adds or drops
+# without a matching update here (and a spec delta in external-cli-tools) fails
+# the cell. Presence checks alone can't catch a dropped glab/tfe mask on a fresh
+# volume — the path is empty either way.
+check_mask_set() {
+  local expected="" actual optins=",${EXPECT_OPTINS:-},"
+  if [ "${EXPECT_EPHEMERAL:-0}" = "0" ]; then
+    # smoke never passes --gh, so the gh mask is always on.
+    expected="/root/.config/gh"
+    case "$optins" in *,glab,*) ;; *) expected="$expected /root/.config/glab-cli" ;; esac
+    case "$optins" in *,tfe,*)  ;; *) expected="$expected /root/.terraform.d" ;; esac
+    case "$optins" in *,az,*)   ;; *) expected="$expected /root/.azure" ;; esac
+    case "$optins" in
+      *,aws,*) expected="$expected /root/.aws/cli/cache" ;;
+      *)       expected="$expected /root/.aws" ;;
+    esac
+  fi
+  # shellcheck disable=SC2086  # word-split of the space-separated list is intended
+  expected=$(printf '%s\n' $expected | sort)
+  actual=$(awk '$3 == "tmpfs" && ($2 == "/root" || $2 ~ /^\/root\//) { print $2 }' /proc/self/mounts | sort)
+  if [ "$actual" = "$expected" ]; then
+    pass "mask-set: tmpfs masks under /root are exactly [$(echo "$expected" | tr "\n" " ")]"
+  else
+    fail "mask-set: tmpfs masks under /root are [$(echo "$actual" | tr "\n" " ")], expected [$(echo "$expected" | tr "\n" " ")]"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -573,6 +591,7 @@ check_workspace_write
 check_credentials
 check_aws_state_masking
 check_api
+check_mask_set
 check_settings
 
 echo "==="
