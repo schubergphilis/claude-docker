@@ -40,8 +40,7 @@ fi
 # doesn't block the session over a CA problem the user can't fix here.
 # The same step installs the --api private CA (CLAUDE_DOCKER_API_CA), which
 # Claude Code's native binary then trusts via the OS store.
-if [ -f /usr/local/share/ca-certificates/claude-docker-gh-proxy.crt ] \
-   || [ -f /usr/local/share/ca-certificates/claude-docker-api.crt ]; then
+if ls /usr/local/share/ca-certificates/claude-docker-*.crt >/dev/null 2>&1; then
 update-ca-certificates >/dev/null 2>&1 \
   || printf 'entrypoint: WARN update-ca-certificates failed for a claude-docker CA\n' >&2
 fi
