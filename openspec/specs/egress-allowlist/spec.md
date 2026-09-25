@@ -1,4 +1,9 @@
-## ADDED Requirements
+# egress-allowlist Specification
+
+## Purpose
+Opt-in default-deny network egress for the agent container. A per-session `--internal` network removes every route off the host. A forward-proxy sidecar then admits only a validated, host-side allowlist, and denies metadata, loopback and private destinations by resolved address. The capability set of the agent container stays the same.
+
+## Requirements
 
 ### Requirement: Egress filtering is opt-in via --egress-allowlist
 
