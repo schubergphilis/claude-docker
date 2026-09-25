@@ -366,101 +366,6 @@ hostpath() {
   fi
 }
 
-# Emit the gh-auth-proxy sidecar Caddyfile (consumed by the --gh block below)
-# to stdout. Deliberately a constant, not a template: every per-run difference
-# is resolved by Caddy itself — {$GH_PROXY_UPSTREAM_*} substituted at
-# config-load, {env.GH_PROXY_*} (the token) per-request — plus the always-
-# present /etc/caddy/policy.caddy import. header_up REPLACES any client-supplied
-# Authorization, so the placeholder GH_TOKEN gh/git send is discarded, never
-# forwarded; the token reaches Caddy only via {env.*} and never touches disk.
-# api.github.com/uploads.github.com take a Bearer token; github.com (git
-# smart-HTTP) takes Basic x-access-token:<token> — see design.md. The single
-# exception is release-asset HEAD probes on github.com, where the header is
-# deleted instead of replaced (see the block itself).
-gen_gh_proxy_caddyfile() {
-  cat <<'EOF'
-{
-	admin off
-	local_certs
-	skip_install_trust
-	log {
-		output stdout
-		format json
-	}
-}
-
-github.com {
-	tls internal
-	log {
-		output stdout
-		format json
-	}
-
-	# Release-asset HEAD probes go out anonymous. GitHub routes a HEAD that
-	# carries *any* Authorization header to a legacy
-	# objects.githubusercontent.com pre-signed URL that then answers 401 to
-	# every method, while an anonymous HEAD gets the working
-	# release-assets.githubusercontent.com CDN — so uv, which probes with HEAD
-	# before GET, cannot install from a release-asset URL (issue #22). The
-	# credential buys nothing on this endpoint: github.com's web
-	# /releases/download/ path does not accept token auth at all, so a private
-	# asset 404s with or without it (the supported route for those is the API
-	# asset endpoint, i.e. `gh release download`). Scoped to method+path so
-	# every request that works today keeps its credential and its route:
-	# authenticated GET is untouched (it already redirects to the working CDN),
-	# as are git smart-HTTP, /archive/ and /raw/, none of which change route
-	# under auth. -Authorization *deletes* rather than replaces, because the
-	# placeholder GH_TOKEN gh/git send would trigger the same legacy routing.
-	@gh_release_asset_head {
-		method HEAD
-		path_regexp ^/[^/]+/[^/]+/releases/download/.+
-	}
-	handle @gh_release_asset_head {
-		reverse_proxy {$GH_PROXY_UPSTREAM_GITHUB} {
-			header_up -Authorization
-		}
-	}
-
-	handle {
-		reverse_proxy {$GH_PROXY_UPSTREAM_GITHUB} {
-			header_up Authorization "{env.GH_PROXY_BASIC}"
-		}
-	}
-}
-
-api.github.com {
-	tls internal
-	log {
-		output stdout
-		format json
-	}
-
-	# Both routes GitHub serves a repo on: /repos/{owner}/{repo} and the
-	# numeric-id alias /repositories/{id} (the form its Link headers use).
-	@gh_proxy_repo_delete {
-		method DELETE
-		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+)/?$
-	}
-	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
-	import /etc/caddy/policy.caddy
-
-	reverse_proxy {$GH_PROXY_UPSTREAM_API} {
-		header_up Authorization "{env.GH_PROXY_BEARER}"
-	}
-}
-
-uploads.github.com {
-	tls internal
-	log {
-		output stdout
-		format json
-	}
-	reverse_proxy {$GH_PROXY_UPSTREAM_UPLOADS} {
-		header_up Authorization "{env.GH_PROXY_BEARER}"
-	}
-}
-EOF
-}
 
 build_workspace_mounts() {
   local ws_suffix ws abs name n i
@@ -874,10 +779,99 @@ start_gh_sidecar() {
       : > "$stage/gh-proxy/policy.caddy" || exit 1
     fi
 
-    # Static config emitted by gen_gh_proxy_caddyfile() (near hostpath above);
-    # everything variable is resolved by Caddy from the sidecar env and the
-    # policy import, not by the shell.
-    gen_gh_proxy_caddyfile >"$stage/gh-proxy/Caddyfile" || exit 1
+    # The sidecar Caddyfile. Deliberately a constant, not a template (the quoted
+    # heredoc delimiter keeps the shell out of it): every per-run difference
+    # is resolved by Caddy itself — {$GH_PROXY_UPSTREAM_*} substituted at
+    # config-load, {env.GH_PROXY_*} (the token) per-request — plus the always-
+    # present /etc/caddy/policy.caddy import. header_up REPLACES any client-supplied
+    # Authorization, so the placeholder GH_TOKEN gh/git send is discarded, never
+    # forwarded; the token reaches Caddy only via {env.*} and never touches disk.
+    # api.github.com/uploads.github.com take a Bearer token; github.com (git
+    # smart-HTTP) takes Basic x-access-token:<token> — see design.md. The single
+    # exception is release-asset HEAD probes on github.com, where the header is
+    # deleted instead of replaced (see the block itself).
+    cat <<'CADDY' >"$stage/gh-proxy/Caddyfile" || exit 1
+{
+	admin off
+	local_certs
+	skip_install_trust
+	log {
+		output stdout
+		format json
+	}
+}
+
+github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+
+	# Release-asset HEAD probes go out anonymous. GitHub routes a HEAD that
+	# carries *any* Authorization header to a legacy
+	# objects.githubusercontent.com pre-signed URL that then answers 401 to
+	# every method, while an anonymous HEAD gets the working
+	# release-assets.githubusercontent.com CDN — so uv, which probes with HEAD
+	# before GET, cannot install from a release-asset URL (issue #22). The
+	# credential buys nothing on this endpoint: github.com's web
+	# /releases/download/ path does not accept token auth at all, so a private
+	# asset 404s with or without it (the supported route for those is the API
+	# asset endpoint, i.e. `gh release download`). Scoped to method+path so
+	# every request that works today keeps its credential and its route:
+	# authenticated GET is untouched (it already redirects to the working CDN),
+	# as are git smart-HTTP, /archive/ and /raw/, none of which change route
+	# under auth. -Authorization *deletes* rather than replaces, because the
+	# placeholder GH_TOKEN gh/git send would trigger the same legacy routing.
+	@gh_release_asset_head {
+		method HEAD
+		path_regexp ^/[^/]+/[^/]+/releases/download/.+
+	}
+	handle @gh_release_asset_head {
+		reverse_proxy {$GH_PROXY_UPSTREAM_GITHUB} {
+			header_up -Authorization
+		}
+	}
+
+	handle {
+		reverse_proxy {$GH_PROXY_UPSTREAM_GITHUB} {
+			header_up Authorization "{env.GH_PROXY_BASIC}"
+		}
+	}
+}
+
+api.github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+
+	# Both routes GitHub serves a repo on: /repos/{owner}/{repo} and the
+	# numeric-id alias /repositories/{id} (the form its Link headers use).
+	@gh_proxy_repo_delete {
+		method DELETE
+		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+)/?$
+	}
+	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	import /etc/caddy/policy.caddy
+
+	reverse_proxy {$GH_PROXY_UPSTREAM_API} {
+		header_up Authorization "{env.GH_PROXY_BEARER}"
+	}
+}
+
+uploads.github.com {
+	tls internal
+	log {
+		output stdout
+		format json
+	}
+	reverse_proxy {$GH_PROXY_UPSTREAM_UPLOADS} {
+		header_up Authorization "{env.GH_PROXY_BEARER}"
+	}
+}
+CADDY
 
     if ! "$RUNTIME" network create "$GH_PROXY_NETWORK" >/dev/null; then
       echo "claude-docker: failed to create network '$GH_PROXY_NETWORK' for the gh-auth-proxy sidecar — aborting (the real GitHub token was never forwarded)" >&2
