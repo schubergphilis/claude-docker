@@ -240,6 +240,8 @@ RUN ARCH=$(dpkg --print-architecture); \
 # and lives under /opt/az with everything else — off PATH, so it adds no
 # `python3` to the image, and outside /root, which is a volume at runtime.
 # `-I` keeps PYTHONPATH and the volume-backed user site-packages out of az.
+# The interpreter's bundled pip is deleted: uv does the installing, and pip's
+# vendored deps (msgpack, setuptools) are scanner findings nothing here uses.
 # The extension has no AZURE_DEVOPS_ORG_URL of its own; the wrapper maps it onto
 # the extension's env override for `az devops configure --defaults organization`
 # (knack's <prefix>_<SECTION>_<OPTION>, hence the double underscore), so that
@@ -252,6 +254,7 @@ RUN . /tmp/az.env && . /tmp/azure-devops.env \
  && curl -fsSL "$AZURE_DEVOPS_URL" -o "$whl" \
  && echo "${AZURE_DEVOPS_SHA256}  ${whl}" | sha256sum -c - \
  && UV_PYTHON_INSTALL_DIR=/opt/az/python uv venv --no-cache --managed-python --python 3.13 /opt/az/venv \
+ && rm -rf /opt/az/python/cpython-*/bin/pip* /opt/az/python/cpython-*/lib/python3*/site-packages/pip* \
  && uv pip install --no-cache --python /opt/az/venv/bin/python \
       "azure-cli-core==${AZ_VERSION}" python-dateutil msrest azure-common \
  && uv pip install --no-cache --no-deps --python /opt/az/venv/bin/python \
