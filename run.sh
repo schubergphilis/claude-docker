@@ -742,12 +742,21 @@ fi
 # path that prefixes a `docker:<flags>` tag when CLAUDE_DOCKER_FLAGS is set.
 # The wrapper is a no-op passthrough when unset so non-claude-docker runs of
 # the same file would behave identically.
+# The host script is exec'd directly when executable so its shebang picks the
+# interpreter, as it does on the host. Never `sh script`: /bin/sh is dash in
+# the image, and a bash statusline dies there with "Bad substitution". A
+# non-executable script falls back to bash, which also runs POSIX sh scripts.
 if [ -f "$CLAUDE_CONFIG_DIR/statusline-command.sh" ]; then
   cat >"$stage/statusline-command.sh" <<'WRAP'
 #!/bin/sh
 # claude-docker wrapper — prepends active opt-in flag tag to host statusline.
+orig=/root/.claude/statusline-command.original.sh
 input=$(cat)
-body=$(printf '%s' "$input" | sh /root/.claude/statusline-command.original.sh)
+if [ -x "$orig" ]; then
+  body=$(printf '%s' "$input" | "$orig")
+else
+  body=$(printf '%s' "$input" | bash "$orig")
+fi
 if [ -n "${CLAUDE_DOCKER_FLAGS:-}" ]; then
   printf '\033[33mdocker:%s\033[0m %s' "$CLAUDE_DOCKER_FLAGS" "$body"
 else
