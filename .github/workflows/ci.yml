@@ -94,9 +94,6 @@ jobs:
         # errors at exec time (see Dockerfile). Nothing else in CI invokes a
         # pinned tool, so without this a pin bump can ship a broken or
         # version-mismatched CLI on green.
-        # The tool set, each tool's version probe, and the rule for reading a
-        # version out of that probe all come from update_pins.py's registry, so
-        # a newly pinned tool is covered without editing this file.
         # This step must live in docker-build: it is the only job whose local
         # daemon holds the image the build step loaded.
         run: bash scripts/verify-pinned-versions.sh
