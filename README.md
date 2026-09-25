@@ -84,7 +84,7 @@ claude-docker ~/repo -- --resume          # any claude flag after --
 
 ### Credential opt-in
 
-**Credentials are off by default.** No AWS / GitHub / GitLab / Terraform Cloud / package-registry config, tokens, or env vars reach the container unless you explicitly opt in:
+**Credentials are off by default.** No AWS / GitHub / GitLab / Terraform Cloud / package-registry / model-endpoint config, tokens, or env vars reach the container unless you explicitly opt in:
 
 | Flag          | Effect                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -94,6 +94,7 @@ claude-docker ~/repo -- --resume          # any claude flag after --
 | `--glab`      | Mount the platform-appropriate `glab-cli` config dir read-only (macOS: `~/Library/Application Support/glab-cli`, Linux: `~/.config/glab-cli`) and forward `GITLAB_TOKEN`. Unmasks in-container `glab auth login` state — without the flag, `/root/.config/glab-cli/` is hidden by a tmpfs overlay.                                                                                                                                                                                                                                                                                    |
 | `--tfe`       | Mount `~/.terraform.d/credentials.tfrc.json` read-only when present and forward `TF_TOKEN_app_terraform_io`. Targets `app.terraform.io` (HCP Terraform) only — self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are not forwarded. Unmasks in-container `terraform login` state — without the flag, `/root/.terraform.d/` is hidden by a tmpfs overlay. See [Terraform Cloud workflow](docs/auth.md#terraform-cloud-workflow).                                                                                                                                    |
 | `--registry`  | Surface host-native private package-registry config so in-container `uv` / `pnpm` / pip installs resolve against your private feed (CodeArtifact, Artifactory, Nexus, …) instead of public npm/PyPI. Read-only mounts of `~/.npmrc` / `uv.toml` / `pip.conf` plus `UV_INDEX_*` / `npm_config_registry` / `PIP_*` env when set. `~/.netrc` is intentionally **not** mounted (too broad). Runtime-only; the build is unaffected. **Whole-file mounts** — see [Private package registries](docs/auth.md#private-package-registries) for the full channel list and the scoping caution.               |
+| `--api`       | Forward `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_CUSTOM_HEADERS` / `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` by name when set, so Claude Code talks to your LLM gateway (LiteLLM, enterprise proxy) instead of the in-container OAuth login. Optional private CA via `CLAUDE_DOCKER_API_CA`. Bedrock/Vertex are not covered yet. See [Custom model endpoint](docs/auth.md#custom-model-endpoint).                                                                                                  |
 
 Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` cannot be combined with each other.
 
@@ -118,7 +119,7 @@ Conversation history persists in the shared `claude-code-home` volume (skipped u
 
 ## Documentation
 
-- [Auth model](docs/auth.md) — AWS SSO, GitHub auth proxy, Terraform Cloud, private registries
+- [Auth model](docs/auth.md) — AWS SSO, GitHub auth proxy, Terraform Cloud, private registries, custom model endpoint
 - [Security](docs/security.md) — threat model, image vulnerability scanning
 - [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests
 - [Workflows](docs/workflows.md) — host config parity, worktrees, split panes, extending the image
