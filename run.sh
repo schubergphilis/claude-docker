@@ -68,6 +68,13 @@ Wrapper flags:
                       ~/.terraform.d/credentials.tfrc.json (:ro) when
                       present and forward TF_TOKEN_app_terraform_io;
                       unmask in-container `terraform login` state.
+  --az                Opt in to Azure DevOps (Services or on-prem Server):
+                      forward AZURE_DEVOPS_EXT_PAT (the PAT) and
+                      AZURE_DEVOPS_ORG_URL (default org, and so the host) when
+                      set; mount ~/.azure/azureProfile.json + clouds.config
+                      (:ro) when present; unmask in-container ~/.azure state.
+                      Never mounts the host's Azure token caches. Covers
+                      az devops / repos / boards / pipelines only.
   --registry          Opt in to private package registries: surface host-
                       native uv/npm/pnpm/pip config so in-container installs
                       resolve against a private feed. Mounts ~/.npmrc,
@@ -144,6 +151,7 @@ WITH_GH=0
 WITH_GH_DIRECT=0
 WITH_GLAB=0
 WITH_TFE=0
+WITH_AZ=0
 WITH_REGISTRY=0
 WITH_API=0
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
@@ -163,6 +171,7 @@ for arg in "$@"; do
     --gh-direct)    WITH_GH_DIRECT=1 ;;
     --glab)         WITH_GLAB=1 ;;
     --tfe)          WITH_TFE=1 ;;
+    --az)           WITH_AZ=1 ;;
     --registry)     WITH_REGISTRY=1 ;;
     --api)          WITH_API=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
@@ -420,6 +429,15 @@ if [ "$WITH_TFE" = "1" ]; then
     && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.terraform.d/credentials.tfrc.json"):/root/.terraform.d/credentials.tfrc.json:ro")
 fi
 
+# Azure DevOps: only the two non-secret az config files. msal_token_cache.json /
+# accessTokens.json (the AAD token caches) are never mounted — same line --aws
+# draws around ~/.aws/credentials. Auth is the PAT in AZURE_DEVOPS_EXT_PAT; the
+# host is whatever AZURE_DEVOPS_ORG_URL names (Services or an on-prem Server).
+if [ "$WITH_AZ" = "1" ]; then
+  [ -f "$HOME/.azure/azureProfile.json" ] && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.azure/azureProfile.json"):/root/.azure/azureProfile.json:ro")
+  [ -f "$HOME/.azure/clouds.config" ]     && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.azure/clouds.config"):/root/.azure/clouds.config:ro")
+fi
+
 # Private package registries: surface the host's native uv/npm/pnpm/pip registry
 # config read-only so in-container installs resolve against a private feed
 # (CodeArtifact / Artifactory / Nexus / …). Each mount is a silent no-op when the
@@ -468,6 +486,7 @@ ENV_VARS=()
 [ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
 [ "$WITH_TFE" = "1" ]  && ENV_VARS+=(TF_TOKEN_app_terraform_io)
+[ "$WITH_AZ" = "1" ]   && ENV_VARS+=(AZURE_DEVOPS_EXT_PAT AZURE_DEVOPS_ORG_URL)
 # --registry: forward the native registry-config env vars uv/npm/pnpm/pip read.
 # Static, fixed-name vars here; uv's dynamic per-index credential vars (whose
 # names embed a user-chosen index name) are handled by the scan below.
@@ -573,6 +592,7 @@ DOCKER_FLAGS=()
 [ "$WITH_AWS" = "1" ]      && DOCKER_FLAGS+=("aws")
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
 [ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
+[ "$WITH_AZ" = "1" ]       && DOCKER_FLAGS+=("az")
 [ "$WITH_REGISTRY" = "1" ] && DOCKER_FLAGS+=("registry")
 [ "$WITH_API" = "1" ]      && DOCKER_FLAGS+=("api")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
@@ -913,6 +933,7 @@ if [ "$EPHEMERAL" = "0" ]; then
   [ "$gh_config_unmask" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "$WITH_GLAB" = "0" ] && MOUNT_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   [ "$WITH_TFE" = "0" ]  && MOUNT_ARGS+=("--tmpfs" "/root/.terraform.d")
+  [ "$WITH_AZ" = "0" ]   && MOUNT_ARGS+=("--tmpfs" "/root/.azure")
   # AWS has no in-container `login` step to preserve, so unlike gh it needs no
   # unmask state — the mask is on in both directions, only its scope changes.
   # Without --aws the whole directory is masked. With it, just the credential

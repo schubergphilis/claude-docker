@@ -224,6 +224,46 @@ RUN ARCH=$(dpkg --print-architecture); \
  && rm /tmp/go.tar.gz \
  && /usr/local/go/bin/go version
 
+# Azure DevOps CLI (`az devops` / `az repos` / `az boards` / `az pipelines`):
+# azure-cli-core plus the azure-devops extension, NOT the full azure-cli
+# distribution (~500 MB of per-service command modules this image has no use
+# for; this layer is ~145 MB, most of it the Python runtime). Core alone ships
+# no `az` entry point and no `az extension` command group, so both are done
+# here by hand: the wrapper below is a minimal stand-in for azure-cli's own
+# entry point, and the extension wheel is installed straight into the extension
+# dir that `az extension add` would write — but from a pinned URL + sha256
+# rather than the unpinned extension index. python-dateutil / msrest /
+# azure-common are what the extension imports that azure-cli (not core)
+# normally pulls in. Version-only pin for azure-cli-core, like the npm tools:
+# uv resolves it and its transitive deps from PyPI at build time.
+# Python is uv-managed (checksum-verified by uv, version fixed by the uv pin)
+# and lives under /opt/az with everything else — off PATH, so it adds no
+# `python3` to the image, and outside /root, which is a volume at runtime.
+# `-I` keeps PYTHONPATH and the volume-backed user site-packages out of az.
+# The extension has no AZURE_DEVOPS_ORG_URL of its own; the wrapper maps it onto
+# the extension's env override for `az devops configure --defaults organization`
+# (knack's <prefix>_<SECTION>_<OPTION>, hence the double underscore), so that
+# one variable names the org — and so the host: Services or an on-prem Server.
+# Placed before the npm layer for the same reason as Go: az moves monthly,
+# claude-code near-daily, so a claude-code bump does not rebuild this.
+COPY pins/az.env pins/azure-devops.env /tmp/
+RUN . /tmp/az.env && . /tmp/azure-devops.env \
+ && whl="/tmp/${AZURE_DEVOPS_URL##*/}" \
+ && curl -fsSL "$AZURE_DEVOPS_URL" -o "$whl" \
+ && echo "${AZURE_DEVOPS_SHA256}  ${whl}" | sha256sum -c - \
+ && UV_PYTHON_INSTALL_DIR=/opt/az/python uv venv --no-cache --managed-python --python 3.13 /opt/az/venv \
+ && uv pip install --no-cache --python /opt/az/venv/bin/python \
+      "azure-cli-core==${AZ_VERSION}" python-dateutil msrest azure-common \
+ && uv pip install --no-cache --no-deps --python /opt/az/venv/bin/python \
+      --target /opt/az/cliextensions/azure-devops "$whl" \
+ && printf '%s\n' '#!/bin/sh' \
+      '[ -z "${AZURE_DEVOPS_ORG_URL:-}" ] || export AZURE_DEVOPS_EXT__DEFAULTS_ORGANIZATION="${AZURE_DEVOPS_EXT__DEFAULTS_ORGANIZATION:-$AZURE_DEVOPS_ORG_URL}"' \
+      'AZURE_EXTENSION_DIR=/opt/az/cliextensions exec /opt/az/venv/bin/python -I -c "import sys; from azure.cli.core import get_default_cli; sys.exit(get_default_cli().invoke(sys.argv[1:]))" "$@"' \
+      > /usr/local/bin/az \
+ && chmod 0755 /usr/local/bin/az \
+ && AZURE_CONFIG_DIR=/tmp/azcfg az devops -h > /dev/null \
+ && rm -rf "$whl" /tmp/azcfg /tmp/az.env /tmp/azure-devops.env
+
 # npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
 # run `npm audit signatures <pkg>@<ver>` when bumping.
 # --ignore-scripts blocks lifecycle hooks for every package + transitive dep
