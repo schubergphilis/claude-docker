@@ -10,9 +10,9 @@ name: Pins updater
   workflow_dispatch:
     inputs:
       soak:
-        description: Soak window in days (update_pins.py --soak)
+        description: Soak window in days for every tool (update_pins.py --soak); leave empty for each tool's own window
         required: false
-        default: "7"
+        default: ""
       block-major-bumps:
         description: Stay within each tool's current major version
         required: false
@@ -57,12 +57,17 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Dispatch inputs go through env, never string-interpolated into the
           # script body (that would be a template-injection sink). Both are
-          # empty on the schedule trigger, hence the defaults.
-          SOAK: ${{ inputs.soak || '7' }}
+          # empty on the schedule trigger. An empty SOAK means no --soak, so
+          # each tool keeps its own window (claude-code's is shorter than the
+          # rest) — defaulting it to a number here would override that.
+          SOAK: ${{ inputs.soak }}
           BLOCK_MAJOR: ${{ inputs.block-major-bumps || 'false' }}
         run: |
           set -euo pipefail
-          args=(--soak "$SOAK")
+          args=()
+          if [ -n "$SOAK" ]; then
+            args+=(--soak "$SOAK")
+          fi
           if [ "$BLOCK_MAJOR" = "true" ]; then
             args+=(--block-major-bumps)
           fi
@@ -75,7 +80,8 @@ jobs:
           # A non-zero exit from update_pins.py fails the job (pipefail); it
           # leaves pins/ untouched on any resolve/download failure.
           python3 update_pins.py "${args[@]}" 2>&1 | tee "$RUNNER_TEMP/report.txt"
-          echo "soak=$SOAK" >> "$GITHUB_OUTPUT"
+          # Only reached once argparse accepted the args, so --soak is an int.
+          echo "cmd=python3 update_pins.py${args[*]:+ ${args[*]}}" >> "$GITHUB_OUTPUT"
 
       - name: Detect pin changes
         id: diff
@@ -106,7 +112,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PINS_UPDATER_TOKEN || secrets.GITHUB_TOKEN }}
           # Resolve the repo explicitly rather than from the git remote.
           GH_REPO: ${{ github.repository }}
-          SOAK: ${{ steps.refresh.outputs.soak }}
+          CMD: ${{ steps.refresh.outputs.cmd }}
         run: |
           set -euo pipefail
 
@@ -115,7 +121,7 @@ jobs:
           git checkout -B "$BRANCH"
           git add pins
           git commit -m "build(deps): refresh tool pins" -m \
-            "Automated refresh by .github/workflows/pins-updater.yml (python3 update_pins.py --soak ${SOAK}). Full report in the PR body."
+            "Automated refresh by .github/workflows/pins-updater.yml (${CMD}). Full report in the PR body."
 
           # Force-push: the branch is regenerated from main every run, so its
           # previous head is an obsolete refresh with no history worth keeping.
@@ -129,7 +135,7 @@ jobs:
           workflow_url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/blob/main/.github/workflows/pins-updater.yml"
 
           {
-            echo "Automated pin refresh — \`python3 update_pins.py --soak ${SOAK}\`, run by [\`pins-updater.yml\`](${workflow_url})."
+            echo "Automated pin refresh — \`${CMD}\`, run by [\`pins-updater.yml\`](${workflow_url})."
             echo
             echo "Review the diff and let CI build the image before merging. The \`⚠ needs your eyes\` block below covers the manual pins (nodejs, task, go, ubuntu base) that the script reports but never rewrites — act on those in a separate commit."
             echo

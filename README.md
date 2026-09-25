@@ -288,13 +288,13 @@ The pins live in version-controlled fragments under [`pins/`](pins/), one `pins/
 Refresh them with [`update_pins.py`](update_pins.py) (a single stdlib-only Python file, run via `uv`):
 
 ```bash
-uv run update_pins.py                      # refresh all tools (7-day soak)
-uv run update_pins.py --soak 14            # wider soak window
+uv run update_pins.py                      # refresh all tools (per-tool soak)
+uv run update_pins.py --soak 14            # one 14-day soak window for every tool
 uv run update_pins.py --block-major-bumps  # stay within each tool's current major
 uv run update_pins.py --pin uv=0.12.3      # pin one tool to a specific version
 ```
 
-For each tool it selects the newest stable version at least 7 days old, downloads the `amd64` and `arm64` artifacts, computes their sha256s, and rewrites `pins/<tool>.env` — the soak window gives a release time to be vetted (and a bad one pulled) before it enters the image. The script prints a report — each `old → new` bump with its age, a `⬆ MAJOR` marker on major-version jumps, `held` lines for versions still inside the soak window, and `⚠` reminders for the manual pins — then review the diff, build to test, and commit. By default a major-version bump is taken once it has soaked; `--block-major-bumps` keeps a run within each tool's current major. Set `GITHUB_TOKEN` (or `GH_TOKEN`) to avoid GitHub's unauthenticated rate limit.
+For each tool it selects the newest stable version older than that tool's soak window, downloads the `amd64` and `arm64` artifacts, computes their sha256s, and rewrites `pins/<tool>.env`. The soak window gives a release time to be vetted (and a bad one pulled) before it enters the image. The window is 7 days for every tool except `claude-code`, which uses 1 day. Claude Code ships almost daily and most of its users update within hours, so a bad release is found and pulled within a day, and a 7-day pin only leaves the image behind. `--soak` sets one window for every tool in that run, `claude-code` included. The script prints a report — each `old → new` bump with its age, a `⬆ MAJOR` marker on major-version jumps, `held` lines for versions still inside the soak window, and `⚠` reminders for the manual pins — then review the diff, build to test, and commit. By default a major-version bump is taken once it has soaked; `--block-major-bumps` keeps a run within each tool's current major. Set `GITHUB_TOKEN` (or `GH_TOKEN`) to avoid GitHub's unauthenticated rate limit.
 
 The script also has two listing modes that exist for CI rather than for you: `--list-tools` prints one row per pinned tool with the command that asks it its version and the rule for reading a version out of the reply, and `--list-npm-tools` does the same for the npm subset. CI's `Docker build` job runs every `--list-tools` probe against the image it just built and fails if a tool reports anything other than its pin — a successful install says nothing about whether the executable actually runs, and until this existed only `claude-code` was checked. Because the tool list and the probes come from the script, adding a tool to `pins/` extends that coverage without editing a workflow file.
 

@@ -39,8 +39,8 @@ ARG TASK_VERSION=3.53.1
 # pins/<tool>.env — NOT an ARG. Each install RUN below COPYs and sources its
 # fragment, so `docker build .` is reproducible from the committed lockfile with
 # no --build-arg. Refresh them with uv run update_pins.py (see README): it selects
-# the newest stable version already past a 7-day soak window and recomputes the
-# hashes. The soak policy that used to be hand-applied here now lives in that
+# the newest stable version already past its soak window (7 days; 1 day for
+# claude-code) and recomputes the hashes. The soak policy that used to be hand-applied here now lives in that
 # script. To override a single tool: uv run update_pins.py --pin <tool>=<version>.
 
 # Make apt runnable under --cap-drop ALL at runtime. Two pieces:

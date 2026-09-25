@@ -512,6 +512,63 @@ class TestAudit(unittest.TestCase):
         self.assertNotEqual(rc, 0)
         self.assertIn("no pinned version", err_buf.getvalue())
 
+    def _audit_with_claude_code_age(self, age_days, soak_days):
+        """claude-code pinned `age_days` old, every other npm tool 20d old."""
+        def fake_candidates(kind, ref):
+            name = next(t.name for t in up.TOOLS if t.ref == ref and t.kind == "npm")
+            age = age_days if name == "claude-code" else 20
+            return self._build_cand(up.read_current(name), age)
+
+        with unittest.mock.patch.object(up, "candidates", side_effect=fake_candidates), \
+             unittest.mock.patch.object(up, "now_utc", return_value=self.NOW), \
+             contextlib.redirect_stdout(io.StringIO()), \
+             contextlib.redirect_stderr(io.StringIO()):
+            return up.run_audit(soak_days)
+
+    def test_default_uses_claude_code_one_day_window(self):
+        """Without --soak, a 2-day-old claude-code pin passes the gate."""
+        self.assertEqual(self._audit_with_claude_code_age(2, None), 0)
+
+    def test_explicit_soak_overrides_claude_code_window(self):
+        """--soak 7 applies to claude-code too, so a 2-day-old pin fails."""
+        self.assertNotEqual(self._audit_with_claude_code_age(2, 7), 0)
+
+
+class TestPerToolSoak(unittest.TestCase):
+    """Per-tool soak defaults and the --soak run-wide override."""
+
+    def _tool(self, name):
+        return next(t for t in up.TOOLS if t.name == name)
+
+    def test_claude_code_soaks_one_day(self):
+        self.assertEqual(self._tool("claude-code").soak_days, 1)
+
+    def test_other_tools_keep_default(self):
+        for t in up.TOOLS:
+            if t.name != "claude-code":
+                self.assertEqual(t.soak_days, up.DEFAULT_SOAK_DAYS, t.name)
+
+    def test_soak_days_for_without_override(self):
+        self.assertEqual(up.soak_days_for(self._tool("claude-code"), None), 1)
+        self.assertEqual(up.soak_days_for(self._tool("uv"), None), up.DEFAULT_SOAK_DAYS)
+
+    def test_soak_days_for_with_override(self):
+        self.assertEqual(up.soak_days_for(self._tool("claude-code"), 14), 14)
+        self.assertEqual(up.soak_days_for(self._tool("uv"), 0), 0)
+
+    def test_soak_flag_defaults_to_none(self):
+        args, _ = up.parse_args([])
+        self.assertIsNone(args.soak)
+
+    def test_claude_code_30h_old_release_selected(self):
+        """Spec scenario: a 30-hour-old claude-code release clears its window."""
+        now = datetime(2026, 6, 1, tzinfo=timezone.utc)
+        cand = [("2.1.10", (now - timedelta(days=5)).isoformat()),
+                ("2.1.11", (now - timedelta(hours=30)).isoformat())]
+        soak = timedelta(days=up.soak_days_for(self._tool("claude-code"), None))
+        r = up.select_version(cand, "2.1.10", soak, now)
+        self.assertEqual(r.version, "2.1.11")
+
 
 class TestBaseImageCodename(unittest.TestCase):
     """base_image_codename() is pure — it parses the FROM tag, no I/O."""
