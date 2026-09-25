@@ -1,11 +1,6 @@
 ## Why
 
-[`README.md`](../../../README.md) is the project's front door and a ~35-minute read:
-458 lines, 8,537 words, 62 KB. The line count understates it, because the prose is
-written as very long single lines — 136 characters on average, 51 lines over 400, and a
-longest line of 3,246 characters at `README.md:276`. Two sections are 42% of the whole
-document: `## Auth model` (2,172 words) and `## Threat model` (1,387 words across 13
-lines, or 107 words per line).
+[`README.md`](../../../README.md) is 458 lines / ~35 min; `## Auth model` and `## Threat model` are 42% of it.
 
 A reader arriving to find out how to start a container has to scroll past an AWS SSO
 walkthrough, a TLS-interception sidecar design, a pin-refresh runbook and a macOS

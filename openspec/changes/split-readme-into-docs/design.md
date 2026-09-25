@@ -39,24 +39,6 @@ Each lands at a readable page length. The alternative groupings considered and r
 though the threat model links to it, because it describes a thing the container does to
 your files on every run, not a risk you accept.
 
-## Relocation, not rewriting
-
-The moved text is byte-identical apart from link targets and one word. That constraint
-is the point: a reviewer can run `git diff --find-copies-harder` and confirm nothing was
-smuggled in. The moment prose is reworded in the same commit, the reviewer has to read
-all 7,000 words to know that, and the four spec deltas — which are the part that can
-actually be wrong — get read last and least carefully.
-
-Two defects ride along unfixed as a result, both in `docs/security.md`:
-
-- The `**Runtime code-fetch:**` bullet, 3,246 characters. It opens on `npx`/`uvx`/`tfenv`
-  and then spends ~350 words on `pnpm dlx` provisioning runtimes under four aliases.
-  That second half is a subsection wearing a dash.
-- The hardening paragraph, 2,184 characters, listing what is applied and what is not as
-  one run-on sentence sequence. It wants a two-column table.
-
-Both are recorded as follow-up. Neither is made worse by moving.
-
 ## Location-independent spec wording
 
 Nine scenarios across four capabilities currently assert that a reader "inspects
@@ -93,36 +75,3 @@ Incidentally fixed along the way: every one of these references writes
 filename, not a repo-relative path. Nothing has ever resolved it. Instances outside the
 four reworded scenarios are left alone rather than swept, so this change's spec diff
 stays about this change.
-
-## The link check has to be able to fail
-
-`.github/workflows/ci.yml` runs lychee `--offline --include-fragments` over `**/*.md`
-with `continue-on-error: true`. The `docs/` glob is already covered, so no config change
-is needed — but the failure mode changes character. Today every link is intra-README:
-break one and the anchor is a few hundred lines from its target, and you probably
-noticed while editing. After the split, 23 links cross a file boundary, and the way you
-break one is by renaming a heading in a file you were not looking at.
-
-An advisory check that nobody reads is a check that does not exist. Dropping
-`continue-on-error` from that step is a one-line change with a real gate behind it: it
-was verified clean against `main` before the split, so the first red run is a real
-regression rather than inherited debt.
-
-Markdownlint stays advisory. There is no markdownlint config in the repo, so it runs at
-stock defaults, and MD013 (80-character lines) fires on essentially every prose line
-here. Making it blocking would mean either reflowing the entire corpus or adding a
-config to disable the rules it violates — a separate decision, and not this change's.
-
-## What breaks for a reader, and what does not
-
-Every moved heading keeps its exact text, so every anchor slug survives; only the file
-in front of the `#` changes. Concretely:
-
-- A link to `README.md#threat-model` (two in this repo, both fixed here; unknown many
-  outside it) breaks.
-- A GitHub search, a bookmark to the heading text, or a reader following `##
-  Documentation` finds it.
-
-Preserving the old anchors would mean keeping eleven stub headings in README, which
-gives a reader a table of contents where every entry is a redirect. The index is
-honest about there being four places to look.
