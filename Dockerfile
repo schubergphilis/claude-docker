@@ -317,6 +317,19 @@ set -s extended-keys always
 set -as terminal-features "*:extkeys"
 EOF
 
+# Ghostty sets TERM=xterm-ghostty, which run.sh forwards. ncurses-term ships
+# Ghostty's entry only as `ghostty` (Debian's build has no xterm-ghostty
+# alias), so tput, less and tmux would fail to look up the terminal. Link
+# the name to the packaged entry rather than vendoring Ghostty's own
+# terminfo: the bytes stay those of the signed Ubuntu package. Skipped if a
+# later ncurses-term ships the name itself; infocmp fails the build if the
+# lookup still doesn't resolve. Late layer so it doesn't invalidate the
+# downloads above.
+RUN if [ ! -e /usr/share/terminfo/x/xterm-ghostty ]; then \
+      ln -s ../g/ghostty /usr/share/terminfo/x/xterm-ghostty; \
+    fi \
+ && infocmp xterm-ghostty >/dev/null
+
 # Go environment. Spelled with a literal /root rather than ${HOME}: Docker does
 # not define HOME during the build, so "${HOME}/go" would expand to "/go". /root
 # is correct for both paths through the entrypoint — the legacy root fallback,

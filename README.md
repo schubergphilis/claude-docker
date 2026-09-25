@@ -131,7 +131,7 @@ On every run, these items are dereferenced (symlinks resolved) and bind-mounted 
 
 The mounts are read-only. For `themes/` that means you can select a custom theme in the container, but saving one from the `/theme` editor fails with "theme save failed": edit themes on the host and they apply on the next start.
 
-`TERM` and `COLORTERM` are forwarded from the host terminal, so Claude Code renders in truecolor when the host does. Without `COLORTERM` it drops to 256 colours and custom theme colours come out rounded.
+`TERM` and `COLORTERM` are forwarded from the host terminal, so Claude Code renders in truecolor when the host does. Without `COLORTERM` it drops to 256 colours and custom theme colours come out rounded. Ghostty's `TERM=xterm-ghostty` resolves to the `ghostty` terminfo entry from Ubuntu's `ncurses-term`, so `tput`, `less` and `--tmux` recognise the terminal.
 
 For `settings.json`, maintain a dedicated `~/.claude/settings.docker.json` (any valid Claude `settings.json` schema) — when present it's copied to `/root/.claude/settings.json` at container start. A copy rather than a bind mount, because Claude Code saves settings by renaming a tmp file over `settings.json` and `rename()` over a mountpoint fails with `EBUSY` — so in-session settings changes (effort, model, theme) actually save; they last for that container run, are re-seeded from the host file on the next start, and are never written back to the host. Keeping it separate from your host `settings.json` avoids dragging macOS-only keys (`sandbox`, `env.SSL_CERT_FILE`, `enabledPlugins`) or host-filesystem `hooks` into the container. See [`examples/settings.docker.json`](examples/settings.docker.json) for a starting point.
 
