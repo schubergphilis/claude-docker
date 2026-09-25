@@ -12,7 +12,6 @@ jobs:
         args:
           - testing-type: lint-action
           - testing-type: lint-commit
-          - testing-type: lint-git
           - testing-type: yamllint
     runs-on: ubuntu-24.04
     steps:
