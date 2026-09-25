@@ -477,11 +477,37 @@ ENV_VARS=()
 # --api: Claude Code endpoint vars (code.claude.com/docs/en/env-vars). Bedrock/
 # Vertex/Foundry (CLAUDE_CODE_USE_*) are deliberately out of scope for now.
 [ "$WITH_API" = "1" ] && ENV_VARS+=(ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL)
+# A credential var whose value is an op:// reference is resolved on the host
+# with the 1Password CLI before launch, so a token can live in a vault rather
+# than a shell profile. Host-side only: op and its session never enter the
+# container. The resolved value is exported and still forwarded by bare name,
+# so it never reaches argv. An op:// value is an explicit request, so failure
+# exits rather than forwarding the literal reference. Messages name only the
+# var: op's stderr is dropped because it echoes the reference path.
+resolve_op_ref() {
+  case "${!1:-}" in
+    op://*)
+      command -v op >/dev/null 2>&1 \
+        || { echo "claude-docker: $1 is an op:// reference but the 1Password CLI (op) is not on PATH" >&2; exit 1; }
+      _resolved=$(op read "${!1}" 2>/dev/null) \
+        || { echo "claude-docker: op read failed for $1 (run 'op read \"\$$1\"' on the host to see why)" >&2; exit 1; }
+      export "$1=$_resolved"
+      ;;
+  esac
+}
 # Guarded: bash 3.2 under `set -u` errors on empty-array expansion.
 if [ "${#ENV_VARS[@]}" -gt 0 ]; then
   for v in "${ENV_VARS[@]}"; do
+    resolve_op_ref "$v"
     [ -n "${!v:-}" ] && ENV_ARGS+=("-e" "$v")
   done
+fi
+# --gh never forwards GH_TOKEN/GITHUB_TOKEN, but the sidecar reads them below;
+# resolve here so an op:// value reaches it resolved (--gh-direct already did
+# above via ENV_VARS).
+if [ "$WITH_GH" = "1" ]; then
+  resolve_op_ref GH_TOKEN
+  resolve_op_ref GITHUB_TOKEN
 fi
 # uv's per-index credentials are UV_INDEX_<NAME>_USERNAME / _PASSWORD, where
 # <NAME> is a user-chosen index name — a fixed list can't enumerate them. Scan
@@ -492,6 +518,7 @@ if [ "$WITH_REGISTRY" = "1" ]; then
   while IFS= read -r _name; do
     case "$_name" in
       UV_INDEX_*_USERNAME|UV_INDEX_*_PASSWORD)
+        resolve_op_ref "$_name"
         [ -n "${!_name:-}" ] && ENV_ARGS+=("-e" "$_name") ;;
     esac
   done < <(compgen -e)
