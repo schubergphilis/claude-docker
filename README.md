@@ -98,6 +98,14 @@ claude-docker ~/repo -- --resume          # any claude flag after --
 
 Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` cannot be combined with each other.
 
+**1Password references.** Any env var an opt-in forwards (and `GH_TOKEN` / `GITHUB_TOKEN` under `--gh`) may hold an `op://` [secret reference](https://developer.1password.com/docs/cli/secret-references/) instead of a plaintext token, so it can live in your vault rather than your shell profile:
+
+```bash
+GITLAB_TOKEN="op://Private/GitLab/token" claude-docker --glab ~/repo
+```
+
+The wrapper runs `op read` on the **host** before launch and forwards the resolved value by name; `op` and its session never enter the container. If `op` is missing or the read fails, it exits 1 before starting anything (the error names the variable only — run `op read` yourself to see why). `op read` may wait on a 1Password desktop unlock prompt; for unattended or CI runs, export `OP_SERVICE_ACCOUNT_TOKEN` on the host instead.
+
 ### Session flags
 
 | Flag          | Effect                                                                                                                      |
