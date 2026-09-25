@@ -77,6 +77,7 @@ class Tool(NamedTuple):
     """One automated pin. `ref` meaning is kind-specific:
       npm    -> npm package name        github -> owner/repo (releases)
       gitlab -> owner/repo (releases)   awscli -> special-cased (tag date + CDN)
+      pypi   -> PyPI project name       azext  -> owner/repo (releases; version from the .whl asset)
 
     `probe` is the argv asking the installed tool its version; `version_re`
     pulls the version out of that argv's stdout. Both live here rather than in
@@ -100,6 +101,7 @@ def soak_days_for(tool: Tool, override: int | None) -> int:
 
 # `version_re` is read by two engines — Python `re` here and bash `[[ =~ ]]` in
 # CI — so it stays inside the subset they agree on: literals, `^`, `$`, `[^ ]+`,
+# `[0-9.]+` (for multi-line output, where `[^ ]` would run on past the newline), ` +`,
 # one capture group. No tool reports its version the same way as another, hence
 # a rule per tool rather than one shared template.
 TOOLS = [
@@ -122,6 +124,13 @@ TOOLS = [
          "tfenv --version", r"^tfenv ([^ ]+)$"),
     Tool("awscli", "awscli", "aws/aws-cli",
          "aws --version", r"^aws-cli/([^ ]+)"),
+    # az is azure-cli-core plus the azure-devops extension, NOT the full
+    # azure-cli distribution (see the Dockerfile). Two pins because they are two
+    # upstream release streams; both answer on the one `az --version` report.
+    Tool("az", "pypi", "azure-cli-core",
+         "az --version", r"^azure-cli +([0-9.]+)"),
+    Tool("azure-devops", "azext", "Azure/azure-devops-cli-extension",
+         "az --version", r"azure-devops +([0-9.]+)"),
 ]
 
 
@@ -293,6 +302,26 @@ def candidates(kind: str, ref: str):
             (r["tag_name"].lstrip("v"), r["released_at"])
             for r in rel
             if not r.get("upcoming_release")
+        ]
+    if kind == "pypi":
+        # One release = one or more files; its date is the first upload, and a
+        # release with any yanked file is dropped (PyPI's analogue of unpublish).
+        doc = get_json(f"https://pypi.org/pypi/{ref}/json")
+        return [
+            (v, files[0]["upload_time_iso_8601"])
+            for v, files in doc.get("releases", {}).items()
+            if files and not any(f.get("yanked") for f in files)
+        ]
+    if kind == "azext":
+        # Release tags are build numbers (20260902.1); the extension's own
+        # version is only in the wheel's filename, so read it from the asset.
+        rel = get_json(f"https://api.github.com/repos/{ref}/releases?per_page=100", gh_headers())
+        return [
+            (m.group(1), r["published_at"])
+            for r in rel
+            if not r["draft"] and not r["prerelease"]
+            for a in r.get("assets", [])
+            if (m := re.match(r"^azure_devops-(\d+\.\d+\.\d+)-py", a["name"]))
         ]
     raise ValueError(f"unknown kind: {kind}")
 
@@ -470,6 +499,16 @@ def fragment_lines(name: str, v: str) -> list[str]:
             "X86_64": f"{base}/awscli-exe-linux-x86_64-{v}.zip",
             "AARCH64": f"{base}/awscli-exe-linux-aarch64-{v}.zip",
         })
+    if name == "az":
+        # PyPI-backed, version-only like the npm tools: uv resolves it from PyPI
+        # at build time (see the Dockerfile's az block for what that trusts).
+        return [f"AZ_VERSION={v}"]
+    if name == "azure-devops":
+        # Pure-Python wheel, arch-independent: one URL + sha. The CDN path is the
+        # one `az extension add` itself downloads from (the extension index).
+        url = f"https://azcliprod.blob.core.windows.net/cli-extensions/azure_devops-{v}-py2.py3-none-any.whl"
+        return [f"AZURE_DEVOPS_VERSION={v}", f"AZURE_DEVOPS_URL={url}",
+                f"AZURE_DEVOPS_SHA256={sha256_of_download(url)}"]
     if name == "tfenv":
         url = f"https://github.com/tfutils/tfenv/archive/refs/tags/v{v}.tar.gz"
         return [f"TFENV_VERSION={v}", f"TFENV_URL={url}",

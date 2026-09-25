@@ -29,7 +29,7 @@ Let users discover every `claude-docker` wrapper flag directly from the terminal
 
 The help output SHALL include a one-line description for each of the following, grouped so wrapper flags are visually distinct from the `--` passthrough contract:
 
-- Wrapper flags: `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--iterm`, `--tmux`, `--claude-dir`, `-h`/`--help`.
+- Wrapper flags: `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`/`--help`.
 - The `--` separator and its passthrough semantics for `claude` flags.
 - Positional workspace arguments and the default-to-`$PWD` behaviour.
 - The `CLAUDE_DOCKER_TMUX` environment variable and its accepted values (`1`, `cc`).
@@ -39,7 +39,7 @@ The help output SHALL include a one-line description for each of the following, 
 #### Scenario: All wrapper flags documented
 
 - **WHEN** user runs `claude-docker --help`
-- **THEN** the output contains each of `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--iterm`, `--tmux`, `--claude-dir`, `-h`, `--help`, `--`, `CLAUDE_DOCKER_TMUX`, `CLAUDE_DOCKER_CONFIG_DIR`, and `settings.docker.json`
+- **THEN** the output contains each of `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`, `--help`, `--`, `CLAUDE_DOCKER_TMUX`, `CLAUDE_DOCKER_CONFIG_DIR`, and `settings.docker.json`
 
 #### Scenario: Each wrapper flag has an explanation
 
@@ -73,4 +73,3 @@ When help is printed, `run.sh` SHALL NOT default an empty workspace list to `$PW
 
 - **WHEN** user runs `claude-docker --help` on a host with no `docker` binary on PATH
 - **THEN** the command still succeeds with exit 0
-

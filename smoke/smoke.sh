@@ -8,7 +8,7 @@
 # Parameters (flags or env vars):
 #   --uid=N         HOST_UID to pass into the container (default: $(id -u))
 #   --gid=N         HOST_GID to pass into the container (default: $(id -g))
-#   --optins=CSV    comma-separated credential opt-ins: aws,glab,tfe (default: "")
+#   --optins=CSV    comma-separated credential opt-ins: aws,glab,tfe,az (default: "")
 #   --volstate=S    cold|warm — cold=fresh volume, warm=run twice reusing a volume
 #   --ro=0|1        1 = mount workspace :ro (robustness cell)
 #   --ephemeral=0|1 1 = skip named volumes (--ephemeral mode)
@@ -207,11 +207,21 @@ setup_fake_tfe() {
   ENV_ARGS+=("-e" "TF_TOKEN_app_terraform_io=fake-tfe-token")
 }
 
+setup_fake_az() {
+  mkdir -p "${CREDS_HOST}/azure"
+  printf '{"installationId": "SMOKE-SENTINEL-AZ", "subscriptions": []}\n' > "${CREDS_HOST}/azure/azureProfile.json"
+  MOUNT_ARGS+=(
+    "-v" "${CREDS_HOST}/azure/azureProfile.json:/root/.azure/azureProfile.json:ro"
+  )
+  ENV_ARGS+=("-e" "AZURE_DEVOPS_EXT_PAT=fake-azdo-pat")
+}
+
 # Parse OPTINS and apply credential mounts; for non-granted opt-ins add tmpfs
 # masks (mirrors run.sh's EPHEMERAL=0 block).
 WITH_AWS=0
 WITH_GLAB=0
 WITH_TFE=0
+WITH_AZ=0
 
 if [ -n "${OPTINS}" ]; then
   old_ifs="$IFS"
@@ -222,6 +232,7 @@ if [ -n "${OPTINS}" ]; then
       aws)  WITH_AWS=1  ;;
       glab) WITH_GLAB=1 ;;
       tfe)  WITH_TFE=1  ;;
+      az)   WITH_AZ=1   ;;
       *)    die "unknown opt-in: '$optin'" ;;
     esac
   done
@@ -231,6 +242,7 @@ fi
 [ "${WITH_AWS}"  = "1" ] && setup_fake_aws
 [ "${WITH_GLAB}" = "1" ] && setup_fake_glab
 [ "${WITH_TFE}"  = "1" ] && setup_fake_tfe
+[ "${WITH_AZ}"   = "1" ] && setup_fake_az
 
 # ---------------------------------------------------------------------------
 # Volume / ephemeral handling
@@ -259,6 +271,7 @@ if [ "${EPHEMERAL}" = "0" ]; then
   VOLUME_ARGS+=("--tmpfs" "/root/.config/gh")
   [ "${WITH_GLAB}" = "0" ] && VOLUME_ARGS+=("--tmpfs" "/root/.config/glab-cli")
   [ "${WITH_TFE}"  = "0" ] && VOLUME_ARGS+=("--tmpfs" "/root/.terraform.d")
+  [ "${WITH_AZ}"   = "0" ] && VOLUME_ARGS+=("--tmpfs" "/root/.azure")
   # AWS is masked in both directions, only the scope changes (see run.sh).
   # tests/test_masks.py asserts this mirror stays in step with run.sh — the
   # mirror is why a mask missing from run.sh cannot fail this suite on its own.

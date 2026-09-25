@@ -39,17 +39,19 @@ EXPECTED_MASKS = {
     "/root/.config/gh": "gh_config_unmask",
     "/root/.config/glab-cli": "WITH_GLAB",
     "/root/.terraform.d": "WITH_TFE",
+    "/root/.azure": "WITH_AZ",
     "/root/.aws": "WITH_AWS",
     "/root/.aws/cli/cache": "WITH_AWS",
 }
 
-# The three single-line masks: applied when the opt-in variable is "0", i.e.
+# The four single-line masks: applied when the opt-in variable is "0", i.e.
 # when the flag is absent. A mask that became unconditional, or got attached to
 # the wrong flag, fails to match.
 SINGLE_LINE_MASKS = {
     "/root/.config/gh": "gh_config_unmask",
     "/root/.config/glab-cli": "WITH_GLAB",
     "/root/.terraform.d": "WITH_TFE",
+    "/root/.azure": "WITH_AZ",
 }
 
 TMPFS = re.compile(r'MOUNT_ARGS\+=\("--tmpfs" "([^"]+)"\)')

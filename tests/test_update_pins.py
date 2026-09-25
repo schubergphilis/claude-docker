@@ -287,6 +287,10 @@ VERSION_OUTPUT_SAMPLES = {
     "glab": f"glab {SENTINEL} (4d7c6cda7)",
     "tfenv": f"tfenv {SENTINEL}",
     "awscli": f"aws-cli/{SENTINEL} Python/3.14.6 Linux/6.8.0 exe/aarch64.ubuntu.26",
+    # `az --version` is a multi-line report; each tool's sample is its own line
+    # of it (the CI stub replays one line per tool).
+    "az": f"azure-cli                         {SENTINEL} *",
+    "azure-devops": f"azure-devops                       {SENTINEL}",
 }
 
 # Constructs Python's re accepts but bash's [[ =~ ]] does not. A rule using one
@@ -570,6 +574,33 @@ class TestPerToolSoak(unittest.TestCase):
         self.assertEqual(r.version, "2.1.11")
 
 
+class TestAzCandidates(unittest.TestCase):
+    """The two az-specific candidate listings — mocked get_json, no network."""
+
+    def test_pypi_drops_yanked_and_empty_releases(self):
+        doc = {"releases": {
+            "2.90.0": [{"upload_time_iso_8601": "2026-09-01T00:00:00Z"}],
+            "2.89.0": [{"upload_time_iso_8601": "2026-08-01T00:00:00Z", "yanked": True}],
+            "2.88.0": [],
+        }}
+        with unittest.mock.patch.object(up, "get_json", return_value=doc):
+            self.assertEqual(up.candidates("pypi", "azure-cli-core"),
+                             [("2.90.0", "2026-09-01T00:00:00Z")])
+
+    def test_azext_reads_the_version_from_the_wheel_not_the_tag(self):
+        rel = [
+            {"tag_name": "20260902.1", "published_at": "2026-09-03T00:00:00Z",
+             "draft": False, "prerelease": False,
+             "assets": [{"name": "azure_devops-1.0.8-py2.py3-none-any.whl"}]},
+            {"tag_name": "20260901.1", "published_at": "2026-09-02T00:00:00Z",
+             "draft": False, "prerelease": True,
+             "assets": [{"name": "azure_devops-1.0.9-py2.py3-none-any.whl"}]},
+        ]
+        with unittest.mock.patch.object(up, "get_json", return_value=rel):
+            self.assertEqual(up.candidates("azext", "Azure/azure-devops-cli-extension"),
+                             [("1.0.8", "2026-09-03T00:00:00Z")])
+
+
 class TestBaseImageCodename(unittest.TestCase):
     """base_image_codename() is pure — it parses the FROM tag, no I/O."""
 
@@ -813,14 +844,18 @@ class TestCIVersionCheckStep(unittest.TestCase):
         """Execute the step with a stub docker whose per-tool output comes from
         the recorded samples, with `overrides` replacing chosen tools."""
         overrides = overrides or {}
-        rows = []
+        # Tools sharing one probe (az, azure-devops) share one multi-line reply:
+        # their lines are joined with a literal backslash-n that the stub expands.
+        by_exe = {}
         for tool in up.TOOLS:
             exe = tool.probe.split()[0]
             rc, out = overrides.get(
                 tool.name,
                 (0, VERSION_OUTPUT_SAMPLES[tool.name].replace(SENTINEL, up.read_current(tool.name))),
             )
-            rows.append(f"{exe}\t{rc}\t{out}")
+            prev_rc, prev_out = by_exe.get(exe, (0, ""))
+            by_exe[exe] = (rc or prev_rc, f"{prev_out}\\n{out}" if prev_out else out)
+        rows = [f"{exe}\t{rc}\t{out}" for exe, (rc, out) in by_exe.items()]
 
         with tempfile.TemporaryDirectory() as tmp:
             tmp = Path(tmp)
@@ -832,7 +867,7 @@ class TestCIVersionCheckStep(unittest.TestCase):
                 'exe="$4"\n'
                 'while IFS=$\'\\t\' read -r e rc out; do\n'
                 '  if [ "$e" = "$exe" ]; then\n'
-                '    [ -n "$out" ] && printf \'%s\\n\' "$out"\n'
+                '    [ -n "$out" ] && printf \'%b\\n\' "$out"\n'
                 '    exit "$rc"\n'
                 "  fi\n"
                 'done < "$DOCKER_FIXTURE"\n'
