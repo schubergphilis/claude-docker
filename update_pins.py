@@ -8,7 +8,7 @@
 """Regenerate the version/sha256 pins under pins/.
 
 For each automated tool this selects the highest STABLE version that is already
-older than the soak window (default 7 days), downloads the artifact(s) for BOTH
+older than its soak window (7 days; 1 day for claude-code), downloads the artifact(s) for BOTH
 amd64 and arm64, computes the sha256(s), and writes pins/<tool>.env. Selecting a
 version that has already survived the soak window bakes the supply-chain soak
 into the *selection* — the resulting image is safe to use the moment it is built
@@ -19,8 +19,8 @@ them. Nothing here ever edits the Dockerfile. nodejs and the base-image digest
 stay manual on purpose and are surfaced as reminders.
 
 Usage:
-  uv run update_pins.py                      refresh all automated tools (soak = 7d)
-  uv run update_pins.py --soak 14            use a 14-day soak window
+  uv run update_pins.py                      refresh all automated tools (per-tool soak)
+  uv run update_pins.py --soak 14            use a 14-day soak window for every tool
   uv run update_pins.py --block-major-bumps  stay within each tool's current major
   uv run update_pins.py --pin uv=0.12.3      force a specific version (bypasses soak)
   uv run update_pins.py --pin pnpm=11.5.3 --pin uv=0.12.3   multiple overrides
@@ -56,9 +56,9 @@ PINS_DIR = REPO_DIR / "pins"
 DOCKERFILE = REPO_DIR / "Dockerfile"
 USER_AGENT = "update_pins.py (claude-docker)"
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
-# Default soak window in days — kept as a module constant so --audit and the
-# normal refresh flow share the same default; update_pins.py is the single
-# source of truth for this policy (see design.md and GitHub issue #50).
+# Default soak window in days for a Tool that doesn't set its own. Both --audit
+# and the refresh flow read it (via soak_days_for), so update_pins.py stays the
+# single source of truth for this policy (see design.md and GitHub issue #50).
 DEFAULT_SOAK_DAYS = 7
 # An operator-supplied --pin value is written into a sourced .env fragment and
 # interpolated into a download URL, so it must be a shell- and URL-inert token.
@@ -80,13 +80,22 @@ class Tool(NamedTuple):
 
     `probe` is the argv asking the installed tool its version; `version_re`
     pulls the version out of that argv's stdout. Both live here rather than in
-    CI so a tool cannot be pinned without also being verifiable."""
+    CI so a tool cannot be pinned without also being verifiable.
+
+    `soak_days` is this tool's default soak window; an explicit --soak
+    overrides it for every tool in that run."""
 
     name: str
     kind: str
     ref: str
     probe: str
     version_re: str
+    soak_days: int = DEFAULT_SOAK_DAYS
+
+
+def soak_days_for(tool: Tool, override: int | None) -> int:
+    """The soak window for `tool` in this run: --soak if given, else its own."""
+    return tool.soak_days if override is None else override
 
 
 # `version_re` is read by two engines — Python `re` here and bash `[[ =~ ]]` in
@@ -95,9 +104,12 @@ class Tool(NamedTuple):
 # a rule per tool rather than one shared template.
 TOOLS = [
     # The ` (Claude Code)` suffix is part of the assertion: a stub launcher that
-    # answered with a bare version would otherwise pass.
+    # answered with a bare version would otherwise pass. The 1-day soak is a
+    # maintainer decision: Claude Code ships near-daily and most of its users
+    # take each release within hours, so a bad release surfaces (and is
+    # pulled) inside a day and a 7-day pin just trails the ecosystem.
     Tool("claude-code", "npm", "@anthropic-ai/claude-code",
-         "claude --version", r"^([^ ]+) \(Claude Code\)$"),
+         "claude --version", r"^([^ ]+) \(Claude Code\)$", soak_days=1),
     Tool("openspec", "npm", "@fission-ai/openspec",
          "openspec --version", r"^([^ ]+)$"),
     Tool("pnpm", "npm", "pnpm",
@@ -729,18 +741,18 @@ def run_list_tools() -> int:
     return 0
 
 
-def run_audit(soak_days: int) -> int:
+def run_audit(soak_days: int | None = None) -> int:
     """Check each npm-pinned tool's installed version against the live npm
     registry: (a) the version must still exist (not yanked), and (b) it must
-    have aged past the soak window (default 7 days, same default as the refresh
-    flow — GitHub issue #50 standardises on 7).
+    have aged past its soak window — the same per-tool window the refresh flow
+    selects with (soak_days_for), so the gate never rejects a pin the refresh
+    just chose. `soak_days`, when given, overrides every tool's window.
 
     Any exception (network/registry error, or a malformed publish timestamp from
     soak_status/parse_dt) is treated as a hard failure for that tool — never
     continue past a tool whose soak status could not be determined (fail-closed).
 
     Exits 0 only when every tool passes; exits non-zero on any failure."""
-    soak = timedelta(days=soak_days)
     now = now_utc()
     all_ok = True
 
@@ -748,6 +760,7 @@ def run_audit(soak_days: int) -> int:
         if tool.kind != "npm":
             continue
         name, ref = tool.name, tool.ref
+        soak = timedelta(days=soak_days_for(tool, soak_days))
         pinned = read_current(name)
         if not pinned:
             # Distinguish a missing pin from a yanked version (which soak_status
@@ -779,8 +792,9 @@ def parse_args(argv):
     p = argparse.ArgumentParser(
         prog="update_pins.py", description="Regenerate soak-aware version pins under pins/."
     )
-    p.add_argument("--soak", type=int, default=DEFAULT_SOAK_DAYS, metavar="DAYS",
-                   help=f"soak window in days (default: {DEFAULT_SOAK_DAYS})")
+    p.add_argument("--soak", type=int, default=None, metavar="DAYS",
+                   help="soak window in days for every tool (default: each tool's own"
+                        f" window — {DEFAULT_SOAK_DAYS}, or 1 for claude-code)")
     p.add_argument("--block-major-bumps", action="store_true",
                    help="stay within each tool's current major version")
     p.add_argument("--pin", action="append", default=[], metavar="TOOL=VERSION",
@@ -795,7 +809,7 @@ def parse_args(argv):
                    help="verify each npm-pinned tool's installed version passes the soak gate"
                         " (requires network); no pin refresh; exits non-zero if any tool fails")
     args = p.parse_args(argv)
-    if args.soak < 0:
+    if args.soak is not None and args.soak < 0:
         p.error("--soak must be a non-negative integer")
     overrides = {}
     tool_names = {t.name for t in TOOLS}
@@ -837,7 +851,11 @@ def main(argv=None) -> int:
     if args.audit:
         return run_audit(args.soak)
 
-    print(f"update_pins  (soak window: {args.soak} days)")
+    if args.soak is None:
+        windows = ", ".join(f"{t.name} {t.soak_days}d" for t in TOOLS)
+        print(f"update_pins  (soak window per tool: {windows})")
+    else:
+        print(f"update_pins  (soak window: {args.soak} days, all tools)")
     print("  resolving ──────────────────────────────────────────────────")
 
     stage = Path(tempfile.mkdtemp(prefix=".pins-stage.", dir=REPO_DIR))
@@ -848,7 +866,7 @@ def main(argv=None) -> int:
             current = read_current(name)
             try:
                 r = resolve(name, tool.kind, tool.ref, current,
-                            args.soak, args.block_major_bumps, overrides)
+                            soak_days_for(tool, args.soak), args.block_major_bumps, overrides)
             except Exception as e:  # noqa: BLE001 — any failure aborts, pins untouched
                 print(f"  ✗ {name}: {e} — aborting, pins/ left untouched", file=sys.stderr)
                 return 1
