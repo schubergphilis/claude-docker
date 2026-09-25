@@ -36,7 +36,7 @@ isolation, file ownership — is exercised by a smoke harness
 ([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)).
 It runs in CI on **Linux** on every change (in the
 `docker-build` job, reusing the built image), across a matrix of cells: host UID
-1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` opt-ins
+1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` opt-ins
 (singly and combined), `--ephemeral`, and `--ro`. Most of the container's
 behaviour lives inside Docker's Linux VM and is identical regardless of host OS,
 so Linux CI covers the bulk of it.
