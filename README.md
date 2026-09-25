@@ -314,7 +314,7 @@ The file lives in the repo, so a repo you just cloned could try to grant itself 
 
 **When something is blocked**, the client sees HTTP `403` from the proxy (curl: `CONNECT tunnel failed, response 403`). A tool that bypasses the proxy sees a connection or name-resolution failure instead. At the end of the session `run.sh` lists every host that was denied and where to allow it. To watch live, run `docker logs -f claude-egress-proxy-<id>`; the name is printed at startup.
 
-**With `--gh`**, the auth-proxy sidecar also joins the internal network. `github.com`, `api.github.com` and `uploads.github.com` go straight to it (they are in `NO_PROXY`), so token injection is unchanged.
+**With `--gh`**, the auth-proxy sidecar also joins the internal network. squid resolves `github.com`, `api.github.com` and `uploads.github.com` to it, so token injection is unchanged. Other GitHub hosts (`codeload.github.com`, `*.githubusercontent.com`) go through squid to GitHub.
 
 **Known limits:**
 

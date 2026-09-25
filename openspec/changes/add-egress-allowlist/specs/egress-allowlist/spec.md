@@ -121,12 +121,12 @@ The proxy SHALL deny, before any allow rule: the names `metadata.google.internal
 
 ### Requirement: Composition with the gh auth-proxy sidecar
 
-When both the allowlist and the `--gh` sidecar are active, the gh sidecar SHALL additionally join the internal network, the three `--add-host` entries SHALL point at its internal-network address, and `github.com`, `api.github.com`, `uploads.github.com` SHALL be in `NO_PROXY`. The agent container SHALL remain attached only to the internal network.
+When both the allowlist and the `--gh` sidecar are active, the gh sidecar SHALL additionally join the internal network, the three `--add-host` entries SHALL point at its internal-network address, and the forward proxy SHALL resolve `github.com`, `api.github.com`, `uploads.github.com` to that same address and admit exactly that name/address pairing ahead of the private-address deny. Those names SHALL NOT be placed in `NO_PROXY` (clients match `NO_PROXY` entries as domain suffixes, which would strand other `*.github.com` hosts). The agent container SHALL remain attached only to the internal network.
 
 #### Scenario: gh traffic still reaches the auth proxy
 
 - **WHEN** user runs `claude-docker --egress-allowlist --gh ~/repo` with a host token
-- **THEN** `api.github.com` requests from the agent reach the gh sidecar with the injected token, and the agent has no other network
+- **THEN** `api.github.com` requests from the agent, made through the proxy, complete TLS against the session CA alone (i.e. reach the gh sidecar), `codeload.github.com` is reachable through the proxy, and the agent has no other network
 
 ### Requirement: Lifecycle is fail-closed and leak-free
 

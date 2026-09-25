@@ -40,8 +40,8 @@ outside the container (issue #75).
 - When the session ends, `run.sh` prints the denied hosts and where to allow
   them.
 - `--gh` composes: the auth-proxy sidecar also joins the internal network, so
-  the agent reaches it by its internal IP. The three intercepted hostnames go
-  into `NO_PROXY`.
+  squid resolves the three intercepted hostnames to it (via its `hosts_file`),
+  so the token-injection path is unchanged.
 - Podman is refused under the flag for this iteration (fail closed), pending
   verification of `--internal` and multi-network semantics there.
 

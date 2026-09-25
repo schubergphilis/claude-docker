@@ -204,7 +204,8 @@ of hosts, not the repo.
    `169.254.0.0/16`, `fe80::/10`, `fd00:ec2::254`. This covers IMDS on every
    cloud, including requests made by name.
 3. `deny !egress_ports`.
-4. `allow operator_hosts`.
+4. `allow operator_hosts`, then `allow gh_names gh_sidecar` (only the
+   `--gh` sidecar's exact names and address, see D8).
 5. `deny` IP-literal targets (`dstdom_regex` for a dotted-quad or any `:`).
 6. `deny` targets whose resolved address is private, loopback, CGNAT or
    reserved (all of RFC1918, `127/8`, `100.64/10`, `0/8`, multicast and
@@ -246,9 +247,18 @@ When the gh sidecar is active:
   way to reach GitHub.
 - It is additionally `network connect`ed to `claude-egress-<id>`.
 - `--add-host` points the three hostnames at its **internal** IP.
-- Those three hostnames go into `NO_PROXY`. Clients then dial the sidecar
-  directly instead of `CONNECT`ing through squid, which would bypass token
-  injection.
+- squid's `hosts_file` maps those three hostnames to the same internal IP.
+  A narrow rule, `allow gh_names gh_sidecar` (exact names **and** that one
+  address), admits them past the private-address deny. Proxy-aware clients
+  `CONNECT` through squid and land on the gh sidecar, not on real GitHub, so
+  token injection is unchanged.
+- `NO_PROXY` was rejected. curl, Go and Python all treat a `NO_PROXY` entry of
+  `github.com` as a domain suffix, so `codeload.github.com` and every other
+  `*.github.com` host would also bypass squid. On the internal network that
+  means they are unreachable. The smoke cell caught this.
+- For this to work, the gh sidecar has to exist before squid starts. So
+  `run.sh` creates the egress networks first, then runs the gh block, then
+  starts squid.
 
 The agent still attaches only to the internal network. This answers #12's open
 question for now: one sidecar per role (credential vs egress), joined on a

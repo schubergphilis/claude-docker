@@ -567,16 +567,19 @@ check_egress() {
     assert_eq "egress-project: unapproved example.com denied" "$code" "403"
   fi
 
-  # --gh composition (design D8): api.github.com goes straight to the gh
-  # auth-proxy sidecar over the internal network (NO_PROXY + --add-host, no
-  # CONNECT), TLS-verified against the session CA; the non-intercepted GitHub
-  # hosts go through squid. Without --gh, GitHub is not allowlisted at all.
+  # --gh composition (design D8): api.github.com is CONNECTed through squid,
+  # which resolves it to the gh auth-proxy sidecar. --cacert makes the session
+  # CA the ONLY trust root, so success proves the far end is the sidecar and
+  # not real GitHub. The non-intercepted GitHub hosts go through squid to
+  # GitHub. Without --gh, GitHub is not allowlisted at all.
   if [ "${EXPECT_EGRESS_GH:-0}" = "1" ]; then
     local out
-    out=$(curl -sS -o /dev/null --max-time 20 -w '%{http_connect} %{http_code}' https://api.github.com/ 2>/dev/null || true)
+    out=$(curl -sS -o /dev/null --max-time 20 \
+      --cacert /usr/local/share/ca-certificates/claude-docker-gh-proxy.crt \
+      -w '%{http_connect} %{http_code}' https://api.github.com/ 2>/dev/null || true)
     case "$out" in
-      "000 200"|"000 401") pass "egress-gh: api.github.com reached via the gh sidecar, not squid (connect/code '$out')" ;;
-      *) fail "egress-gh: api.github.com via the gh sidecar: expected '000 200|401', got '$out'" ;;
+      "200 200"|"200 401") pass "egress-gh: api.github.com via squid reaches the gh sidecar (session-CA-only TLS ok; connect/code '$out')" ;;
+      *) fail "egress-gh: api.github.com via squid → gh sidecar: expected '200 200|401', got '$out'" ;;
     esac
     code=$(egress_connect_code https://codeload.github.com/)
     assert_eq "egress-gh: CONNECT codeload.github.com (--gh opt-in host)" "$code" "200"

@@ -405,11 +405,15 @@ acl ip_literal dstdom_regex -n ^[0-9.]+$ :
 acl private_dst dst 0.0.0.0/8 10.0.0.0/8 100.64.0.0/10 127.0.0.0/8 172.16.0.0/12 192.0.0.0/24 192.168.0.0/16 198.18.0.0/15 224.0.0.0/3 ::/127 fc00::/7 ff00::/8
 acl operator_hosts dstdomain -n "/etc/claude-docker-egress/operator"
 acl allowed_hosts dstdomain -n "/etc/claude-docker-egress/allowed"
+acl gh_names dstdomain -n github.com api.github.com uploads.github.com
+acl gh_sidecar dst "/etc/claude-docker-egress/gh-sidecar"
+hosts_file /etc/claude-docker-egress/hosts
 
 http_access deny metadata_names
 http_access deny metadata_dst
 http_access deny !egress_ports
 http_access allow operator_hosts
+http_access allow gh_names gh_sidecar
 http_access deny ip_literal
 http_access deny private_dst
 http_access allow allowed_hosts
@@ -680,9 +684,10 @@ fi
 # --egress-allowlist (openspec change add-egress-allowlist). The agent joins
 # ONLY the --internal EGRESS_NETWORK, so it has no route off the host — that
 # network is the boundary; the squid sidecar (this same image, --entrypoint
-# squid) is merely the one allowlisted way out. Runs before the gh block so
-# the gh sidecar can join EGRESS_NETWORK too (design D8). Every failure
-# aborts: this must never degrade to open egress.
+# squid) is merely the one allowlisted way out. Split in two around the gh
+# block (design D8): this part builds the lists and networks so the gh sidecar
+# can join EGRESS_NETWORK; part 2 starts squid once the gh sidecar's address
+# is known. Every failure aborts: this must never degrade to open egress.
 AGENT_NETWORK=""
 EGRESS_NO_PROXY="localhost,127.0.0.1,::1"
 EGRESS_PROJECT_FILE="${SEEN_PATHS[0]}/.claude-docker/allowed-hosts"
@@ -803,54 +808,18 @@ if [ "$WITH_EGRESS" = "1" ]; then
   fi
 
   gen_egress_squid_conf >"$egress_dir/squid.conf"
-  chmod 0644 "$egress_dir"/*
+  # squid's own name→address overrides and the gh-sidecar address the
+  # gh_sidecar rule admits (design D8). Filled in by the gh block when its
+  # sidecar is active; otherwise inert (192.0.2.255: TEST-NET-1, unused).
+  printf '127.0.0.1 localhost\n' >"$egress_dir/hosts"
+  printf '192.0.2.255/32\n' >"$egress_dir/gh-sidecar"
 
   if ! "$RUNTIME" network create --internal "$EGRESS_NETWORK" >/dev/null \
      || ! "$RUNTIME" network create "$EGRESS_OUT_NETWORK" >/dev/null; then
     echo "claude-docker: failed to create the egress networks — aborting (egress would otherwise be unfiltered)" >&2
     exit 1
   fi
-  # Not --rm, for the same diagnosability reason as the gh sidecar below.
-  if ! "$RUNTIME" run -d \
-      --name "$EGRESS_SIDECAR" \
-      --network "$EGRESS_OUT_NETWORK" \
-      --user proxy \
-      --cap-drop ALL \
-      --security-opt no-new-privileges \
-      --entrypoint squid \
-      -v "$(hostpath "$egress_dir"):/etc/claude-docker-egress:ro" \
-      "$IMAGE" -N -f /etc/claude-docker-egress/squid.conf >/dev/null \
-     || ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$EGRESS_SIDECAR" >/dev/null; then
-    echo "claude-docker: failed to start the egress proxy sidecar from $IMAGE — aborting" >&2
-    exit 1
-  fi
-  egress_ready=0
-  i=0
-  while [ "$i" -lt 15 ]; do
-    if "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; then
-      egress_ready=1; break
-    fi
-    [ -z "$("$RUNTIME" ps -q --filter "name=^$EGRESS_SIDECAR$" 2>/dev/null)" ] && break
-    sleep 1
-    i=$((i + 1))
-  done
-  if [ "$egress_ready" != "1" ]; then
-    echo "claude-docker: the egress proxy sidecar did not come up — aborting. An image built before --egress-allowlist existed lacks squid: rebuild it. squid's output follows:" >&2
-    "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | tail -15 | sed 's/^/  | /' >&2
-    exit 1
-  fi
-  egress_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$EGRESS_NETWORK\").IPAddress}}" "$EGRESS_SIDECAR" 2>/dev/null)
-  if [ -z "$egress_ip" ]; then
-    echo "claude-docker: could not determine the egress proxy's internal address — aborting" >&2
-    exit 1
-  fi
   AGENT_NETWORK="$EGRESS_NETWORK"
-  egress_url="http://$egress_ip:3128"
-  ENV_ARGS+=(
-    "-e" "HTTP_PROXY=$egress_url" "-e" "HTTPS_PROXY=$egress_url"
-    "-e" "http_proxy=$egress_url" "-e" "https_proxy=$egress_url"
-  )
-  echo "claude-docker: egress allowlist active via '$EGRESS_SIDECAR' ($(($(wc -l <"$egress_dir/allowed") + $(wc -l <"$egress_dir/operator") - 2)) entries) — live log: $RUNTIME logs -f $EGRESS_SIDECAR" >&2
 fi
 
 # GitHub auth-proxy sidecar: active only when --gh found a host token
@@ -995,9 +964,16 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   # placeholder that satisfies its "am I authenticated" check without being
   # a usable credential.
   [ -z "$AGENT_NETWORK" ] && AGENT_NETWORK="$GH_PROXY_NETWORK"
-  # Clients must dial these three straight at the sidecar (--add-host), never
-  # CONNECT through squid, which would reach real GitHub without the token.
-  EGRESS_NO_PROXY="$EGRESS_NO_PROXY,github.com,api.github.com,uploads.github.com"
+  # Under --egress-allowlist, proxy-aware clients CONNECT these three through
+  # squid, so squid must resolve them to this sidecar too (its hosts_file),
+  # and the gh_sidecar rule admits exactly that name+address pair past the
+  # private-address deny. NOT via NO_PROXY: every major client treats a
+  # NO_PROXY `github.com` as a suffix, which would also send
+  # codeload.github.com & co. direct — i.e. nowhere, on the internal network.
+  if [ "$WITH_EGRESS" = "1" ]; then
+    printf '%s github.com api.github.com uploads.github.com\n' "$gh_proxy_ip" >>"$egress_dir/hosts"
+    printf '%s/32\n' "$gh_proxy_ip" >"$egress_dir/gh-sidecar"
+  fi
   MOUNT_ARGS+=(
     "--add-host" "github.com:$gh_proxy_ip"
     "--add-host" "api.github.com:$gh_proxy_ip"
@@ -1020,6 +996,52 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   )
   GH_SIDECAR_ACTIVE=1
   echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
+fi
+
+# --egress-allowlist, part 2: start squid now that the gh block (if any) has
+# filled in its hosts / gh-sidecar files. Same fail-closed rules as above.
+if [ "$WITH_EGRESS" = "1" ]; then
+  chmod 0644 "$egress_dir"/*
+  # Not --rm, for the same diagnosability reason as the gh sidecar above.
+  if ! "$RUNTIME" run -d \
+      --name "$EGRESS_SIDECAR" \
+      --network "$EGRESS_OUT_NETWORK" \
+      --user proxy \
+      --cap-drop ALL \
+      --security-opt no-new-privileges \
+      --entrypoint squid \
+      -v "$(hostpath "$egress_dir"):/etc/claude-docker-egress:ro" \
+      "$IMAGE" -N -f /etc/claude-docker-egress/squid.conf >/dev/null \
+     || ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$EGRESS_SIDECAR" >/dev/null; then
+    echo "claude-docker: failed to start the egress proxy sidecar from $IMAGE — aborting" >&2
+    exit 1
+  fi
+  egress_ready=0
+  i=0
+  while [ "$i" -lt 15 ]; do
+    if "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; then
+      egress_ready=1; break
+    fi
+    [ -z "$("$RUNTIME" ps -q --filter "name=^$EGRESS_SIDECAR$" 2>/dev/null)" ] && break
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ "$egress_ready" != "1" ]; then
+    echo "claude-docker: the egress proxy sidecar did not come up — aborting. An image built before --egress-allowlist existed lacks squid: rebuild it. squid's output follows:" >&2
+    "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | tail -15 | sed 's/^/  | /' >&2
+    exit 1
+  fi
+  egress_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$EGRESS_NETWORK\").IPAddress}}" "$EGRESS_SIDECAR" 2>/dev/null)
+  if [ -z "$egress_ip" ]; then
+    echo "claude-docker: could not determine the egress proxy's internal address — aborting" >&2
+    exit 1
+  fi
+  egress_url="http://$egress_ip:3128"
+  ENV_ARGS+=(
+    "-e" "HTTP_PROXY=$egress_url" "-e" "HTTPS_PROXY=$egress_url"
+    "-e" "http_proxy=$egress_url" "-e" "https_proxy=$egress_url"
+  )
+  echo "claude-docker: egress allowlist active via '$EGRESS_SIDECAR' ($(($(wc -l <"$egress_dir/allowed") + $(wc -l <"$egress_dir/operator") - 2)) entries) — live log: $RUNTIME logs -f $EGRESS_SIDECAR" >&2
 fi
 [ -n "$AGENT_NETWORK" ] && MOUNT_ARGS+=("--network" "$AGENT_NETWORK")
 [ "$WITH_EGRESS" = "1" ] && ENV_ARGS+=("-e" "NO_PROXY=$EGRESS_NO_PROXY" "-e" "no_proxy=$EGRESS_NO_PROXY")

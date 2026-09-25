@@ -13,7 +13,7 @@
 - [ ] 2.5 Generate the squid config (ordered denies per design D6, `-n` domain ACLs, data files with an `.invalid` sentinel) into the stage dir, world-readable
 - [ ] 2.6 Lifecycle: names from stage suffix, trap extended before creation (gh sidecar first), prune extended; create internal + out networks, run sidecar (`--user proxy`, cap-drop ALL, nnp, `:ro` config), `network connect`, readiness loop with exited detection, read internal IP — every failure aborts
 - [ ] 2.7 Agent wiring: `--network` internal only, proxy env vars, `NO_PROXY`
-- [ ] 2.8 `--gh` composition: connect gh sidecar to the internal network, `--add-host` its internal IP, GitHub hosts in `NO_PROXY`
+- [ ] 2.8 `--gh` composition: connect gh sidecar to the internal network, `--add-host` its internal IP, squid `hosts_file` + exact name/address allow for the three GitHub hosts (not `NO_PROXY`: suffix semantics); squid started after the gh block
 - [ ] 2.9 Capture agent exit code; print denied hosts from the sidecar access log with remediation; exit with the agent's code
 
 ## 3. Verification
