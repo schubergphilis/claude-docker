@@ -82,8 +82,8 @@ Wrapper flags:
   --tmux              Wrap claude in plain tmux (works in any terminal).
                       Equivalent to CLAUDE_DOCKER_TMUX=1.
   --claude-dir=PATH   Use PATH as the host Claude config dir instead of
-                      ~/.claude. Affects agents, commands, skills, CLAUDE.md,
-                      and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
+                      ~/.claude. Affects agents, commands, skills, themes,
+                      CLAUDE.md, and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
 
 Separator:
   --                  Ends wrapper-flag parsing. Everything after is passed
@@ -344,7 +344,9 @@ EOF
 case "$CLAUDE_CONFIG_DIR" in "~/"*) CLAUDE_CONFIG_DIR="$HOME/${CLAUDE_CONFIG_DIR#\~/}" ;; esac
 
 MOUNT_ARGS=()
-ENV_ARGS=(-e TERM)
+# COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
+# the container and custom theme colours render rounded (host-config-parity).
+ENV_ARGS=(-e TERM -e COLORTERM)
 CONTAINER_PATHS=()
 
 ws_suffix=""
@@ -717,7 +719,7 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
 fi
 
-for item in agents commands skills; do
+for item in agents commands skills themes; do
   src="$CLAUDE_CONFIG_DIR/$item"
   # Resolve top-level symlink so cp -RL gets a real directory path, not a link.
   # Hop counter guards against pathological symlink cycles (a -> b -> a).
@@ -742,12 +744,21 @@ fi
 # path that prefixes a `docker:<flags>` tag when CLAUDE_DOCKER_FLAGS is set.
 # The wrapper is a no-op passthrough when unset so non-claude-docker runs of
 # the same file would behave identically.
+# The host script is exec'd directly when executable so its shebang picks the
+# interpreter, as it does on the host. Never `sh script`: /bin/sh is dash in
+# the image, and a bash statusline dies there with "Bad substitution". A
+# non-executable script falls back to bash, which also runs POSIX sh scripts.
 if [ -f "$CLAUDE_CONFIG_DIR/statusline-command.sh" ]; then
   cat >"$stage/statusline-command.sh" <<'WRAP'
 #!/bin/sh
 # claude-docker wrapper — prepends active opt-in flag tag to host statusline.
+orig=/root/.claude/statusline-command.original.sh
 input=$(cat)
-body=$(printf '%s' "$input" | sh /root/.claude/statusline-command.original.sh)
+if [ -x "$orig" ]; then
+  body=$(printf '%s' "$input" | "$orig")
+else
+  body=$(printf '%s' "$input" | bash "$orig")
+fi
 if [ -n "${CLAUDE_DOCKER_FLAGS:-}" ]; then
   printf '\033[33mdocker:%s\033[0m %s' "$CLAUDE_DOCKER_FLAGS" "$body"
 else

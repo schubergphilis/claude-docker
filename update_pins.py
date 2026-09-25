@@ -114,6 +114,8 @@ TOOLS = [
          "openspec --version", r"^([^ ]+)$"),
     Tool("pnpm", "npm", "pnpm",
          "pnpm --version", r"^([^ ]+)$"),
+    Tool("ccusage", "npm", "ccusage",
+         "ccusage --version", r"^ccusage ([^ ]+)$"),
     Tool("uv", "github", "astral-sh/uv",
          "uv --version", r"^uv ([^ ]+)"),
     Tool("glab", "gitlab", "gitlab-org/cli",
@@ -452,6 +454,8 @@ def fragment_lines(name: str, v: str) -> list[str]:
         return [f"OPENSPEC_VERSION={v}"]
     if name == "pnpm":
         return [f"PNPM_VERSION={v}"]
+    if name == "ccusage":
+        return [f"CCUSAGE_VERSION={v}"]
     if name == "uv":
         base = "https://github.com/astral-sh/uv/releases/download"
         return [f"UV_VERSION={v}"] + _arch_url_sha_lines("UV", {

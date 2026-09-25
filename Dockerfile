@@ -251,16 +251,23 @@ RUN ARCH=$(dpkg --print-architecture); \
 #     exits 0 either way, and the nag is TTY-gated, so CI's version probe
 #     (docker run, no TTY) cannot tell the two apart. Assert on ELF magic, not
 #     on link count — a copyFileSync fallback is healthy with nlink 1.
+# ccusage has no install script, so it is not a carve-out, but its native
+# binary needs one named fix: npm unpacks @ccusage/ccusage-linux-<arch>'s
+# bin/ccusage as 0644, and the launcher's first-run chmod fails with EPERM
+# for the host UID the container runs as (root owns the file). We set the
+# bit here, the same thing the launcher would do, then assert the version:
+# a changed package layout fails the build rather than shipping a broken CLI.
 # `npm root -g` over a hardcoded path so we don't break on a different prefix.
 # npm tools carry version-only pins (no sha256): npm install verifies the
 # registry-advertised dist.integrity (registry-integrity, not provenance; CI
-# runs `npm audit signatures`). All three share this layer, so they share a COPY.
-COPY pins/claude-code.env pins/openspec.env pins/pnpm.env /tmp/
-RUN . /tmp/claude-code.env && . /tmp/openspec.env && . /tmp/pnpm.env \
+# runs `npm audit signatures`). All four share this layer, so they share a COPY.
+COPY pins/claude-code.env pins/openspec.env pins/pnpm.env pins/ccusage.env /tmp/
+RUN . /tmp/claude-code.env && . /tmp/openspec.env && . /tmp/pnpm.env && . /tmp/ccusage.env \
  && npm install -g --ignore-scripts \
       "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
       "@fission-ai/openspec@${OPENSPEC_VERSION}" \
       "pnpm@${PNPM_VERSION}" \
+      "ccusage@${CCUSAGE_VERSION}" \
  && node "$(npm root -g)/@anthropic-ai/claude-code/install.cjs" \
  && node "$(npm root -g)/pnpm/install.js" \
  && magic=$(od -An -tx1 -N4 "$(npm root -g)/pnpm/pnpm" | tr -d ' \n') \
@@ -269,7 +276,13 @@ RUN . /tmp/claude-code.env && . /tmp/openspec.env && . /tmp/pnpm.env \
       echo "install.js did not replace the placeholder — pnpm would run through node." >&2; \
       exit 1; \
     fi \
- && rm /tmp/claude-code.env /tmp/openspec.env /tmp/pnpm.env
+ && chmod 0755 "$(npm root -g)/ccusage/node_modules/@ccusage/ccusage-linux-$(node -p process.arch)/bin/ccusage" \
+ && ccusage_out=$(ccusage --version) \
+ && if [ "$ccusage_out" != "ccusage ${CCUSAGE_VERSION}" ]; then \
+      echo "ccusage ${CCUSAGE_VERSION}: --version printed '${ccusage_out}'" >&2; \
+      exit 1; \
+    fi \
+ && rm /tmp/claude-code.env /tmp/openspec.env /tmp/pnpm.env /tmp/ccusage.env
 
 # tfenv — pure-bash terraform version manager. Arch-independent (just
 # bash scripts), so a single sha256 covers amd64 and arm64. We deliberately
@@ -303,6 +316,19 @@ RUN cat > /etc/tmux.conf <<'EOF'
 set -s extended-keys always
 set -as terminal-features "*:extkeys"
 EOF
+
+# Ghostty sets TERM=xterm-ghostty, which run.sh forwards. ncurses-term ships
+# Ghostty's entry only as `ghostty` (Debian's build has no xterm-ghostty
+# alias), so tput, less and tmux would fail to look up the terminal. Link
+# the name to the packaged entry rather than vendoring Ghostty's own
+# terminfo: the bytes stay those of the signed Ubuntu package. Skipped if a
+# later ncurses-term ships the name itself; infocmp fails the build if the
+# lookup still doesn't resolve. Late layer so it doesn't invalidate the
+# downloads above.
+RUN if [ ! -e /usr/share/terminfo/x/xterm-ghostty ]; then \
+      ln -s ../g/ghostty /usr/share/terminfo/x/xterm-ghostty; \
+    fi \
+ && infocmp xterm-ghostty >/dev/null
 
 # Go environment. Spelled with a literal /root rather than ${HOME}: Docker does
 # not define HOME during the build, so "${HOME}/go" would expand to "/go". /root

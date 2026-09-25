@@ -214,12 +214,15 @@ class TestVersionVar(unittest.TestCase):
     def test_pnpm(self):
         self.assertEqual(up.version_var("pnpm"), "PNPM_VERSION")
 
+    def test_ccusage(self):
+        self.assertEqual(up.version_var("ccusage"), "CCUSAGE_VERSION")
+
 
 class TestListNpmTools(unittest.TestCase):
     """--list-npm-tools / run_list_npm_tools(): TSV output, no network."""
 
-    # The three npm tools expected, in TOOLS order.
-    _NPM_NAMES = ["claude-code", "openspec", "pnpm"]
+    # The four npm tools expected, in TOOLS order.
+    _NPM_NAMES = ["claude-code", "openspec", "pnpm", "ccusage"]
 
     def _capture_list(self):
         """Run run_list_npm_tools(), return (exit_code, stdout_lines)."""
@@ -228,10 +231,10 @@ class TestListNpmTools(unittest.TestCase):
             rc = up.run_list_npm_tools()
         return rc, buf.getvalue().splitlines()
 
-    def test_exactly_three_npm_tools_emitted(self):
+    def test_exactly_four_npm_tools_emitted(self):
         rc, lines = self._capture_list()
         self.assertEqual(rc, 0)
-        self.assertEqual(len(lines), 3)
+        self.assertEqual(len(lines), 4)
 
     def test_tool_names_are_npm_tools_in_order(self):
         rc, lines = self._capture_list()
@@ -283,6 +286,7 @@ VERSION_OUTPUT_SAMPLES = {
     "claude-code": f"{SENTINEL} (Claude Code)",
     "openspec": SENTINEL,
     "pnpm": SENTINEL,
+    "ccusage": f"ccusage {SENTINEL}",
     "uv": f"uv {SENTINEL} (aarch64-unknown-linux-gnu)",
     "glab": f"glab {SENTINEL} (4d7c6cda7)",
     "tfenv": f"tfenv {SENTINEL}",
