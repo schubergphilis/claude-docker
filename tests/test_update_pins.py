@@ -104,6 +104,11 @@ class TestParseArgsPin(unittest.TestCase):
         for ver in ("1.2.3; rm -rf /", "1.2.3 4", "`id`", "1.2.3/../x", "a$(id)"):
             self._expect_exit(["--pin", f"uv={ver}"])
 
+    def test_early_return_modes_are_mutually_exclusive(self):
+        # main() runs only one mode, so a combination must fail loudly rather
+        # than silently skip --audit
+        self._expect_exit(["--list-tools", "--audit"])
+
 
 class TestSelectVersion(unittest.TestCase):
     """The soak / held / --block-major-bumps decision core, fed synthetic

@@ -768,13 +768,14 @@ def parse_args(argv):
                    help="stay within each tool's current major version")
     p.add_argument("--pin", action="append", default=[], metavar="TOOL=VERSION",
                    help="force a specific version (bypasses soak); repeatable")
-    p.add_argument("--list-tools", action="store_true",
-                   help="print one TSV row per automated tool (name, probe, version_re, version,"
-                        " kind, ref)"
-                        " then exit; no pin refresh; exits non-zero if any pin is missing")
-    p.add_argument("--audit", action="store_true",
-                   help="verify each npm-pinned tool's installed version passes the soak gate"
-                        " (requires network); no pin refresh; exits non-zero if any tool fails")
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument("--list-tools", action="store_true",
+                      help="print one TSV row per automated tool (name, probe, version_re, version,"
+                           " kind, ref)"
+                           " then exit; no pin refresh; exits non-zero if any pin is missing")
+    mode.add_argument("--audit", action="store_true",
+                      help="verify each npm-pinned tool's installed version passes the soak gate"
+                           " (requires network); no pin refresh; exits non-zero if any tool fails")
     args = p.parse_args(argv)
     if args.soak is not None and args.soak < 0:
         p.error("--soak must be a non-negative integer")
@@ -799,15 +800,9 @@ def main(argv=None) -> int:
     args, overrides = parse_args(sys.argv[1:] if argv is None else argv)
 
     # Early-return modes — run before the normal refresh flow (no pin writes).
-    # Listings run before --audit; a non-zero exit from one short-circuits, since
-    # a later mode would have no useful input.
+    # parse_args makes them mutually exclusive, so at most one is set.
     if args.list_tools:
-        rc = run_list_tools()
-        if rc != 0:
-            return rc
-        if not args.audit:
-            return 0
-
+        return run_list_tools()
     if args.audit:
         return run_audit(args.soak)
 
