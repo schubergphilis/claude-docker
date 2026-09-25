@@ -567,6 +567,24 @@ check_egress() {
     assert_eq "egress-project: unapproved example.com denied" "$code" "403"
   fi
 
+  # --gh composition (design D8): api.github.com goes straight to the gh
+  # auth-proxy sidecar over the internal network (NO_PROXY + --add-host, no
+  # CONNECT), TLS-verified against the session CA; the non-intercepted GitHub
+  # hosts go through squid. Without --gh, GitHub is not allowlisted at all.
+  if [ "${EXPECT_EGRESS_GH:-0}" = "1" ]; then
+    local out
+    out=$(curl -sS -o /dev/null --max-time 20 -w '%{http_connect} %{http_code}' https://api.github.com/ 2>/dev/null || true)
+    case "$out" in
+      "000 200"|"000 401") pass "egress-gh: api.github.com reached via the gh sidecar, not squid (connect/code '$out')" ;;
+      *) fail "egress-gh: api.github.com via the gh sidecar: expected '000 200|401', got '$out'" ;;
+    esac
+    code=$(egress_connect_code https://codeload.github.com/)
+    assert_eq "egress-gh: CONNECT codeload.github.com (--gh opt-in host)" "$code" "200"
+  else
+    code=$(egress_connect_code https://github.com/)
+    assert_eq "egress-gh: CONNECT github.com denied without --gh" "$code" "403"
+  fi
+
   # Raw, non-proxy-aware clients: must fail even for allowlisted hosts.
   if curl -sS -o /dev/null --noproxy '*' --max-time 5 https://api.anthropic.com/ 2>/dev/null; then
     fail "egress-raw: --noproxy curl reached api.anthropic.com (network is not the boundary!)"

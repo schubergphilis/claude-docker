@@ -22,10 +22,11 @@
 #   --egress=0|1    1 = drive run.sh --egress-allowlist end-to-end instead of a
 #                   hand-built `docker run` (the boundary lives in run.sh's
 #                   network/sidecar lifecycle, so it must be exercised through
-#                   it). Three passes over the same project allowlist
+#                   it). Four passes over the same project allowlist
 #                   (example.com): answer `n` at the approval prompt (list
 #                   ignored), answer `y` (list used, hash recorded), then no
-#                   input (recorded approval honoured). Runner UID only;
+#                   input (recorded approval honoured), then --gh with a fake
+#                   token (composition with the auth-proxy sidecar). Runner UID only;
 #                   implies ephemeral, no opt-ins, no settings seed.
 #   --image=TAG     Docker image to run (default: claude-code:local)
 #   IMAGE=TAG       env var override for --image (checked if --image absent)
@@ -317,9 +318,10 @@ log "Image: ${IMAGE}"
 # needs a PTY, hence script(1); its transcript lands in CONTAINER_STDERR so
 # the host-side WARN check below still applies.
 run_egress_pass() {
-  local answer="$1" expect_project="$2" rc=0 entry run_cmd
-  entry="env EXPECT_EGRESS=1 EXPECT_EGRESS_PROJECT=${expect_project} EXPECT_UID=${HOST_UID_ARG} EXPECT_GID=${HOST_GID_ARG} EXPECT_OPTINS= EXPECT_RO=0 EXPECT_EPHEMERAL=1 EXPECT_SETTINGS=0 WORKSPACE=${CONTAINER_WORKSPACE} ${CONTAINER_ASSERT}"
-  run_cmd="bash $(printf '%q' "${SCRIPT_DIR}/../run.sh") --ephemeral --egress-allowlist $(printf '%q' "${WORKSPACE_HOST}")"
+  local answer="$1" expect_project="$2" extra="${3:-}" rc=0 entry run_cmd expect_gh=0
+  [ "${extra}" = "--gh" ] && expect_gh=1
+  entry="env EXPECT_EGRESS=1 EXPECT_EGRESS_PROJECT=${expect_project} EXPECT_EGRESS_GH=${expect_gh} EXPECT_UID=${HOST_UID_ARG} EXPECT_GID=${HOST_GID_ARG} EXPECT_OPTINS= EXPECT_RO=0 EXPECT_EPHEMERAL=1 EXPECT_SETTINGS=0 WORKSPACE=${CONTAINER_WORKSPACE} ${CONTAINER_ASSERT}"
+  run_cmd="bash $(printf '%q' "${SCRIPT_DIR}/../run.sh") --ephemeral --egress-allowlist ${extra} $(printf '%q' "${WORKSPACE_HOST}")"
   { [ -n "${answer}" ] && printf '%s\n' "${answer}"; true; } \
     | CLAUDE_DOCKER_IMAGE="${IMAGE}" CLAUDE_DOCKER_TEST_ENTRY="${entry}" \
       CLAUDE_DOCKER_CONFIG_DIR="${TMPROOT}/no-claude-dir" XDG_CONFIG_HOME="${TMPROOT}/xdg" \
@@ -353,11 +355,20 @@ if [ "${EGRESS}" = "1" ]; then
   log "Egress pass 3: recorded approval, no prompt input"
   run_egress_pass "" 1 || die "egress pass 3 (recorded approval) failed"
 
-  if docker ps -a --format '{{.Names}}' | grep -q '^claude-egress-proxy-' \
-     || docker network ls --format '{{.Name}}' | grep -q '^claude-egress-'; then
-    die "host-side: claude-egress-* resources left behind after teardown"
+  # --gh composition. A FAKE token: the gh sidecar forwards it to real
+  # api.github.com, which answers 401 — enough to prove the route (agent →
+  # gh sidecar over the internal network → GitHub) without any credential.
+  log "Egress pass 4: --gh composition (fake token)"
+  GH_TOKEN="ghp_fakeSmokeEgressToken00000000000001" run_egress_pass "" 1 --gh \
+    || die "egress pass 4 (--gh composition) failed"
+  grep -q "gh-auth-proxy sidecar 'claude-gh-proxy-" "${CONTAINER_STDERR}" \
+    || die "host-side: gh-auth-proxy sidecar did not start in the --gh pass"
+
+  if docker ps -a --format '{{.Names}}' | grep -qE '^claude-(egress|gh)-proxy-' \
+     || docker network ls --format '{{.Name}}' | grep -qE '^claude-(egress|gh)-'; then
+    die "host-side: claude-egress-* / claude-gh-* resources left behind after teardown"
   fi
-  log "host-side PASS: no claude-egress-* resources left behind"
+  log "host-side PASS: no claude-egress-* / claude-gh-* resources left behind"
 elif [ "${VOLSTATE}" = "warm" ]; then
   # First run: cold — populates the named volume.
   log "Warm cell: running cold pass first..."
