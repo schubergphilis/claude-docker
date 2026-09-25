@@ -46,6 +46,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import NamedTuple
@@ -209,8 +210,7 @@ def max_stable(versions) -> str:
 
 
 def newest_within_major(versions, major: str) -> str:
-    within = [v for v in versions if SEMVER_RE.match(v) and v.split(".")[0] == major]
-    return max(within, key=_semver_key) if within else ""
+    return max_stable(v for v in versions if major_of(v) == major)
 
 
 def major_of(v: str) -> str:
@@ -308,17 +308,15 @@ def aws_cli_tags():
 
 
 # ---- resolution ------------------------------------------------------------
+@dataclass(slots=True)
 class Result:
-    __slots__ = ("status", "version", "age", "held", "held_age", "blocked_major", "note")
-
-    def __init__(self):
-        self.status = ""            # UPDATE | NOCHANGE | OVERRIDE | ERROR
-        self.version = ""
-        self.age = ""
-        self.held = ""
-        self.held_age = ""
-        self.blocked_major = ""
-        self.note = ""              # free-text annotation for the report
+    status: str = ""            # UPDATE | NOCHANGE | OVERRIDE | ERROR
+    version: str = ""
+    age: str = ""
+    held: str = ""
+    held_age: str = ""
+    blocked_major: str = ""
+    note: str = ""              # free-text annotation for the report
 
 
 def _age_days(now: datetime, iso: str) -> str:
