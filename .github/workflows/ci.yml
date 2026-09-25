@@ -221,6 +221,21 @@ jobs:
           #     dropped process lands in exactly that primary group).
           run_cell --uid=501 --gid=501 --volstate=cold --ephemeral=0
 
+      - name: Egress allowlist smoke (run.sh end-to-end)
+        # --egress-allowlist lives entirely in run.sh (internal network, squid
+        # sidecar, proxy env, teardown). Like the cells above these drive
+        # run.sh, but with the real docker, so the sidecars and their teardown
+        # are exercised as well. They prove that an allowlisted host is
+        # reachable and a non-allowlisted one is refused, and, the load-bearing
+        # part, that a proxy-unaware client has no route out at all. Same job
+        # as the build for the same reason as the step above.
+        #   1. plain  — the allowlist, the denies above it, DNS, teardown
+        #   2. --gh   — composition: GitHub traffic via squid → gh sidecar
+        run: |
+          set -euo pipefail
+          IMAGE=claude-docker:ci bash smoke/egress.sh
+          IMAGE=claude-docker:ci bash smoke/egress.sh --gh
+
       # Known-CVE scanning of the image, in two passes over the same artifact.
       # Like the steps above, these must live in docker-build: Trivy resolves an
       # unqualified reference against the local daemon first, and this is the

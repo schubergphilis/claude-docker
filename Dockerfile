@@ -84,6 +84,10 @@ RUN rm -f /usr/bin/pebble && ! test -e /usr/bin/pebble
 # tar/brace-expansion/ip-address trail their upstream fixes by one release
 # each until NodeSource's nodejs package catches up — drop the extra
 # install once it does.
+# squid is not for the agent: run.sh --egress-allowlist runs this same image
+# as its forward-proxy sidecar (--entrypoint /usr/sbin/squid), so there is no
+# second image to pull or pin. It comes from the Ubuntu archive, so it moves
+# only within this base release; a major upgrade arrives with a FROM bump.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
@@ -103,6 +107,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       less \
       openssh-client \
       unzip \
+      squid \
  && npm install -g --ignore-scripts npm@11.19.1 \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
