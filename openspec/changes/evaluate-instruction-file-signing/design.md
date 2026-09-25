@@ -111,34 +111,8 @@ provable evidence that production ran the approved policy. For a solo user it
 costs a browser round-trip and a public log entry per skill edit, and buys no
 guarantee beyond what a hash gives.
 
-## UX and failure behaviour (if built)
-
-Any implementation must follow the issue's constraints. They are recorded here
-so a later implementation does not relitigate them:
-
-- Opt-in via an env var pointing at a trust policy file, the same shape as
-  `CLAUDE_DOCKER_GH_POLICY`. Off by default.
-- **Fail closed.** If verification is enabled and a signature is missing,
-  malformed, or from the wrong identity (or a hash mismatches), `run.sh` aborts
-  before any mount is built. Never mount-and-warn.
-- Verify the **staged** copy (after `cp -RL`), not the source path. The bytes
-  checked are then the bytes mounted, and a symlink retargeted between check and
-  mount cannot slip through.
-- Surface the state in `CLAUDE_DOCKER_FLAGS` (e.g. a `verified` tag) so an
-  unverified session is visibly unverified.
-- Per-file signing means every skill edit needs a re-sign. A single signed
-  manifest of per-file digests (one signature per config dir) cuts that to one
-  signing operation, and is what A or B would verify in practice.
-
-## Cost summary
-
-| Option | Host deps | Network at verify | Solo tamper-evidence | Team provenance | Effort |
-| --- | --- | --- | --- | --- | --- |
-| A cosign | cosign binary | Optional (trusted root) | Yes | Yes | Medium |
-| B sigstore-python | Python ≥3.10 + package | Optional (`--offline`) | Yes | Yes | Medium |
-| C gitsign | gitsign; config dir must be a git repo | Yes (default) | Partly | Yes | Medium–high |
-| D hash approval | none | No | Yes | No | Small |
-| E docs only | none | No | No | No | Trivial |
+If built later: the constraints in #81, plus verify the staged (post-`cp -RL`) copy against
+one signed manifest.
 
 ## Decision / recommendation
 
@@ -155,7 +129,7 @@ so a later implementation does not relitigate them:
    `verify-blob` over a single signed manifest, with `--certificate-identity` and
    `--certificate-oidc-issuer` pinned in the policy file and `--trusted-root` for
    offline hosts. gitsign fits instead if the skill set ships as a git repo.
-   Either one fits the UX constraints above.
+   Either one fits the constraints above.
 5. **Keep workspace `CLAUDE.md` / `.claude/` out of any signing scope.** The
    control for untrusted repos is the existing guidance: `--ephemeral --ro` and
    no credential flags. D's approve-on-first-use is the only mechanism that
@@ -165,4 +139,4 @@ so a later implementation does not relitigate them:
 
 - Do the maintainers accept (2)? If so, the Sigstore part of #81 can close as
   `wontfix` once this change is archived. If not, a follow-up change adds the
-  `host-config-parity` requirement and the implementation per the UX section.
+  `host-config-parity` requirement and the implementation per the constraints above.
