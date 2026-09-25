@@ -31,6 +31,15 @@ OP = f"""#!/bin/sh
 echo "no item at $2" >&2; exit 1
 """
 
+# Host glab: answers `config get host` from GITLAB_HOST (as real glab does) and
+# holds a token only for gl.example.com; a missing --host yields nothing.
+GLAB_SECRET = "glpat-from-host-glab"
+GLAB = f"""#!/bin/sh
+[ "$*" = "config get host" ] && {{ echo "$GITLAB_HOST"; exit 0; }}
+[ "$*" = "config get token --host gl.example.com" ] && echo "{GLAB_SECRET}"
+exit 0
+"""
+
 
 class OpReferenceTest(unittest.TestCase):
     def setUp(self):
@@ -49,14 +58,16 @@ class OpReferenceTest(unittest.TestCase):
         p.write_text(body)
         p.chmod(0o755)
 
-    def _run(self, token):
+    def _run(self, token, **extra):
         env = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.home),
             "STUB_LOG": str(self.log),
             "CLAUDE_DOCKER_RUNTIME": "docker",
-            "GITLAB_TOKEN": token,
+            **extra,
         }
+        if token is not None:
+            env["GITLAB_TOKEN"] = token
         return subprocess.run(
             ["bash", str(RUN_SH), "--glab", str(self.ws)],
             env=env, capture_output=True, text=True, timeout=60,
@@ -89,6 +100,22 @@ class OpReferenceTest(unittest.TestCase):
     def test_failed_read_exits(self):
         self._stub("op", OP)
         self._assert_fails_closed(self._run("op://Private/Missing/token"))
+
+    def test_glab_token_discovered_for_default_host(self):
+        # The stub prints a token only for `config get token --host
+        # gl.example.com`, the host GITLAB_HOST names in URL form.
+        self._stub("glab", GLAB)
+        r = self._run(None, GITLAB_HOST="https://gl.example.com")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual((self.log / "token").read_text(), GLAB_SECRET)
+        argv = (self.log / "argv").read_text().splitlines()
+        self.assertIn("GITLAB_TOKEN", argv)
+        self.assertIn("GITLAB_HOST", argv)
+        self.assertFalse(any(GLAB_SECRET in a for a in argv))
+        # An explicit value, op:// included, is never replaced by discovery.
+        self._stub("op", OP)
+        self._run(REF, GITLAB_HOST="https://gl.example.com")
+        self.assertEqual((self.log / "token").read_text(), SECRET)
 
 
 if __name__ == "__main__":

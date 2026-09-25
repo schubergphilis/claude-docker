@@ -40,7 +40,7 @@ Host credentials (files or env vars) SHALL NOT reach the container unless the us
   `--gh-direct` together SHALL exit with an error. The mode SHALL surface as
   a distinct `gh-direct` entry in `CLAUDE_DOCKER_FLAGS` so the statusline tag
   distinguishes it from proxied `gh`.
-- `--glab`: mount the platform-appropriate glab config dir — `~/Library/Application Support/glab-cli` on macOS, `~/.config/glab-cli` on Linux — at `/root/.config/glab-cli:ro`; forward `GITLAB_TOKEN` when set on the host.
+- `--glab`: mount the platform-appropriate glab config dir — `~/Library/Application Support/glab-cli` on macOS, `~/.config/glab-cli` on Linux — at `/root/.config/glab-cli:ro`; forward `GITLAB_TOKEN` and `GITLAB_HOST` when set on the host. If `GITLAB_TOKEN` is not set (an `op://` value counts as set and is resolved instead), `run.sh` SHALL attempt to retrieve the host glab token by running `glab config get token --host <host>`, where `<host>` is the hostname of glab's default host (`glab config get host`, which honours `GITLAB_HOST`; `gitlab.com` if empty). That command also reads tokens glab stored in the OS keyring. A discovered token SHALL be forwarded as `GITLAB_TOKEN` by bare name so it never appears in argv. If `glab` is not on the host PATH or returns no token, `run.sh` SHALL continue silently without one.
 - `--tfe`: when present on the host, mount `~/.terraform.d/credentials.tfrc.json` at `/root/.terraform.d/credentials.tfrc.json:ro`; forward `TF_TOKEN_app_terraform_io` when set on the host. Targets `app.terraform.io` (HCP Terraform); self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are out of scope for this opt-in.
 - `--az`: forward `AZURE_DEVOPS_EXT_PAT` and `AZURE_DEVOPS_ORG_URL` when set on the host; when present on the host, mount `~/.azure/azureProfile.json` at `/root/.azure/azureProfile.json:ro` and `~/.azure/clouds.config` at `/root/.azure/clouds.config:ro`. `AZURE_DEVOPS_ORG_URL` SHALL be the only source of the Azure DevOps hostname — nothing SHALL assume `dev.azure.com`, so Azure DevOps Server (on-prem, custom hostname) works the same as Services. `run.sh` SHALL NOT attempt host-side PAT discovery (`az` has no command that prints a usable PAT). Targets the `azure-devops` extension only; general Azure resource management and its credentials (`ARM_*`, `AZURE_CLIENT_SECRET`, service principals) are out of scope for this opt-in.
 
@@ -82,6 +82,27 @@ copied in from the host or derived inside the container.
 - **WHEN** user runs `claude-docker --glab ~/repo`
 - **THEN** `glab auth status` reports "logged in" without prompting
 - **AND** writes to `/root/.config/glab-cli/` from inside the container fail with EROFS
+
+#### Scenario: --glab falls back to the host glab token
+
+- **GIVEN** `GITLAB_TOKEN` is not set on the host and `GITLAB_HOST=https://gitlab.example.com` is
+- **AND** host `glab auth login` stored a token for `gitlab.example.com`, in `config.yml` or the OS keyring
+- **WHEN** user runs `claude-docker --glab ~/repo`
+- **THEN** the container receives that token as `GITLAB_TOKEN`, and `GITLAB_HOST`
+- **AND** neither token nor host value appears in the `docker run` argv
+
+#### Scenario: --glab keeps an explicit GITLAB_TOKEN
+
+- **GIVEN** `GITLAB_TOKEN` is set on the host, as a plain value or an `op://` reference
+- **WHEN** user runs `claude-docker --glab ~/repo`
+- **THEN** host `glab` is not asked for a token and the container receives the (resolved) `GITLAB_TOKEN`
+
+#### Scenario: --glab is silent when glab is unavailable
+
+- **GIVEN** `GITLAB_TOKEN` is not set on the host
+- **AND** `glab` is not on the host PATH, or has no token for the default host
+- **WHEN** user runs `claude-docker --glab ~/repo`
+- **THEN** the container starts without `GITLAB_TOKEN` and no error is printed
 
 #### Scenario: --gh keeps the host token out of the agent container
 

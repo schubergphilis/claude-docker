@@ -63,7 +63,9 @@ Wrapper flags:
                       *.ghe.com) or hosts that can't run the sidecar.
                       Mutually exclusive with --gh.
   --glab              Opt in to GitLab: mount glab-cli config (:ro) and
-                      forward GITLAB_TOKEN; unmask in-container glab login.
+                      forward GITLAB_TOKEN (env, else host glab's stored
+                      token, keyring included) and GITLAB_HOST; unmask
+                      in-container glab login.
   --tfe               Opt in to Terraform Cloud (app.terraform.io): mount
                       ~/.terraform.d/credentials.tfrc.json (:ro) when
                       present and forward TF_TOKEN_app_terraform_io;
@@ -390,7 +392,7 @@ ENV_VARS=()
 # --gh the token instead goes to the auth-proxy sidecar (see below), never
 # into the agent container.
 [ "$WITH_GH_DIRECT" = "1" ] && ENV_VARS+=(GH_TOKEN GITHUB_TOKEN)
-[ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN)
+[ "$WITH_GLAB" = "1" ] && ENV_VARS+=(GITLAB_TOKEN GITLAB_HOST)
 [ "$WITH_AWS" = "1" ]  && ENV_VARS+=(AWS_PROFILE AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN)
 [ "$WITH_TFE" = "1" ]  && ENV_VARS+=(TF_TOKEN_app_terraform_io)
 [ "$WITH_AZ" = "1" ]   && ENV_VARS+=(AZURE_DEVOPS_EXT_PAT AZURE_DEVOPS_ORG_URL)
@@ -471,6 +473,23 @@ fi
 # discovery precedence above (host env wins over the gh-CLI fallback). Empty
 # when --gh wasn't passed or no token was found either way.
 GH_HOST_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-$GH_DISCOVERED_TOKEN}}"
+# GitLab token discovery for --glab, same shape as gh's: host GITLAB_TOKEN
+# (already op://-resolved above) wins; else ask host glab for the token of its
+# default host (GITLAB_HOST, else config.yml's `host`, else gitlab.com).
+# `glab config get token --host` reads the OS keyring too, which the read-only
+# config mount can't carry; without --host it never looks at per-host tokens.
+# Silent skip when glab is absent or not logged in. Forwarded by bare name.
+if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ] \
+   && command -v glab >/dev/null 2>&1; then
+  _glab_host=$(GLAB_CHECK_UPDATE=false glab config get host 2>/dev/null) || true
+  _glab_host=${_glab_host#*://}
+  _glab_host=${_glab_host%%/*}
+  GITLAB_TOKEN=$(GLAB_CHECK_UPDATE=false glab config get token --host "${_glab_host:-gitlab.com}" 2>/dev/null) || true
+  if [ -n "$GITLAB_TOKEN" ]; then
+    export GITLAB_TOKEN
+    ENV_ARGS+=("-e" "GITLAB_TOKEN")
+  fi
+fi
 
 # Forward host git identity so in-container `git commit` works without a
 # per-invocation `-c user.email=...` dance. Non-opt-in: user.name/user.email
