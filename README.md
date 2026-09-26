@@ -277,20 +277,6 @@ Forwarded: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `A
 
 **Private CA.** `CLAUDE_DOCKER_API_CA` (PEM) is mounted read-only and installed into the container's system trust store by the entrypoint, before privilege drop — the same step that installs the `--gh` sidecar CA. Claude Code trusts the OS store by default, so nothing else is needed. A set path that isn't a file is a startup error. Ignored without `--api`.
 
-**Key from a secret manager (1Password).** A host `apiKeyHelper` in `~/.claude/settings.json` is not used in the container: that file isn't forwarded, and neither `op` nor the 1Password app is in the image. Resolve the key on the host instead and hand it over as `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`, which is what LiteLLM expects, and it skips the "use this API key?" prompt that `ANTHROPIC_API_KEY` triggers):
-
-```bash
-# 1Password resolves the op:// reference before launch; --no-masking keeps Claude's TUI working
-ANTHROPIC_BASE_URL=https://litellm.internal \
-ANTHROPIC_AUTH_TOKEN="op://Employee/litellm/credential" \
-  op run --no-masking -- claude-docker --api ~/repo
-
-# or reuse the apiKeyHelper script you already have
-ANTHROPIC_AUTH_TOKEN="$(~/.claude/litellm_key.sh)" claude-docker --api ~/repo
-```
-
-The unlock prompt appears once, on the host, before the container starts. The key is then fixed for the life of the container (unlike `apiKeyHelper`, it isn't re-read), so start a new session after rotating it. A shell function in your rc file saves retyping it.
-
 **Not covered yet:** Amazon Bedrock and Google Vertex (`CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`) need cloud credentials as well as endpoint config, and are deferred to a follow-up.
 
 **File-based alternative.** Claude Code's settings accept an `env` block, so the same variables can live in `settings.docker.json` (see [Host config parity](#host-config-parity)) without `--api`:
@@ -299,7 +285,40 @@ The unlock prompt appears once, on the host, before the container starts. The ke
 { "env": { "ANTHROPIC_BASE_URL": "https://litellm.internal", "ANTHROPIC_AUTH_TOKEN": "..." } }
 ```
 
-This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager.
+This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager (see [`ANTHROPIC_AUTH_TOKEN` from 1Password](#anthropic_auth_token-from-1password)).
+
+#### `ANTHROPIC_AUTH_TOKEN` from 1Password
+
+Keep the gateway token in 1Password and let the 1Password CLI resolve it on the host at launch, so the plaintext token never sits in a file or your shell profile:
+
+1. **One-time setup.** Install the CLI (`brew install 1password-cli`) and, in the 1Password app, turn on _Settings → Developer → Integrate with 1Password CLI_, so `op` unlocks with Touch ID instead of a separate sign-in. Check it with `op whoami`.
+2. **Get the secret reference.** In the app, open the item and use the field's ▾ menu → _Copy Secret Reference_ (or `op item get "<item>" --vault <vault> --format json`). It looks like `op://<vault>/<item>/<field>`. Test it:
+
+   ```bash
+   op read "op://Employee/litellm/credential"
+   ```
+
+3. **Export the reference, not the secret**, e.g. in `~/.zshrc`. It is only a pointer, so it is safe in a file:
+
+   ```bash
+   export ANTHROPIC_BASE_URL=https://litellm.internal
+   export ANTHROPIC_AUTH_TOKEN="op://Employee/litellm/credential"
+   ```
+
+4. **Launch through `op run`**, which swaps the reference for the real value before `claude-docker` starts. Touch ID prompts once, on the host:
+
+   ```bash
+   op run --no-masking -- claude-docker --api ~/repo
+   # optional: alias claude-llm='op run --no-masking -- claude-docker --api'
+   ```
+
+Notes:
+
+- `--no-masking` is required: with masking on, `op` pipes stdout/stderr and Claude's interactive screen breaks.
+- Forget `op run` and the literal `op://…` string is forwarded as the token; the gateway answers 401.
+- Use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY`: it is sent as `Authorization: Bearer` (what LiteLLM expects) and skips Claude's "use this API key?" prompt.
+- A host `apiKeyHelper` in `~/.claude/settings.json` is not used in the container: that file isn't forwarded, and `op` isn't in the image. An existing helper script still works when run on the host: `ANTHROPIC_AUTH_TOKEN="$(~/.claude/litellm_key.sh)" claude-docker --api ~/repo`.
+- The token is read once, when the container starts (it isn't refreshed like `apiKeyHelper`), so start a new session after rotating it.
 
 ## File ownership
 
