@@ -8,7 +8,7 @@
 # Parameters (flags or env vars):
 #   --uid=N         HOST_UID to pass into the container (default: $(id -u))
 #   --gid=N         HOST_GID to pass into the container (default: $(id -g))
-#   --optins=CSV    comma-separated credential opt-ins: aws,glab,tfe (default: "")
+#   --optins=CSV    comma-separated credential opt-ins: aws,glab,tfe,api (default: "")
 #   --volstate=S    cold|warm — cold=fresh volume, warm=run twice reusing a volume
 #   --ro=0|1        1 = mount workspace :ro (robustness cell)
 #   --ephemeral=0|1 1 = skip named volumes (--ephemeral mode)
@@ -207,11 +207,25 @@ setup_fake_tfe() {
   ENV_ARGS+=("-e" "TF_TOKEN_app_terraform_io=fake-tfe-token")
 }
 
+# --api: a throwaway self-signed CA at run.sh's CLAUDE_DOCKER_API_CA mount
+# target, so the entrypoint's update-ca-certificates step is exercised.
+setup_fake_api() {
+  openssl req -x509 -newkey rsa:2048 -nodes -days 1 -subj "/CN=claude-docker smoke CA" \
+    -keyout "${CREDS_HOST}/api-ca.key" -out "${CREDS_HOST}/api-ca.crt" >/dev/null 2>&1 \
+    || die "openssl could not generate the --api smoke CA"
+  chmod 0644 "${CREDS_HOST}/api-ca.crt"
+  MOUNT_ARGS+=(
+    "-v" "${CREDS_HOST}/api-ca.crt:/usr/local/share/ca-certificates/claude-docker-api.crt:ro"
+  )
+  ENV_ARGS+=("-e" "ANTHROPIC_BASE_URL=https://llm.smoke.invalid")
+}
+
 # Parse OPTINS and apply credential mounts; for non-granted opt-ins add tmpfs
 # masks (mirrors run.sh's EPHEMERAL=0 block).
 WITH_AWS=0
 WITH_GLAB=0
 WITH_TFE=0
+WITH_API=0
 
 if [ -n "${OPTINS}" ]; then
   old_ifs="$IFS"
@@ -222,7 +236,8 @@ if [ -n "${OPTINS}" ]; then
       aws)  WITH_AWS=1  ;;
       glab) WITH_GLAB=1 ;;
       tfe)  WITH_TFE=1  ;;
-      *)    die "unknown opt-in: '$optin'" ;;
+      api)  WITH_API=1  ;;
+      *)   die "unknown opt-in: '$optin'" ;;
     esac
   done
   IFS="$old_ifs"
@@ -231,6 +246,7 @@ fi
 [ "${WITH_AWS}"  = "1" ] && setup_fake_aws
 [ "${WITH_GLAB}" = "1" ] && setup_fake_glab
 [ "${WITH_TFE}"  = "1" ] && setup_fake_tfe
+[ "${WITH_API}"  = "1" ] && setup_fake_api
 
 # ---------------------------------------------------------------------------
 # Volume / ephemeral handling
