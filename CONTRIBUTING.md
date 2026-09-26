@@ -57,7 +57,7 @@ python3 -m unittest discover -s tests -p 'test_*.py' -v
 
 # Build the image and run a smoke cell against it
 docker build -t claude-code:local .
-IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe
+IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
 See [`README.md`](README.md) for the full architecture, threat model, and the
