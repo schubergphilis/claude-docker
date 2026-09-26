@@ -77,6 +77,14 @@ Wrapper flags:
                       ~/.netrc is NOT mounted (too broad — see README); npmrc
                       and pip.conf are whole-file mounts, so scope them to the
                       registry. See README "Private package registries".
+  --api               Opt in to a custom model endpoint (LiteLLM, gateway):
+                      forward ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN /
+                      ANTHROPIC_API_KEY / ANTHROPIC_CUSTOM_HEADERS /
+                      ANTHROPIC_MODEL / ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL
+                      / ANTHROPIC_SMALL_FAST_MODEL when set. The endpoint
+                      receives all prompt content. Private CA: see
+                      CLAUDE_DOCKER_API_CA. Bedrock/Vertex not covered.
+                      Requires ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY.
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -107,6 +115,9 @@ Environment:
   CLAUDE_DOCKER_GH_POLICY  Path to a Caddyfile snippet imported into the --gh
                            sidecar's api.github.com site block, to extend the
                            default request-filtering policy.
+  CLAUDE_DOCKER_API_CA     Path to a PEM CA certificate for the --api endpoint;
+                           installed into the container's trust store. Ignored
+                           without --api.
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -135,6 +146,7 @@ WITH_GH_DIRECT=0
 WITH_GLAB=0
 WITH_TFE=0
 WITH_REGISTRY=0
+WITH_API=0
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
@@ -153,6 +165,7 @@ for arg in "$@"; do
     --glab)         WITH_GLAB=1 ;;
     --tfe)          WITH_TFE=1 ;;
     --registry)     WITH_REGISTRY=1 ;;
+    --api)          WITH_API=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
     --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
     --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -168,6 +181,14 @@ done
 # outright (same exit style as the unknown-flag case above).
 if [ "$WITH_GH" = "1" ] && [ "$WITH_GH_DIRECT" = "1" ]; then
   echo "claude-docker: --gh and --gh-direct are mutually exclusive — pick the auth-proxy sidecar (--gh) or legacy token forwarding (--gh-direct)" >&2
+  exit 1
+fi
+
+# --api without a gateway token would let Claude Code send the volume's claude.ai
+# OAuth token to ANTHROPIC_BASE_URL as its bearer. Empty counts as unset, so a
+# failed `$(helper)` / `op read` stops here too.
+if [ "$WITH_API" = "1" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "claude-docker: --api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY set (non-empty); without one, Claude Code sends your claude.ai OAuth token to the gateway" >&2
   exit 1
 fi
 
@@ -436,6 +457,18 @@ if [ "$WITH_REGISTRY" = "1" ]; then
   [ -n "$pip_conf" ] && MOUNT_ARGS+=("-v" "$(hostpath "$pip_conf"):/root/.config/pip/pip.conf:ro")
 fi
 
+# --api private CA: mounted where the entrypoint's update-ca-certificates step
+# (shared with the --gh sidecar CA) picks it up. Claude Code's native binary
+# reads the OS trust store, so no NODE_EXTRA_CA_CERTS is needed. A set-but-
+# missing path is fatal: skipping it would fail later at the first request.
+if [ "$WITH_API" = "1" ] && [ -n "${CLAUDE_DOCKER_API_CA:-}" ]; then
+  if [ ! -f "$CLAUDE_DOCKER_API_CA" ]; then
+    echo "claude-docker: CLAUDE_DOCKER_API_CA '$CLAUDE_DOCKER_API_CA' is not a file" >&2
+    exit 1
+  fi
+  MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_DOCKER_API_CA"):/usr/local/share/ca-certificates/claude-docker-api.crt:ro")
+fi
+
 ENV_VARS=()
 # GH_TOKEN/GITHUB_TOKEN are forwarded verbatim only under --gh-direct: under
 # --gh the token instead goes to the auth-proxy sidecar (see below), never
@@ -450,6 +483,9 @@ ENV_VARS=()
 # UV_NETRC is intentionally omitted: it points uv at a netrc file we no longer
 # mount, so forwarding it would dangle at a host path absent in the container.
 [ "$WITH_REGISTRY" = "1" ] && ENV_VARS+=(npm_config_registry NPM_CONFIG_REGISTRY NODE_AUTH_TOKEN NPM_TOKEN UV_INDEX_URL UV_DEFAULT_INDEX UV_EXTRA_INDEX_URL UV_INDEX UV_KEYRING_PROVIDER PIP_INDEX_URL PIP_EXTRA_INDEX_URL PIP_TRUSTED_HOST PIPENV_PYPI_MIRROR)
+# --api: Claude Code endpoint vars (code.claude.com/docs/en/env-vars). Bedrock/
+# Vertex/Foundry (CLAUDE_CODE_USE_*) are deliberately out of scope for now.
+[ "$WITH_API" = "1" ] && ENV_VARS+=(ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_CUSTOM_HEADERS ANTHROPIC_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_SMALL_FAST_MODEL)
 # Guarded: bash 3.2 under `set -u` errors on empty-array expansion.
 if [ "${#ENV_VARS[@]}" -gt 0 ]; then
   for v in "${ENV_VARS[@]}"; do
@@ -520,6 +556,7 @@ DOCKER_FLAGS=()
 [ "$WITH_GLAB" = "1" ]     && DOCKER_FLAGS+=("glab")
 [ "$WITH_TFE" = "1" ]      && DOCKER_FLAGS+=("tfe")
 [ "$WITH_REGISTRY" = "1" ] && DOCKER_FLAGS+=("registry")
+[ "$WITH_API" = "1" ]      && DOCKER_FLAGS+=("api")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
 [ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
 if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
