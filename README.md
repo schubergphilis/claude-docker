@@ -277,6 +277,20 @@ Forwarded: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `A
 
 **Private CA.** `CLAUDE_DOCKER_API_CA` (PEM) is mounted read-only and installed into the container's system trust store by the entrypoint, before privilege drop — the same step that installs the `--gh` sidecar CA. Claude Code trusts the OS store by default, so nothing else is needed. A set path that isn't a file is a startup error. Ignored without `--api`.
 
+**Key from a secret manager (1Password).** A host `apiKeyHelper` in `~/.claude/settings.json` is not used in the container: that file isn't forwarded, and neither `op` nor the 1Password app is in the image. Resolve the key on the host instead and hand it over as `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`, which is what LiteLLM expects, and it skips the "use this API key?" prompt that `ANTHROPIC_API_KEY` triggers):
+
+```bash
+# 1Password resolves the op:// reference before launch; --no-masking keeps Claude's TUI working
+ANTHROPIC_BASE_URL=https://litellm.internal \
+ANTHROPIC_AUTH_TOKEN="op://Employee/litellm/credential" \
+  op run --no-masking -- claude-docker --api ~/repo
+
+# or reuse the apiKeyHelper script you already have
+ANTHROPIC_AUTH_TOKEN="$(~/.claude/litellm_key.sh)" claude-docker --api ~/repo
+```
+
+The unlock prompt appears once, on the host, before the container starts. The key is then fixed for the life of the container (unlike `apiKeyHelper`, it isn't re-read), so start a new session after rotating it. A shell function in your rc file saves retyping it.
+
 **Not covered yet:** Amazon Bedrock and Google Vertex (`CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`) need cloud credentials as well as endpoint config, and are deferred to a follow-up.
 
 **File-based alternative.** Claude Code's settings accept an `env` block, so the same variables can live in `settings.docker.json` (see [Host config parity](#host-config-parity)) without `--api`:
