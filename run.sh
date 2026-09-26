@@ -84,6 +84,7 @@ Wrapper flags:
                       / ANTHROPIC_SMALL_FAST_MODEL when set. The endpoint
                       receives all prompt content. Private CA: see
                       CLAUDE_DOCKER_API_CA. Bedrock/Vertex not covered.
+                      Requires ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY.
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -180,6 +181,14 @@ done
 # outright (same exit style as the unknown-flag case above).
 if [ "$WITH_GH" = "1" ] && [ "$WITH_GH_DIRECT" = "1" ]; then
   echo "claude-docker: --gh and --gh-direct are mutually exclusive — pick the auth-proxy sidecar (--gh) or legacy token forwarding (--gh-direct)" >&2
+  exit 1
+fi
+
+# --api without a gateway token would let Claude Code send the volume's claude.ai
+# OAuth token to ANTHROPIC_BASE_URL as its bearer. Empty counts as unset, so a
+# failed `$(helper)` / `op read` stops here too.
+if [ "$WITH_API" = "1" ] && [ -z "${ANTHROPIC_AUTH_TOKEN:-}" ] && [ -z "${ANTHROPIC_API_KEY:-}" ]; then
+  echo "claude-docker: --api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY set (non-empty); without one, Claude Code sends your claude.ai OAuth token to the gateway" >&2
   exit 1
 fi
 
