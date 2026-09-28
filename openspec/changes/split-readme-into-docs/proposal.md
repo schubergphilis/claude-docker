@@ -41,11 +41,13 @@ Closes [#76](https://github.com/schubergphilis/claude-docker/issues/76).
   naming a file and a heading was incidental precision that made prose layout a
   spec-level concern. Location-independent wording means the next reorganisation needs
   no spec change at all.
-- **Make the broken-link CI step blocking.** `.github/workflows/ci.yml` runs lychee with
-  `continue-on-error: true`. That was defensible when every link was intra-README; with
+- **Make the broken-link check blocking.** `.github/workflows/ci.yml` ran lychee with
+  `continue-on-error: true` — and, on `main`, against a `lychee.toml` that failed to parse,
+  so it never checked a link. That was survivable when every link was intra-README; with
   cross-file links between five documents, a silent break is the expected failure mode
-  and the check has to be able to fail. Verified against `main` first: the link graph is
-  already clean, so this turns red only on a real regression.
+  and the check has to be able to fail. The step is replaced by mcvs-general-action's
+  `lint-links` testing-type in `general.yml`, which gates, and `lychee.toml` is fixed so
+  it parses and keeps the check offline.
 - **Fix the one user-visible pointer.** `run.sh:79` prints `See README "Private package
   registries".` from the `--help` heredoc; that section is now in `docs/auth.md`.
 
@@ -96,10 +98,12 @@ output, only that each flag appears.
   `README.md#threat-model` and are repointed in the same commit.
 - `run.sh` — one `--help` line and one comment. `Dockerfile` and
   `.github/workflows/pins-updater.yml` — one comment each.
-- `.github/workflows/ci.yml` — the lychee step loses `continue-on-error`. The
-  markdownlint step keeps it: there is no markdownlint config in the repo, so it runs at
+- `.github/workflows/ci.yml` — the lychee step is removed; `general.yml` bumps
+  mcvs-general-action to v0.7.1 and adds `lint-links` to its matrix. The
+  markdownlint step keeps `continue-on-error`: there is no markdownlint config in the repo, so it runs at
   defaults and MD013 fires on nearly every line of this project's prose style.
-- `lychee.toml` is unchanged — its `**/*.md` glob already covers `docs/`.
+- `lychee.toml` — `include_fragments` becomes the v0.24 enum and the invalid `include`
+  regexes go; `offline = true` and `exclude_path` stay.
 - Every existing anchor slug survives, because the moved headings keep their text
   verbatim. A stale bookmark to `README.md#threat-model` breaks; a bookmark to the
   heading text finds it.

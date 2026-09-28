@@ -60,8 +60,9 @@
 
 - [x] 4.1 Re-run the link check across all five documents: every relative path resolves and
   every `#fragment` matches a heading in the file it names
-- [x] 4.2 Drop `continue-on-error: true` from `ci.yml`'s "Broken relative links" step, now
-  that a silent cross-file break is the expected failure mode. Markdownlint keeps its
+- [x] 4.2 Make the link check blocking, now that a silent cross-file break is the expected
+  failure mode: replace `ci.yml`'s advisory "Broken relative links" step with
+  mcvs-general-action's `lint-links` in `general.yml`. Markdownlint keeps its
   `continue-on-error`: the repo has no markdownlint config, so it runs at defaults and MD013
   fires on nearly every prose line here
 - [x] 4.3 `bash run.sh --help` renders and names `docs/auth.md`; `shellcheck` clean
