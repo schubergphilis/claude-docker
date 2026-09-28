@@ -68,6 +68,7 @@
 - [x] 4.4 Unit tests still pass — they do not read the docs, so this confirms the change
   stayed inside the prose
 - [x] 4.5 `openspec validate split-readme-into-docs --strict` passes
-- [ ] 4.6 Open the follow-up for the density fix: `README.md:274`'s 3,246-character bullet
-  wants the `pnpm dlx` half split out under its own heading, and `:278`'s hardening paragraph
-  wants an applied/not-applied table. Both land in `docs/security.md` unchanged here
+- [x] 4.6 Open the follow-up for the density fix (#113): `docs/security.md:13`'s
+  3,246-character bullet wants the `pnpm dlx` half split out under its own heading, and
+  `:17`'s hardening paragraph wants an applied/not-applied table. Both land in
+  `docs/security.md` unchanged here
