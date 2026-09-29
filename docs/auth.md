@@ -60,7 +60,7 @@ terraform login app.terraform.io
 claude-docker --tfe ~/repo
 ```
 
-Inside the session Claude runs `terraform` itself, or you type `! terraform plan`. The first `terraform` call installs the version `.terraform-version` names from `releases.hashicorp.com`: tfenv 3.2.2 defaults `TFENV_AUTO_INSTALL` to true, so no `tfenv install` step is needed.
+Inside the session Claude runs `terraform` itself, or you type `! terraform plan`. The first `terraform` call installs the version `.terraform-version` names from `releases.hashicorp.com`: tfenv defaults `TFENV_AUTO_INSTALL` to true, so no `tfenv install` step is needed.
 
 The image ships `tfenv` (a pure-bash terraform version manager) and **does not** ship a pre-installed `terraform` binary version — versions are project-pinned in `.terraform-version` (tfenv reads `required_version` from `*.tf` only when that file says `min-required` or `latest-allowed`) and a single bundled version would drift against real workspaces. Installed versions land under `/opt/tfenv/versions/`, which is **not** in the `claude-code-root` named volume; downloads do not persist across `docker run --rm` exits. Power users can build a child image (`FROM claude-code:local`) that runs `tfenv install <version>` at build time to bake a specific version into a derived image.
 
