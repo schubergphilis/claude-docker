@@ -31,15 +31,7 @@ The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinn
 
 ## CI smoke tests
 
-The container's runtime behaviour — privilege-drop, capability set, credential
-isolation, file ownership — is exercised by a smoke harness
-([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)).
-It runs in CI on **Linux** on every change (in the
-`docker-build` job, reusing the built image), across a matrix of cells: host UID
-1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` opt-ins
-(singly and combined), `--ephemeral`, and `--ro`. Most of the container's
-behaviour lives inside Docker's Linux VM and is identical regardless of host OS,
-so Linux CI covers the bulk of it.
+The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)). It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.
 
 Run a cell locally against a built image:
 
@@ -51,15 +43,7 @@ The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy
 
 ### Manual fallback checklist (macOS)
 
-There is **no automated macOS CI job**: GitHub-hosted `macos-latest` runners
-can't reliably provision a Docker daemon (the `vz` VM driver fails to boot under
-the runner's nested-virtualization limits, and the `qemu` driver hits an upstream
-Lima crash), so a hosted job can't even reach the assertions — and Colima's
-file-sharing may not match Docker Desktop's anyway. The one behaviour unique to
-macOS is **virtiofs collapsing `st_dev` across bind mounts**, which changes how
-`entrypoint.sh`'s `-xdev` chown-prune treats the `:ro` mounts under `/root`
-(see `entrypoint.sh:30-45`). Verify it by hand on a real Mac with Docker Desktop
-before shipping changes to `entrypoint.sh` / `run.sh` / `Dockerfile`:
+There is **no automated macOS CI job**: GitHub-hosted `macos-latest` runners can't reliably provision a Docker daemon (the `vz` VM driver fails to boot under the runner's nested-virtualization limits, and the `qemu` driver hits an upstream Lima crash), so a hosted job can't even reach the assertions — and Colima's file-sharing may not match Docker Desktop's anyway. The one behaviour unique to macOS is **virtiofs collapsing `st_dev` across bind mounts**, which changes how `entrypoint.sh`'s `-xdev` chown-prune treats the `:ro` mounts under `/root` (see `entrypoint.sh:30-45`). Verify it by hand on a real Mac with Docker Desktop before shipping changes to `entrypoint.sh` / `run.sh` / `Dockerfile`:
 
 - Run the smoke cells on macOS: `IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --volstate=warm` and `… --ro=1` and `… --optins=aws,glab,tfe` — the entrypoint must reach the dropped process with **no spurious `entrypoint: WARN`** despite the `:ro` mounts under `/root`.
 - File ownership round-trips to the host user and is editable without `sudo` on a real `~/repo` bind mount.
