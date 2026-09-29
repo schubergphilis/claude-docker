@@ -69,7 +69,8 @@
 - [x] 4.4 Unit tests still pass — they do not read the docs, so this confirms the change
   stayed inside the prose
 - [x] 4.5 `openspec validate split-readme-into-docs --strict` passes
-- [x] 4.6 Open the follow-up for the density fix (#113): `docs/security.md:13`'s
-  3,246-character bullet wants the `pnpm dlx` half split out under its own heading, and
-  `:17`'s hardening paragraph wants an applied/not-applied table. Both land in
-  `docs/security.md` unchanged here
+- [x] 4.6 Density fix for the two blocks the move kept verbatim (#113), done here as
+  commits on top of the move so the move itself stays checkable by diff: the runtime
+  code-fetch bullet in `docs/security.md` becomes a list of the runtime fetchers (its
+  build-time pin sentence folds into the hardening lists), and the hardening paragraph
+  becomes short Not applied / Applied at runtime / Applied at build time lists
