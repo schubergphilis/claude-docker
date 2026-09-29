@@ -58,13 +58,11 @@ terraform login app.terraform.io
 
 # Per session
 claude-docker --tfe ~/repo
-
-# Inside the container, fetch the project-pinned terraform version
-tfenv install            # reads .terraform-version, downloads from releases.hashicorp.com
-terraform plan
 ```
 
-The image ships `tfenv` (a pure-bash terraform version manager) and **does not** ship a pre-installed `terraform` binary version — versions are project-pinned (`required_version` / `.terraform-version`) and a single bundled version would drift against real workspaces. `tfenv install` writes terraform binaries under `/opt/tfenv/versions/`, which is **not** in the `claude-code-root` named volume; downloads do not persist across `docker run --rm` exits. Power users can build a child image (`FROM claude-code:local`) that runs `tfenv install <version>` at build time to bake a specific version into a derived image.
+Inside the session Claude runs `terraform` itself, or you type `! terraform plan`. The first `terraform` call installs the version `.terraform-version` names from `releases.hashicorp.com`: tfenv 3.2.2 defaults `TFENV_AUTO_INSTALL` to true, so no `tfenv install` step is needed.
+
+The image ships `tfenv` (a pure-bash terraform version manager) and **does not** ship a pre-installed `terraform` binary version — versions are project-pinned in `.terraform-version` (tfenv reads `required_version` from `*.tf` only when that file says `min-required` or `latest-allowed`) and a single bundled version would drift against real workspaces. Installed versions land under `/opt/tfenv/versions/`, which is **not** in the `claude-code-root` named volume; downloads do not persist across `docker run --rm` exits. Power users can build a child image (`FROM claude-code:local`) that runs `tfenv install <version>` at build time to bake a specific version into a derived image.
 
 Token alternative: instead of (or in addition to) the credentials file, export `TF_TOKEN_app_terraform_io=<token>` on the host and `--tfe` will forward it. The terraform CLI honours both.
 
@@ -106,6 +104,6 @@ claude-docker --registry ~/repo
 
 The captured token freezes for the life of the container (a CodeArtifact token is ≤12h) — when it expires, re-run the host `login`/`export` and relaunch. Same posture as the `--aws` SSO credentials.
 
-**No Python is bundled.** `pip`/`pipenv` themselves are not in the image (uv fetches its own Python; project runtimes live in child images). Run a pip-based tool via `uvx pipenv …` — pipenv shells out to pip, which reads the forwarded `pip.conf` / `PIP_*`. Caveat: if your feed is fully locked down with no public upstream, `pipenv` itself must be mirrored there for `uvx` to fetch it.
+**No Python is bundled.** `pip`/`pipenv` themselves are not in the image (uv fetches its own Python; project runtimes live in child images). Claude runs a pip-based tool via `uvx pipenv …` — pipenv shells out to pip, which reads the forwarded `pip.conf` / `PIP_*`. Caveat: if your feed is fully locked down with no public upstream, `pipenv` itself must be mirrored there for `uvx` to fetch it.
 
 **Build vs. runtime.** `--registry` is **runtime-only**. The image _build_ always resolves its own tooling (claude-code, openspec, pnpm) against the public npm registry / PyPI regardless of any private registry configured on your host — your `~/.npmrc` and `npm_config_*` env are neither in the build context nor inherited by Dockerfile `RUN` steps. That isolation is what keeps the build reproducible from the committed pins. Routing the build itself through a private registry is intentionally out of scope.
