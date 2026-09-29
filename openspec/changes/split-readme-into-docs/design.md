@@ -23,7 +23,10 @@ The grouping is by audience, not by topic adjacency:
 | `auth.md` | wiring up credentials for the first time | ~2,175 |
 | `security.md` | reviewing whether this is safe to run | ~1,900 |
 | `maintenance.md` | maintaining the pins, or debugging CI | ~1,390 |
-| `workflows.md` | customising an already-working setup | ~1,420 |
+| `usage.md` | customising an already-working setup | ~1,420 |
+
+Not `workflows.md`: in this repo "workflows" means GitHub Actions, and parity, file
+ownership and extending the image are not workflows anyway.
 
 Each lands at a readable page length. The alternative groupings considered and rejected:
 
@@ -35,7 +38,7 @@ Each lands at a readable page length. The alternative groupings considered and r
   model` away from its own four subsections, which is the one grouping in README that is
   genuinely coherent.
 
-`File ownership` (four lines) goes to `workflows.md` rather than `security.md` even
+`File ownership` (four lines) goes to `usage.md` rather than `security.md` even
 though the threat model links to it, because it describes a thing the container does to
 your files on every run, not a risk you accept.
 

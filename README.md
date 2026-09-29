@@ -39,7 +39,7 @@ docker pull ghcr.io/schubergphilis/claude-docker:v0.1.0
 export CLAUDE_DOCKER_IMAGE=ghcr.io/schubergphilis/claude-docker:v0.1.0
 ```
 
-`CLAUDE_DOCKER_IMAGE` is the existing image override ([Extending the image](docs/workflows.md#extending-the-image) uses the same variable); `run.sh` still defaults to `claude-code:local`, and building from your checkout stays fully supported. Pin whichever you use — an image and the `run.sh` beside it are not independently versioned.
+`CLAUDE_DOCKER_IMAGE` is the existing image override ([Extending the image](docs/usage.md#extending-the-image) uses the same variable); `run.sh` still defaults to `claude-code:local`, and building from your checkout stays fully supported. Pin whichever you use — an image and the `run.sh` beside it are not independently versioned.
 
 **Pin the full `v`-prefixed tag.** A `v0.1.0` tag publishes exactly `:v0.1.0` — there is no `latest`, no `:0.1`, and no semver expansion. The publishing action forces `flavor: latest=false` on `docker/metadata-action`'s default `type=ref` tagging and exposes no input to change either.
 
@@ -110,7 +110,7 @@ Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` c
 claude-docker --ephemeral --ro ~/untrusted-repo
 ```
 
-For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](docs/workflows.md#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](docs/security.md#threat-model) for what it does and doesn't protect.
+For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](docs/usage.md#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](docs/security.md#threat-model) for what it does and doesn't protect.
 
 ### Resuming sessions across workspaces
 
@@ -121,7 +121,7 @@ Conversation history persists in the shared `claude-code-home` volume (skipped u
 - [Auth model](docs/auth.md) — AWS SSO, GitHub auth proxy, Terraform Cloud, private registries
 - [Security](docs/security.md) — threat model, image vulnerability scanning
 - [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests
-- [Workflows](docs/workflows.md) — host config parity, worktrees, split panes, extending the image
+- [Usage](docs/usage.md) — host config parity, worktrees, split panes, extending the image
 
 ## Specs
 

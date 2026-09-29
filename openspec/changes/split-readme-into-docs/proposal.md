@@ -26,7 +26,7 @@ Closes [#76](https://github.com/schubergphilis/claude-docker/issues/76).
 
 - **Add `docs/` with four files**, each 1,400–2,200 words, mapped onto distinct
   audiences: `auth.md` (someone wiring up credentials), `security.md` (someone doing a
-  security review), `maintenance.md` (someone maintaining pins), `workflows.md`
+  security review), `maintenance.md` (someone maintaining pins), `usage.md`
   (someone customising their setup).
 - **README keeps the quickstart** — intro, Install, Prebuilt image from GHCR, Container
   runtime, Usage, Credential opt-in, Session flags, Resuming sessions — plus Specs and
@@ -91,7 +91,7 @@ output, only that each flag appears.
 
 ## Impact
 
-- `docs/auth.md`, `docs/security.md`, `docs/maintenance.md`, `docs/workflows.md` — new.
+- `docs/auth.md`, `docs/security.md`, `docs/maintenance.md`, `docs/usage.md` — new.
 - `README.md` — 458 lines to ~134; gains `## Documentation`.
 - 23 intra-README anchors become cross-file links; 12 repo-relative links inside moved
   text gain a `../` prefix. `AGENTS.md` and `CONTRIBUTING.md` both link

@@ -16,4 +16,4 @@ most often missed:
 
 [`README.md`](README.md) is the quickstart; the reference material lives in
 [`docs/`](docs/) — [auth](docs/auth.md), [security](docs/security.md),
-[maintenance](docs/maintenance.md), [workflows](docs/workflows.md).
+[maintenance](docs/maintenance.md), [usage](docs/usage.md).
