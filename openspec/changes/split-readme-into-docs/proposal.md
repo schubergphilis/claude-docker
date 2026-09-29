@@ -10,8 +10,8 @@ live because this repo has never had a `docs/` directory.
 
 This change moves the reference material out and leaves a quickstart. It is a
 **relocation, not a rewrite** — the prose is moved verbatim so the diff reviews as a
-move, and the density problems inside the moved text are a deliberate follow-up rather
-than a second thing to review here.
+move. The density problems inside the moved text are fixed in separate commits on top
+of the move, so each can be reviewed on its own.
 
 The cost that is invisible until you grep for it: `openspec/specs/` carries live
 requirements that locate this prose in README *by section name* — `` `claude-docker/README.md`
@@ -53,13 +53,13 @@ Closes [#76](https://github.com/schubergphilis/claude-docker/issues/76).
 
 Not in scope:
 
-- **Rewriting any moved prose.** `README.md:276` is ~500 words in a single bullet that
-  starts on `npx`/`uvx`/`tfenv` and spends most of its length on `pnpm dlx` provisioning
-  runtimes under four aliases — a subsection wearing a dash. `README.md:280` is the
-  entire applied/not-applied hardening posture as one 2,184-character paragraph. Both
-  are worth fixing and both land in `docs/security.md` unchanged here. A pure move is
-  reviewable with `git diff --find-copies`; move-plus-rewrite is not, and mixing them
-  makes the spec deltas harder to check. Move first, rewrite second.
+- **Rewriting moved prose in the move commit.** `README.md:276` is ~500 words in a
+  single bullet that starts on `npx`/`uvx`/`tfenv` and spends most of its length on
+  `pnpm dlx` provisioning runtimes under four aliases — a subsection wearing a dash.
+  `README.md:280` is the entire applied/not-applied hardening posture as one
+  2,184-character paragraph. Both land in `docs/security.md` unchanged in the move
+  commit, which stays reviewable with `git diff --find-copies`; the rewrite (#113) is
+  separate commits on top. Move first, rewrite second.
 - **An ADR directory.** `CONTRIBUTING.md:37-40` says architectural decisions live in
   each change's `design.md` and there is no separate ADR directory. That rule is about
   decision records and is untouched: `docs/` here is user-facing prose.
