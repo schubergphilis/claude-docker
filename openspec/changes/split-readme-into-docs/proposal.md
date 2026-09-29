@@ -2,11 +2,11 @@
 
 [`README.md`](../../../README.md) is 458 lines / ~35 min; `## Auth model` and `## Threat model` are 42% of it.
 
-A reader arriving to find out how to start a container has to scroll past an AWS SSO
-walkthrough, a TLS-interception sidecar design, a pin-refresh runbook and a macOS
-manual-test checklist to get there. None of that is wrong; it is just not front-door
-material, and there is nowhere else for it to live because this repo has never had a
-`docs/` directory.
+Install and Usage come first, so the quickstart itself is reachable. The problem is
+what follows it: an AWS SSO walkthrough, a TLS-interception sidecar design, a
+pin-refresh runbook and a macOS manual-test checklist, all in the one file. None of
+that is wrong; it is just not front-door material, and there is nowhere else for it to
+live because this repo has never had a `docs/` directory.
 
 This change moves the reference material out and leaves a quickstart. It is a
 **relocation, not a rewrite** — the prose is moved verbatim so the diff reviews as a
