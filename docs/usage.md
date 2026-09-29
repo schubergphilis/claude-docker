@@ -49,15 +49,11 @@ Git worktrees embed the path between the worktree and its repo's `.git/` in two 
 
 This asymmetry is deliberate: the extension flag — when written into the host's `.git/config` — blinds tools that bundle an older libgit2 (notably `gitstatusd`, which powers the Powerlevel10k git prompt), because they refuse to open a v1 repo declaring an extension they don't know. Keeping the flag container-only sidesteps that.
 
-To convert pre-existing absolute-path worktrees: from inside the container, run `git worktree repair --relative-paths <worktree-path>`. New worktrees added in the container get relative paths automatically.
+To convert pre-existing absolute-path worktrees, ask Claude to run `git worktree repair --relative-paths <worktree-path>`, or type it yourself as `! git worktree repair --relative-paths <worktree-path>`. New worktrees added in the container get relative paths automatically.
 
 **Trade-off:** container-side `git config` writes (e.g. `git remote add ...` writing to local config) land in the ephemeral overlay and are discarded when the container exits. Persistent `git config` edits should happen on the host.
 
-**Fallback — `git worktree repair` (no flag), inside the container:**
-
-```bash
-git worktree repair
-```
+**Fallback — `git worktree repair` (no flag):** ask Claude to run it, or type `! git worktree repair`.
 
 Use this when you passed a repo and a _sibling_ worktree as separate workspace args (`claude-docker ~/repo ~/repo-feature`). Sibling-flattened mounts collapse the parent directory, so the relative offset between worktree and repo is not preserved by the bind mount and relative paths can't help.
 
