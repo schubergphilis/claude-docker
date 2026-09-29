@@ -1,4 +1,4 @@
-# Workflows
+# Usage
 
 [← Back to the README](../README.md)
 

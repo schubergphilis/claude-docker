@@ -24,7 +24,7 @@
   scanning` (`381-407`), verbatim
 - [x] 2.4 `docs/maintenance.md` — `## Updating pinned tool versions` (`280-306`) and `## CI
   smoke tests` with its macOS checklist (`408-447`), verbatim
-- [x] 2.5 `docs/workflows.md` — `## Host config parity` and its three subsections
+- [x] 2.5 `docs/usage.md` — `## Host config parity` and its three subsections
   (`117-151`), `## File ownership` (`262-265`), `## Git worktrees` (`307-331`), `## Pasting
   images` (`332-335`), `## Split-pane agent teams` with its iTerm2 subsection (`336-354`),
   `## Extending the image` (`355-380`), verbatim
