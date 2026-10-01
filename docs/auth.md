@@ -35,7 +35,7 @@ When a token is found:
 
 > **Revoking vs. re-login — they are not the same.** `gh auth logout` / `login` / `refresh` only change your host's _local_ credential store; none of them revokes a previously-issued token at GitHub. GitHub CLI's OAuth token is long-lived, so a token captured earlier (by a running sidecar, or exfiltrated) stays valid until you **explicitly revoke** it: for OAuth login, _GitHub → Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke_; for a PAT, delete it under _Settings → Developer settings_. Relaunching only stops a _new_ container from using the old token — it does not invalidate the old one.
 
-**Filtering and policy.** The generated Caddyfile blocks the one broadly destructive call by default: `DELETE` on `/repos/{owner}/{repo}` gets a `403` naming the claude-docker gh-proxy policy and never reaches GitHub. Extend it with `CLAUDE_DOCKER_GH_POLICY=<path>` pointing at a Caddyfile snippet — `run.sh` stages it and `import`s it into the **`api.github.com` site block only** (a snippet written for `github.com` or `uploads.github.com` traffic has no effect). Policy config lives solely in the sidecar; the agent container can neither read nor write it.
+**Filtering and policy.** The generated Caddyfile blocks the one broadly destructive call by default: `DELETE` on `/repos/{owner}/{repo}` (or its numeric-id alias `/repositories/{id}`) gets a `403` naming the claude-docker gh-proxy policy and never reaches GitHub. Extend it with `CLAUDE_DOCKER_GH_POLICY=<path>` pointing at a Caddyfile snippet — `run.sh` stages it and `import`s it into the **`api.github.com` site block only** (a snippet written for `github.com` or `uploads.github.com` traffic has no effect). Policy config lives solely in the sidecar; the agent container can neither read nor write it.
 
 **Audit log.** Every proxied request (method, path, status — no headers, no token) is written as structured JSON to the sidecar's stdout. View it live with `docker logs <sidecar-name>` (the name `run.sh` prints at startup). The log is deliberately not persisted past the session — it's meant for live debugging, not a compliance trail. It's still a net improvement: host-side `gh` usage has no audit log at all today.
 
@@ -107,3 +107,76 @@ The captured token freezes for the life of the container (a CodeArtifact token i
 **No Python is bundled.** `pip`/`pipenv` themselves are not in the image (uv fetches its own Python; project runtimes live in child images). Claude runs a pip-based tool via `uvx pipenv …` — pipenv shells out to pip, which reads the forwarded `pip.conf` / `PIP_*`. Caveat: if your feed is fully locked down with no public upstream, `pipenv` itself must be mirrored there for `uvx` to fetch it.
 
 **Build vs. runtime.** `--registry` is **runtime-only**. The image _build_ always resolves its own tooling (claude-code, openspec, pnpm) against the public npm registry / PyPI regardless of any private registry configured on your host — your `~/.npmrc` and `npm_config_*` env are neither in the build context nor inherited by Dockerfile `RUN` steps. That isolation is what keeps the build reproducible from the committed pins. Routing the build itself through a private registry is intentionally out of scope.
+
+## Custom model endpoint
+
+`--api` points Claude Code at your own model endpoint — a LiteLLM proxy, an enterprise gateway — using [Claude Code's own env vars](https://code.claude.com/docs/en/env-vars). Export them on the host; the wrapper forwards each one that is set by name only (`-e NAME`), so values never appear on the `docker run` command line:
+
+```bash
+export ANTHROPIC_BASE_URL=https://litellm.internal
+export ANTHROPIC_AUTH_TOKEN=...                        # or ANTHROPIC_API_KEY
+export CLAUDE_DOCKER_API_CA=~/certs/internal-ca.pem    # only if the gateway uses a private CA
+claude-docker --api ~/repo
+```
+
+Forwarded: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, the deprecated `ANTHROPIC_SMALL_FAST_MODEL`, and two gateway knobs: `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` stops the experimental `anthropic-beta` headers that gateways routing to non-Anthropic models often reject, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the real context window of a model name it doesn't recognise (e.g. `1000000`), so auto-compact doesn't hold the session to a conservative default.
+
+Privacy switches such as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` are not gateway config and not secrets, so `--api` doesn't forward them: put them in the `env` block of `settings.docker.json` (see [Host config parity](usage.md#host-config-parity)) to apply them to every session.
+
+**A gateway token is required.** `--api` refuses to start unless `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is set and non-empty. Without one, Claude Code falls back to the claude.ai OAuth login in the volume and sends _that_ token to the gateway as its bearer.
+
+**Private CA.** `CLAUDE_DOCKER_API_CA` (PEM) is mounted read-only and installed into the container's system trust store by the entrypoint, before privilege drop — the same step that installs the `--gh` sidecar CA. Claude Code trusts the OS store by default, so nothing else is needed. A set path that isn't a file is a startup error. Ignored without `--api`. The CA goes into the system trust store, so it is trusted for **every** TLS connection in the container (git, npm, uv, curl), not only the gateway. Fine for a corporate root CA; for a gateway-specific self-signed CA it widens trust beyond that host.
+
+**Not covered yet:** Amazon Bedrock and Google Vertex (`CLAUDE_CODE_USE_BEDROCK` / `CLAUDE_CODE_USE_VERTEX`) need cloud credentials as well as endpoint config, and are deferred to a follow-up.
+
+**File-based alternative.** Claude Code's settings accept an `env` block, so the same variables can live in `settings.docker.json` (see [Host config parity](usage.md#host-config-parity)) without `--api`:
+
+```json
+{ "env": { "ANTHROPIC_BASE_URL": "https://litellm.internal", "ANTHROPIC_AUTH_TOKEN": "..." } }
+```
+
+This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager (see [`ANTHROPIC_AUTH_TOKEN` from 1Password](#anthropic_auth_token-from-1password)). Same trap as above: an `env` block with `ANTHROPIC_BASE_URL` but no token sends the OAuth token to the gateway, and `--api`'s check doesn't cover this route, so always set the token alongside it.
+
+### `ANTHROPIC_AUTH_TOKEN` from 1Password
+
+Keep the gateway token in 1Password and let the 1Password CLI resolve it on the host at launch, so the plaintext token never sits in a file or your shell profile:
+
+1. **One-time setup.** Install the CLI (`brew install 1password-cli`) and, in the 1Password app, turn on _Settings → Developer → Integrate with 1Password CLI_, so `op` unlocks with Touch ID instead of a separate sign-in. Check it with `op whoami`.
+2. **Get the secret reference.** In the app, open the item and use the field's ▾ menu → _Copy Secret Reference_ (or `op item get "<item>" --vault <vault> --format json`). It looks like `op://<vault>/<item>/<field>`. Test it:
+
+   ```bash
+   op read "op://Employee/litellm/credential"
+   ```
+
+3. **Export the reference, not the secret**, e.g. in `~/.zshrc`. It is only a pointer, so it is safe in a file:
+
+   ```bash
+   export ANTHROPIC_BASE_URL=https://litellm.internal
+   export ANTHROPIC_AUTH_TOKEN="op://Employee/litellm/credential"
+   ```
+
+4. **Launch through `op run`**, which swaps the reference for the real value before `claude-docker` starts. Touch ID prompts once, on the host:
+
+   ```bash
+   op run --no-masking -- claude-docker --api ~/repo
+   # optional: alias claude-llm='op run --no-masking -- claude-docker --api'
+   ```
+
+Notes:
+
+- `--no-masking` is required: with masking on, `op` pipes stdout/stderr and Claude's interactive screen breaks.
+- Forget `op run` and the literal `op://…` string is forwarded as the token; the gateway answers 401.
+- Use `ANTHROPIC_AUTH_TOKEN`, not `ANTHROPIC_API_KEY`: it is sent as `Authorization: Bearer` (what LiteLLM expects) and skips Claude's "use this API key?" prompt.
+- A host `apiKeyHelper` in `~/.claude/settings.json` is not used in the container: that file isn't forwarded, and `op` isn't in the image. An existing helper script still works when run on the host: `ANTHROPIC_AUTH_TOKEN="$(~/.claude/litellm_key.sh)" claude-docker --api ~/repo`. If the script fails, the token is empty and `--api` refuses to start.
+- The token is read once, when the container starts (it isn't refreshed like `apiKeyHelper`), so start a new session after rotating it.
+
+## Azure DevOps Server with a private CA
+
+An on-prem Azure DevOps Server usually serves TLS from an internal CA. Point `CLAUDE_DOCKER_AZ_CA` at it:
+
+```bash
+export CLAUDE_DOCKER_AZ_CA=~/.azure/tfs-ca.pem
+claude-docker --az ~/repo
+```
+
+Under `--az`, `CLAUDE_DOCKER_AZ_CA` (PEM) is mounted read-only and installed into the container's system trust store by the entrypoint, before privilege drop, so `az` **and** `git` / `curl` to the server trust it. The host path itself is not forwarded; inside the container the `az` wrapper points `REQUESTS_CA_BUNDLE` at the system bundle (Mozilla roots plus your CA). A set path that isn't a file is a startup error. Ignored without `--az`. A host `REQUESTS_CA_BUNDLE` is deliberately not used: it is often set for other reasons, and this CA is trusted for **every** TLS connection in the container (git, npm, uv, curl), not only the server. Prefer a PEM with just the server's CA over a full bundle.
