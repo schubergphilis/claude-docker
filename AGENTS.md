@@ -10,6 +10,8 @@ most often missed:
   archived; fix the delta and re-archive.
 - **Run the [local checks](CONTRIBUTING.md#local-checks-before-opening-a-pr)**
   before opening a PR.
+- **Every PR links at least one GitHub issue** (`Closes #N`). If none exists,
+  open one first — see [Workflow](CONTRIBUTING.md#workflow).
 - **Keep the container's security posture intact** — the privilege-drop,
   capability set, and credential opt-in model are load-bearing (see [Threat
   model](README.md#threat-model)).

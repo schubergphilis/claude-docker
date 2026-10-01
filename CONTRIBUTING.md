@@ -10,7 +10,9 @@ Contributions to `claude-docker` are welcome from anyone.
    (see [Threat model](README.md#threat-model)).
 3. If the change touches behaviour or a spec, follow [OpenSpec
    changes](#openspec-changes) below.
-4. Open a PR against `main`; a maintainer will review before it is merged.
+4. Open a PR against `main` that links at least one issue (`Closes #N` in the
+   body). If there is no issue yet, open one first. A maintainer will review
+   before it is merged.
 
 By submitting a contribution, you agree that it is licensed under the
 [Apache License 2.0](LICENSE), the same license as the project.
@@ -30,8 +32,8 @@ Draft the change *before* writing the code, then:
 4. **Archive** — `/opsx:archive` moves the change into
    [`openspec/changes/archive/`](openspec/changes/archive/) and syncs its deltas
    into [`openspec/specs/`](openspec/specs/).
-5. **Open the PR** with the code, the archived change, and the synced specs in
-   it.
+5. **Open the PR** (linking its issue) with the code, the archived change, and
+   the synced specs in it.
 
 The `/opsx:*` commands come from OpenSpec's own agent integration — run
 `openspec init` once to install them for your coding agent. Without an agent,
