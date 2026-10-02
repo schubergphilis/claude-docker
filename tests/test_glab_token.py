@@ -2,8 +2,9 @@
 # Copyright 2026 Schuberg Philis
 """Drive run.sh with stub `docker` and `glab` to pin --glab token discovery.
 
-With GITLAB_TOKEN unset, --glab asks host glab for its default host's token
-and forwards it by bare name, never on argv. An explicit GITLAB_TOKEN wins.
+With GITLAB_TOKEN unset, --glab asks host glab for a token (GITLAB_HOST, else
+the workspace's origin host, then glab's default host) and forwards it by bare
+name, never on argv. An explicit GITLAB_TOKEN wins; finding none warns.
 
 Stdlib only, so CI's unit-test step keeps running with no install step.
 """
@@ -53,7 +54,7 @@ class GlabTokenDiscovery(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run(self, **extra):
+    def _run(self, drop=(), **extra):
         env = {
             "PATH": f"{self.bin}:/usr/bin:/bin",
             "HOME": str(self.home),
@@ -62,11 +63,14 @@ class GlabTokenDiscovery(unittest.TestCase):
             "GITLAB_HOST": "https://gl.example.com",
             **extra,
         }
+        for k in drop:
+            env.pop(k)
         r = subprocess.run(
             ["bash", str(RUN_SH), "--glab", str(self.ws)],
             env=env, capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
+        self.stderr = r.stderr
         return (self.log / "argv").read_text().splitlines(), (self.log / "token").read_text()
 
     def test_keyring_token_discovered_and_forwarded_by_name(self):
@@ -79,6 +83,23 @@ class GlabTokenDiscovery(unittest.TestCase):
     def test_explicit_token_wins(self):
         _, token = self._run(GITLAB_TOKEN="glpat-explicit")
         self.assertEqual(token, "glpat-explicit")
+
+    def test_origin_remote_host_discovered_without_gitlab_host(self):
+        # glab's default host is gitlab.com (no token); origin points at the
+        # instance that holds one (#126).
+        (self.ws / ".git").mkdir()
+        (self.ws / ".git" / "config").write_text(
+            '[remote "origin"]\n\turl = git@gl.example.com:group/project.git\n')
+        argv, token = self._run(drop=("GITLAB_HOST",))
+        self.assertEqual(token, SECRET)
+        self.assertFalse(any(SECRET in a for a in argv))
+        self.assertNotIn("no GitLab token", self.stderr)
+
+    def test_no_token_warns_with_hosts_tried(self):
+        argv, token = self._run(drop=("GITLAB_HOST",))
+        self.assertEqual(token, "")
+        self.assertNotIn("GITLAB_TOKEN", argv)
+        self.assertIn("no GitLab token found for gitlab.com", self.stderr)
 
 
 if __name__ == "__main__":
