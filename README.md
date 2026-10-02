@@ -96,6 +96,7 @@ claude-docker ~/repo -- --resume          # any claude flag after --
 | `--az`        | Azure DevOps (Services or on-prem Server): forward `AZURE_DEVOPS_EXT_PAT` (the PAT `az devops` / `repos` / `boards` / `pipelines` authenticate with) and `AZURE_DEVOPS_ORG_URL` (the default organization — the one place the hostname comes from, so a Server URL works as well as `dev.azure.com`). No host `~/.azure` file is mounted — not the profile (tenant/subscription IDs, account name), not the token caches (`msal_token_cache.json`, `accessTokens.json`) — and there is no `gh auth token`-style discovery: `az` has no command that prints a PAT, so it comes from your environment (keep it in 1Password and launch through `op run`, as in [`ANTHROPIC_AUTH_TOKEN` from 1Password](#anthropic_auth_token-from-1password)). Without the flag, `/root/.azure/` is hidden by a tmpfs overlay. General Azure resource management (`az vm`, service principals, `ARM_*`) is out of scope: the image ships `azure-cli-core` + the `azure-devops` extension, not the full `azure-cli`. Optional private CA via `CLAUDE_DOCKER_AZ_CA` — see [Azure DevOps Server with a private CA](#azure-devops-server-with-a-private-ca). |
 | `--registry`  | Surface host-native private package-registry config so in-container `uv` / `pnpm` / pip installs resolve against your private feed (CodeArtifact, Artifactory, Nexus, …) instead of public npm/PyPI. Read-only mounts of `~/.npmrc` / `uv.toml` / `pip.conf` plus `UV_INDEX_*` / `npm_config_registry` / `PIP_*` env when set. `~/.netrc` is intentionally **not** mounted (too broad). Runtime-only; the build is unaffected. **Whole-file mounts** — see [Private package registries](#private-package-registries) for the full channel list and the scoping caution.               |
 | `--api`       | Forward `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_CUSTOM_HEADERS` / `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `CLAUDE_CODE_MAX_CONTEXT_TOKENS` by name when set, so Claude Code talks to your LLM gateway (LiteLLM, enterprise proxy) instead of the in-container OAuth login. Optional private CA via `CLAUDE_DOCKER_API_CA`. Bedrock/Vertex are not covered yet. See [Custom model endpoint](#custom-model-endpoint).                                                                                                  |
+| `--egress-lock` | With `--api`: **lock model traffic** to the `ANTHROPIC_BASE_URL` endpoint and log every connection the session makes; see [API egress lock](#api-egress-lock). |
 
 Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` cannot be combined with each other.
 
@@ -106,7 +107,7 @@ Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` c
 | `--ephemeral` | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
 | `--ro`        | Mount every workspace read-only. Prevents the agent from modifying your code.                                               |
 
-`--ro` does **not** block credential flags or restrict network egress — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
+`--ro` does **not** block credential flags or restrict network egress (only `--egress-lock` does, see [API egress lock](#api-egress-lock)) — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
 
 ```bash
 claude-docker --ephemeral --ro ~/untrusted-repo
@@ -229,7 +230,7 @@ Token alternative: instead of (or in addition to) the credentials file, export `
 > - **`pip.conf`** likewise carries any global pip settings you've set, not only `index-url`.
 > - **`~/.netrc` is deliberately NOT mounted** — as a machine-keyed store of logins for arbitrary unrelated hosts it's the broadest offender, so `--registry` never forwards it. Put registry auth in `~/.npmrc` / `pip.conf` / the index URL / `UV_INDEX_*_PASSWORD` instead.
 >
-> The forwarded _env vars_ are tightly scoped (named individually), so the over-share is specific to the npmrc/pip.conf file mounts. To minimise exposure, prefer the env-var channel or keep registry-only config files, and remember the container has full network egress (see [Threat model](#threat-model)).
+> The forwarded _env vars_ are tightly scoped (named individually), so the over-share is specific to the npmrc/pip.conf file mounts. To minimise exposure, prefer the env-var channel or keep registry-only config files, and remember the container has full network egress unless you pass `--api` (see [Threat model](#threat-model)).
 
 `--registry` makes the in-container package managers resolve against a private feed (AWS CodeArtifact, Artifactory, Nexus, GitLab/Azure, …) the same way your pipelines do — without inventing any claude-docker-specific config. It surfaces the package managers' **own native config** from the host, read-only:
 
@@ -276,7 +277,7 @@ claude-docker --api ~/repo
 
 Forwarded: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, the deprecated `ANTHROPIC_SMALL_FAST_MODEL`, and two gateway knobs: `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` stops the experimental `anthropic-beta` headers that gateways routing to non-Anthropic models often reject, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the real context window of a model name it doesn't recognise (e.g. `1000000`), so auto-compact doesn't hold the session to a conservative default.
 
-Privacy switches such as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` are not gateway config and not secrets, so `--api` doesn't forward them: put them in the `env` block of `settings.docker.json` (see [Host config parity](#host-config-parity)) to apply them to every session.
+`--egress-lock` sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` itself (see [API egress lock](#api-egress-lock)); plain `--api` doesn't. Other privacy switches such as `DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` are not gateway config and not secrets, so `--api` doesn't forward them: put them in the `env` block of `settings.docker.json` (see [Host config parity](#host-config-parity)) to apply them to every session.
 
 **A gateway token is required.** `--api` refuses to start unless `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is set and non-empty. Without one, Claude Code falls back to the claude.ai OAuth login in the volume and sends _that_ token to the gateway as its bearer.
 
@@ -290,7 +291,7 @@ Privacy switches such as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_T
 { "env": { "ANTHROPIC_BASE_URL": "https://litellm.internal", "ANTHROPIC_AUTH_TOKEN": "..." } }
 ```
 
-This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager (see [`ANTHROPIC_AUTH_TOKEN` from 1Password](#anthropic_auth_token-from-1password)). Same trap as above: an `env` block with `ANTHROPIC_BASE_URL` but no token sends the OAuth token to the gateway, and `--api`'s check doesn't cover this route, so always set the token alongside it.
+This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager (see [`ANTHROPIC_AUTH_TOKEN` from 1Password](#anthropic_auth_token-from-1password)). Same trap as above: an `env` block with `ANTHROPIC_BASE_URL` but no token sends the OAuth token to the gateway, and `--api`'s check doesn't cover this route, so always set the token alongside it. This route also gets **no** [egress lock](#api-egress-lock): the session keeps full network egress.
 
 #### `ANTHROPIC_AUTH_TOKEN` from 1Password
 
@@ -336,6 +337,51 @@ claude-docker --az ~/repo
 
 Under `--az`, `CLAUDE_DOCKER_AZ_CA` (PEM) is mounted read-only and installed into the container's system trust store by the entrypoint, before privilege drop, so `az` **and** `git` / `curl` to the server trust it. The host path itself is not forwarded; inside the container the `az` wrapper points `REQUESTS_CA_BUNDLE` at the system bundle (Mozilla roots plus your CA). A set path that isn't a file is a startup error. Ignored without `--az`. A host `REQUESTS_CA_BUNDLE` is deliberately not used: it is often set for other reasons, and this CA is trusted for **every** TLS connection in the container (git, npm, uv, curl), not only the server. Prefer a PEM with just the server's CA over a full bundle.
 
+### API egress lock
+
+`--egress-lock` (with `--api`) locks Claude Code's **model traffic** to your `ANTHROPIC_BASE_URL` gateway and logs every connection the session makes, so you can show a customer that prompts only went to, say, an EU-hosted gateway. Everything else (git, npm, PyPI, the web) stays reachable: only model traffic is restricted, and there is no allowlist to maintain. It is a separate opt-in because most gateway users don't need it: plain `--api` sessions, and sessions without `--api`, are unchanged. `--egress-lock` without `--api` refuses to start.
+
+For a team, that is one env file and one command:
+
+```bash
+# team-eu.env (secrets as op:// references, see ANTHROPIC_AUTH_TOKEN from 1Password)
+ANTHROPIC_BASE_URL=https://llm-gateway.example.eu
+ANTHROPIC_AUTH_TOKEN=op://Team/llm-gateway/token
+```
+
+```bash
+op run --env-file team-eu.env --no-masking -- claude-docker --api --egress-lock ~/repo
+```
+
+**What is enforced.** The proxy allows the `ANTHROPIC_BASE_URL` host and refuses the model providers' own hosts: `*.anthropic.com`, `*.claude.ai`, `*.claude.com`. Every other host on ports 80/443 is allowed. `run.sh` refuses to start when `ANTHROPIC_BASE_URL` is unset (Claude Code would call `api.anthropic.com`) or points at one of those hosts. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is set in the container, so Claude Code's telemetry, error reporting and updater don't try the blocked hosts.
+
+**How it works.** The agent container is attached only to a per-session network created with `--internal` (`claude-egress-<id>`). That network has no gateway, so a raw socket, a direct IP, or a DNS lookup has nowhere to go. The only way out is a per-session squid forward proxy (`claude-egress-proxy-<id>`) that sits on that network and on a normal one. That is what makes its log complete. The agent gets `http_proxy` / `https_proxy` (both spellings) pointing at it. HTTPS goes through `CONNECT`, so TLS stays end-to-end: the proxy sees hostnames, never request contents or tokens, and `CLAUDE_DOCKER_API_CA` works unchanged. The proxy is squid from this same image (installed from the Ubuntu archive), so there is no extra image to pull or pin. It runs as an unprivileged user with no capabilities. The agent container's capability set is unchanged.
+
+**Always denied:** cloud metadata and link-local addresses (`169.254.0.0/16`, `fe80::/10`, `metadata.google.internal`, `metadata.azure.internal`), loopback, any port other than 80 and 443, and `CONNECT` to anything but 443. Private ranges are reachable, as without `--api`, so an on-prem git server or registry works.
+
+**Evidence.** When the session ends, `run.sh` saves the proxy's access log to `~/.local/state/claude-docker/egress/<start>-<id>.log` (`$XDG_STATE_HOME` if set), with a `.meta` file next to it: start and end time, user, host, workspaces, image and image ID, and the endpoint. The directory is never mounted into the container, and `run.sh` never rotates or deletes what is in it: the logs are the evidence, so pruning them is up to you. It prints what the proxy refused:
+
+```text
+claude-docker: egress proxy blocked: api.anthropic.com
+claude-docker: egress log saved to ~/.local/state/claude-docker/egress/20260927T100000Z-a1B2c3.log
+```
+
+**Reporting** is not part of claude-docker. Build it from the saved `.log` (squid's default access-log format: field 4 is the result, field 7 the host) and `.meta` files. The log covers what left the container. That the gateway itself serves EU-hosted models has to be shown by the gateway (its config, or its provider's region).
+
+**With `--gh`.** The auth-proxy sidecar joins the internal network too, and squid resolves `github.com` / `api.github.com` / `uploads.github.com` to it, so GitHub traffic goes agent → squid → auth proxy (token injected) → GitHub. Token handling is unchanged.
+
+**Lifecycle.** Startup is fail-closed. If a network can't be created, or the proxy won't start or isn't accepting connections within 15s, `run.sh` aborts before the agent container starts; it never falls back to open egress. Teardown uses the same `EXIT` trap as the gh sidecar, and saves the log first.
+
+**Limitations:**
+
+- SSH remotes (port 22) and every other non-HTTP protocol are blocked. Use HTTPS remotes.
+- Node's built-in `fetch` ignores proxy env vars, so scripts that use it fail closed. Claude Code, npm, pnpm, pip, uv, curl and Go honour them.
+- An `ANTHROPIC_BASE_URL` set only in `settings.docker.json` isn't visible to `run.sh`, which then refuses to start. Export it on the host instead.
+- A `CONNECT` to a provider's raw IP address isn't matched by the host deny. Claude Code never does that, and it would show up in the log.
+- A `run.sh` killed with `SIGKILL` never runs its `EXIT` trap, so that session's log is lost.
+- DNS closure relies on Docker ≥ 26, which stopped forwarding external queries from internal networks. Older engines leave a DNS side channel.
+- Podman is untested.
+
 ## File ownership
 
 Files created inside the container appear on the host owned by the user who launched `claude-docker`, not by `root`. The wrapper forwards `HOST_UID` / `HOST_GID` and the in-container entrypoint creates a matching passwd entry and drops to it via `runuser` before exec'ing claude. Persistent state in the `claude-code-root` and `claude-code-home` named volumes is chowned on first start, so an existing volume from before this change is fixed up the next time you run `claude-docker`.
@@ -353,9 +399,9 @@ The container narrows blast radius vs. running `claude --yolo` on the host, but 
 - **Private registries (`--registry`):** this _narrows_ where the package managers resolve packages — pointing `uv` / `pnpm` / pip at a curated private feed instead of public npm/PyPI — which can reduce dependency-confusion exposure, but only as much as your host config and the feed's upstream setup dictate. It is registry-resolution config, **not** network egress filtering: `npx`, `git+https` installs, `curl`, and every other egress path are unaffected, and `--yolo` runtime code-fetch (above) still reaches whatever the resolved feed serves. Treat it as supply-chain hygiene, not a network boundary.
 - **Custom model endpoint (`--api`):** the endpoint receives **all prompt content** — every file, command output, and tool result the agent reads — plus the forwarded token. Only point it at a gateway you trust with your code. `CLAUDE_DOCKER_API_CA` is trusted system-wide, for all TLS in the container, not only the gateway.
 - **Private CA under `--az` (`CLAUDE_DOCKER_AZ_CA`):** installed into the system trust store, so like `CLAUDE_DOCKER_API_CA` it is trusted for every TLS connection in the container, not only the Azure DevOps Server.
-- **If a session is compromised:** assume exfiltration already happened (full network egress). Then: rotate the host sessions for every flag that was passed — `glab auth login`, `aws sso login`, `terraform login`, and revoke the Azure DevOps PAT under _User settings → Personal access tokens_ for `--az`; under `--registry`, re-run `aws codeartifact login` / rotate the npm·PyPI registry tokens exposed via the mounted `~/.npmrc` / `pip.conf`. **GitHub is different under `--gh`:** the real token never entered the container, so there's no token to rotate on that basis alone — but review what the session _did_ through the proxy during its lifetime (the sidecar's audit log helps, if you captured it via `docker logs` before teardown), and revert any resulting GitHub-side actions. If the token itself may be exposed (a `--gh-direct` session, a version predating this proxy, or any doubt), **revoke** it — not merely `gh auth logout`/`login`, which only clear local state and leave the issued token valid at GitHub: revoke the _GitHub CLI_ authorization under _Settings → Applications → Authorized OAuth Apps_, or delete the PAT under _Settings → Developer settings_ if you used one. In all cases: revoke the Claude OAuth credential, and clear the named volumes (`docker volume rm claude-code-root claude-code-home`) to flush in-container auth state and cross-workspace conversation history that `claude --resume` could otherwise replay.
+- **If a session is compromised:** assume exfiltration already happened. It had full network egress, with or without `--egress-lock`; under `--egress-lock` the saved egress log shows which hosts it reached. Then: rotate the host sessions for every flag that was passed — `glab auth login`, `aws sso login`, `terraform login`, and revoke the Azure DevOps PAT under _User settings → Personal access tokens_ for `--az`; under `--registry`, re-run `aws codeartifact login` / rotate the npm·PyPI registry tokens exposed via the mounted `~/.npmrc` / `pip.conf`. **GitHub is different under `--gh`:** the real token never entered the container, so there's no token to rotate on that basis alone — but review what the session _did_ through the proxy during its lifetime (the sidecar's audit log helps, if you captured it via `docker logs` before teardown), and revert any resulting GitHub-side actions. If the token itself may be exposed (a `--gh-direct` session, a version predating this proxy, or any doubt), **revoke** it — not merely `gh auth logout`/`login`, which only clear local state and leave the issued token valid at GitHub: revoke the _GitHub CLI_ authorization under _Settings → Applications → Authorized OAuth Apps_, or delete the PAT under _Settings → Developer settings_ if you used one. In all cases: revoke the Claude OAuth credential, and clear the named volumes (`docker volume rm claude-code-root claude-code-home`) to flush in-container auth state and cross-workspace conversation history that `claude --resume` could otherwise replay.
 
-Hardening applied at runtime: `--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH` — the four added caps are held only during entrypoint setup and cleared from the effective / permitted / ambient sets by the kernel when the entrypoint drops UID 0 → host UID (the bounding set retains them but is inert under `no-new-privileges`), so claude itself runs with no usable capabilities; `--security-opt no-new-privileges`; `--init` (tini reaps subprocess zombies — `runuser` would otherwise be PID 1); container starts as root and drops to the host user before exec'ing claude (see [File ownership](#file-ownership)); the Docker default seccomp profile; scoped workspace bind-mounts; tmpfs masks over non-opted-in credential paths. Build-time: pinned base image digest, sha256-verified downloads where the ecosystem supports it (uv, glab, AWS CLI, tfenv source, Go tarball, azure-devops extension wheel); npm packages (claude-code, openspec, pnpm) are version-pinned with `--ignore-scripts` but not sha256-verified — a compromised npm registry serving a malicious tarball at the pinned version would not be caught at build time. Two of those three ship a native binary in a per-arch optional dependency and are unusable until their own install script links it, so the build invokes exactly those two scripts by hand (claude-code's `install.cjs`, pnpm's `install.js`) and asserts the result; they are named in the Dockerfile with the conditions they're held to, and no other package's — or transitive dependency's — lifecycle script ever runs. CI additionally scans the built image for **known** vulnerabilities in its OS and language packages and fails the build on a HIGH or CRITICAL finding that upstream has already fixed; findings with no fix available yet are reported but do not fail, and accepted ones are recorded with a mandatory expiry (see [Image vulnerability scanning](#image-vulnerability-scanning)) — so a green build means no *fixable* high-severity CVE, not an absence of known CVEs. **Not** applied: read-only root filesystem, user-namespace remapping, custom seccomp profile (Docker's default is in use), network egress filtering, resource limits.
+Hardening applied at runtime: `--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH` — the four added caps are held only during entrypoint setup and cleared from the effective / permitted / ambient sets by the kernel when the entrypoint drops UID 0 → host UID (the bounding set retains them but is inert under `no-new-privileges`), so claude itself runs with no usable capabilities; `--security-opt no-new-privileges`; `--init` (tini reaps subprocess zombies — `runuser` would otherwise be PID 1); container starts as root and drops to the host user before exec'ing claude (see [File ownership](#file-ownership)); the Docker default seccomp profile; scoped workspace bind-mounts; tmpfs masks over non-opted-in credential paths. Build-time: pinned base image digest, sha256-verified downloads where the ecosystem supports it (uv, glab, AWS CLI, tfenv source, Go tarball, azure-devops extension wheel); npm packages (claude-code, openspec, pnpm) are version-pinned with `--ignore-scripts` but not sha256-verified — a compromised npm registry serving a malicious tarball at the pinned version would not be caught at build time. Two of those three ship a native binary in a per-arch optional dependency and are unusable until their own install script links it, so the build invokes exactly those two scripts by hand (claude-code's `install.cjs`, pnpm's `install.js`) and asserts the result; they are named in the Dockerfile with the conditions they're held to, and no other package's — or transitive dependency's — lifecycle script ever runs. CI additionally scans the built image for **known** vulnerabilities in its OS and language packages and fails the build on a HIGH or CRITICAL finding that upstream has already fixed; findings with no fix available yet are reported but do not fail, and accepted ones are recorded with a mandatory expiry (see [Image vulnerability scanning](#image-vulnerability-scanning)) — so a green build means no *fixable* high-severity CVE, not an absence of known CVEs. **Not** applied: read-only root filesystem, user-namespace remapping, custom seccomp profile (Docker's default is in use), network egress filtering (`--egress-lock` restricts model traffic only, see [API egress lock](#api-egress-lock)), resource limits.
 
 ## Updating pinned tool versions
 
@@ -504,6 +550,16 @@ IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,t
 ```
 
 The GitHub auth proxy sidecar (see [GitHub auth proxy](#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since `smoke.sh` never invokes `run.sh` and CI has no real GitHub credentials to test against.
+
+The [API egress lock](#api-egress-lock) has its own `run.sh`-driven cell, [`smoke/egress.sh`](smoke/egress.sh) (`IMAGE=claude-code:local bash smoke/egress.sh [--gh]`), which runs in CI. It checks the following:
+
+- a missing, provider-host or config-smuggling `ANTHROPIC_BASE_URL` aborts startup;
+- the endpoint and other hosts are reachable, while `api.anthropic.com` is refused;
+- a proxy-unaware client has no route out;
+- metadata and loopback destinations are denied;
+- the session log and `.meta` are saved on the host;
+- `--gh` traffic reaches the auth proxy through squid;
+- teardown leaves nothing behind.
 
 ### Manual fallback checklist (macOS)
 
