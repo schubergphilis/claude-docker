@@ -290,6 +290,15 @@ hostpath() {
     printf '%s' "$1"
   fi
 }
+# Windows keeps per-user app config under %APPDATA% (e.g. terraform.d, pip,
+# uv, glab-cli), not ~/.config. APPDATA arrives in Windows form
+# (C:\Users\...\AppData\Roaming); convert it to the POSIX form the shell's own
+# [ -f ] / [ -d ] tests expect. Empty off-MSYS, so every %APPDATA% lookup
+# below is skipped on Linux/macOS.
+APPDATA_DIR=""
+if [ "$IS_MSYS" = "1" ] && [ -n "${APPDATA:-}" ] && command -v cygpath >/dev/null 2>&1; then
+  APPDATA_DIR=$(cygpath -u "$APPDATA")
+fi
 
 # Emit the gh-auth-proxy sidecar Caddyfile (consumed by the --gh block below)
 # to stdout. Deliberately a constant, not a template: every per-run difference
@@ -398,6 +407,23 @@ MOUNT_ARGS=()
 ENV_ARGS=(-e TERM -e COLORTERM)
 CONTAINER_PATHS=()
 
+# Identity the entrypoint drops to. On Windows there is no POSIX ownership to
+# preserve: Git Bash's id -u/-g are synthetic SID-derived values (e.g. 197609)
+# that fall outside rootless podman's 65536-ID subordinate range, and NTFS bind
+# mounts show every file as container root anyway. Use the conventional first
+# user UID instead — still non-root, so the privilege drop is unchanged.
+if [ "$IS_MSYS" = "1" ]; then
+  HOST_UID=1000
+  HOST_GID=1000
+  # Those same root-owned NTFS mounts trip git's ownership check ("detected
+  # dubious ownership") in every workspace. GIT_CONFIG_* env is command-line
+  # scope, which git honours for safe.directory; scoped to /workspaces only.
+  ENV_ARGS+=("-e" "GIT_CONFIG_COUNT=1" "-e" "GIT_CONFIG_KEY_0=safe.directory" "-e" "GIT_CONFIG_VALUE_0=/workspaces/*")
+else
+  HOST_UID=$(id -u)
+  HOST_GID=$(id -g)
+fi
+
 ws_suffix=""
 [ "$RO_WORKSPACES" = "1" ] && ws_suffix=":ro"
 
@@ -430,11 +456,14 @@ done
 CWD="${CONTAINER_PATHS[0]}"
 
 # File-based host creds. gh uses macOS Keychain → log in inside the container once; persists via claude-code-root.
-# glab on macOS lives under ~/Library/Application Support/glab-cli (not XDG); fall back to ~/.config/glab-cli on Linux.
+# glab on macOS lives under ~/Library/Application Support/glab-cli (not XDG), on Windows under %APPDATA%\glab-cli;
+# fall back to ~/.config/glab-cli (Linux, and older glab releases on Windows).
 if [ "$WITH_GLAB" = "1" ]; then
   glab_src=""
   if [ -d "$HOME/Library/Application Support/glab-cli" ]; then
     glab_src="$HOME/Library/Application Support/glab-cli"
+  elif [ -n "$APPDATA_DIR" ] && [ -d "$APPDATA_DIR/glab-cli" ]; then
+    glab_src="$APPDATA_DIR/glab-cli"
   elif [ -d "$HOME/.config/glab-cli" ]; then
     glab_src="$HOME/.config/glab-cli"
   fi
@@ -450,13 +479,19 @@ if [ "$WITH_AWS" = "1" ]; then
   [ -d "$HOME/.aws/sso" ]    && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.aws/sso"):/root/.aws/sso:ro")
 fi
 
-# Terraform Cloud credentials file written by `terraform login`. Standard
-# location on every platform is ~/.terraform.d/credentials.tfrc.json. Only
+# Terraform Cloud credentials file written by `terraform login`: at
+# ~/.terraform.d/credentials.tfrc.json on Linux/macOS, and at
+# %APPDATA%\terraform.d\credentials.tfrc.json on Windows. Only
 # app.terraform.io is in scope here; the file format supports other hosts
 # but mounting them is intentional and out of scope for --tfe.
 if [ "$WITH_TFE" = "1" ]; then
-  [ -f "$HOME/.terraform.d/credentials.tfrc.json" ] \
-    && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.terraform.d/credentials.tfrc.json"):/root/.terraform.d/credentials.tfrc.json:ro")
+  tfe_src=""
+  if [ -n "$APPDATA_DIR" ] && [ -f "$APPDATA_DIR/terraform.d/credentials.tfrc.json" ]; then
+    tfe_src="$APPDATA_DIR/terraform.d/credentials.tfrc.json"
+  elif [ -f "$HOME/.terraform.d/credentials.tfrc.json" ]; then
+    tfe_src="$HOME/.terraform.d/credentials.tfrc.json"
+  fi
+  [ -n "$tfe_src" ] && MOUNT_ARGS+=("-v" "$(hostpath "$tfe_src"):/root/.terraform.d/credentials.tfrc.json:ro")
 fi
 
 # Azure DevOps: no host ~/.azure file is mounted. Auth is the PAT in
@@ -487,10 +522,20 @@ if [ "$WITH_REGISTRY" = "1" ]; then
   # NOT forward npm_config_userconfig, so the in-container npm keeps that path.
   npmrc_src="${npm_config_userconfig:-${NPM_CONFIG_USERCONFIG:-$HOME/.npmrc}}"
   [ -f "$npmrc_src" ]               && MOUNT_ARGS+=("-v" "$(hostpath "$npmrc_src"):/root/.npmrc:ro")
-  [ -f "$HOME/.config/uv/uv.toml" ] && MOUNT_ARGS+=("-v" "$(hostpath "$HOME/.config/uv/uv.toml"):/root/.config/uv/uv.toml:ro")
+  # uv and pip keep their Windows user config under %APPDATA% (pip names the
+  # file pip.ini there — same INI format, so it lands at the same pip.conf path).
+  uv_toml=""
+  if [ -n "$APPDATA_DIR" ] && [ -f "$APPDATA_DIR/uv/uv.toml" ]; then
+    uv_toml="$APPDATA_DIR/uv/uv.toml"
+  elif [ -f "$HOME/.config/uv/uv.toml" ]; then
+    uv_toml="$HOME/.config/uv/uv.toml"
+  fi
+  [ -n "$uv_toml" ] && MOUNT_ARGS+=("-v" "$(hostpath "$uv_toml"):/root/.config/uv/uv.toml:ro")
   pip_conf=""
   if [ -f "$HOME/Library/Application Support/pip/pip.conf" ]; then
     pip_conf="$HOME/Library/Application Support/pip/pip.conf"
+  elif [ -n "$APPDATA_DIR" ] && [ -f "$APPDATA_DIR/pip/pip.ini" ]; then
+    pip_conf="$APPDATA_DIR/pip/pip.ini"
   elif [ -f "$HOME/.config/pip/pip.conf" ]; then
     pip_conf="$HOME/.config/pip/pip.conf"
   fi
@@ -756,7 +801,9 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   gh_proxy_exited=0
   i=0
   while [ "$i" -lt 15 ]; do
-    if "$RUNTIME" cp "$GH_PROXY_SIDECAR:/data/caddy/pki/authorities/local/root.crt" "$stage/gh-proxy/root.crt" >/dev/null 2>&1; then
+    # The destination is a host path handed to the native engine, so it needs
+    # hostpath() like every bind-mount source — MSYS argv conversion is off.
+    if "$RUNTIME" cp "$GH_PROXY_SIDECAR:/data/caddy/pki/authorities/local/root.crt" "$(hostpath "$stage/gh-proxy/root.crt")" >/dev/null 2>&1; then
       gh_ca_ready=1
       break
     fi
@@ -917,6 +964,15 @@ while [ "$i" -lt "$n" ]; do
 [worktree]
 	useRelativePaths = true
 EOF
+    # Git for Windows keeps core.autocrlf=true in its *system* config, which the
+    # container never sees — without it every CRLF-checked-out file reads as
+    # modified in-container. Carry the host's effective value for this repo.
+    # git.exe is native and argv conversion is off, so -C needs hostpath().
+    if [ "$IS_MSYS" = "1" ] \
+       && ws_autocrlf=$(git -C "$(hostpath "$ws_abs")" config --get core.autocrlf 2>/dev/null) \
+       && [ -n "$ws_autocrlf" ]; then
+      printf '[core]\n\tautocrlf = %s\n' "$ws_autocrlf" >>"$stage/git-config-$ws_name"
+    fi
     MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config")
   fi
   i=$((i + 1))
@@ -1003,7 +1059,7 @@ fi
 "$RUNTIME" run --rm -it --init \
   --security-opt no-new-privileges \
   --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
-  -e "HOST_UID=$(id -u)" -e "HOST_GID=$(id -g)" \
+  -e "HOST_UID=$HOST_UID" -e "HOST_GID=$HOST_GID" \
   "${MOUNT_ARGS[@]}" \
   "${ENV_ARGS[@]}" \
   -w "$CWD" \
