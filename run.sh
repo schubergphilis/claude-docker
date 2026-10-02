@@ -94,6 +94,13 @@ Wrapper flags:
                       receives all prompt content. Private CA: see
                       CLAUDE_DOCKER_API_CA. Bedrock/Vertex not covered.
                       Requires ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY.
+  --egress-lock       With --api: lock model traffic to ANTHROPIC_BASE_URL
+                      (required). The container joins an --internal
+                      network and goes out only via a squid sidecar
+                      (HTTPS via CONNECT, no TLS interception) that refuses
+                      *.anthropic.com / *.claude.ai / *.claude.com and logs
+                      every connection. Other hosts stay reachable. The log
+                      is saved on the host when the session ends.
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -130,6 +137,9 @@ Environment:
   CLAUDE_DOCKER_AZ_CA      Path to a PEM CA certificate for an on-prem Azure
                            DevOps Server; installed into the container's trust
                            store, so trusted for all TLS. Ignored without --az.
+  XDG_STATE_HOME           --egress-lock logs are saved under
+                           $XDG_STATE_HOME/claude-docker/egress (default
+                           ~/.local/state/claude-docker/egress).
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -160,6 +170,7 @@ WITH_TFE=0
 WITH_AZ=0
 WITH_REGISTRY=0
 WITH_API=0
+WITH_EGRESS_LOCK=0
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 saw_sep=0
 for arg in "$@"; do
@@ -180,6 +191,7 @@ for arg in "$@"; do
     --az)           WITH_AZ=1 ;;
     --registry)     WITH_REGISTRY=1 ;;
     --api)          WITH_API=1 ;;
+    --egress-lock)  WITH_EGRESS_LOCK=1 ;;
     --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
     --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
     --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -188,6 +200,10 @@ for arg in "$@"; do
   esac
 done
 [ "${#WORKSPACES[@]}" -eq 0 ] && WORKSPACES=("$PWD")
+
+# --egress-lock sessions save their egress log here (egress_save_log). Never
+# rotated or pruned: the logs are the evidence, and the flag is opt-in.
+EGRESS_LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/claude-docker/egress"
 
 # --gh (auth-proxy sidecar) and --gh-direct (legacy forwarding) are mutually
 # exclusive strategies for the same credential — picking one silently would
@@ -214,6 +230,45 @@ fi
 if [ "$WITH_AZ" = "1" ] && [ -n "${CLAUDE_DOCKER_AZ_CA:-}" ] && [ ! -f "$CLAUDE_DOCKER_AZ_CA" ]; then
   echo "claude-docker: CLAUDE_DOCKER_AZ_CA '$CLAUDE_DOCKER_AZ_CA' is not a file" >&2
   exit 1
+fi
+
+# --egress-lock: every connection goes through a logging squid sidecar
+# (see api-egress-policy), and model traffic may reach only the configured
+# endpoint. Its own opt-in, not part of --api, because most gateway users
+# don't need the sidecar or a log of every connection; it needs --api for the
+# endpoint and token forwarding. Everything else stays open: only model traffic has to stay in the
+# EU, and an allowlist of every git/npm/pypi host would be a list each user
+# maintains. The endpoint must be set: unset, Claude Code talks to
+# api.anthropic.com, which the lock refuses. Checked before runtime detection,
+# so a bad value aborts with nothing to undo.
+# ponytail: providers are Anthropic's hosts only, because Claude Code talks to
+# nothing else; add others if a tool in the image gains a model backend.
+EGRESS_MODEL_PROVIDERS=".anthropic.com .claude.ai .claude.com"
+if [ "$WITH_EGRESS_LOCK" = "1" ] && [ "$WITH_API" != "1" ]; then
+  echo "claude-docker: --egress-lock needs --api (it locks model traffic to the --api endpoint)" >&2
+  exit 1
+fi
+if [ "$WITH_EGRESS_LOCK" = "1" ]; then
+  if [ -z "${ANTHROPIC_BASE_URL:-}" ]; then
+    echo "claude-docker: --egress-lock needs ANTHROPIC_BASE_URL (your model gateway); without it Claude Code calls api.anthropic.com, which --egress-lock blocks" >&2
+    exit 1
+  fi
+  # ANTHROPIC_BASE_URL is scheme://[userinfo@]host[:port][/path]. The host is
+  # written into the squid config, so it must pass the validator first.
+  egress_api_host="${ANTHROPIC_BASE_URL#*://}"
+  egress_api_host="${egress_api_host%%/*}"
+  egress_api_host="${egress_api_host##*@}"
+  egress_api_host="${egress_api_host%:*}"
+  if [ "${#egress_api_host}" -gt 253 ] || ! [[ $egress_api_host =~ ^([A-Za-z0-9-]+\.)*[A-Za-z0-9-]+$ ]]; then
+    printf 'claude-docker: ANTHROPIC_BASE_URL host %q is not a valid hostname or IPv4 address\n' "$egress_api_host" >&2
+    exit 1
+  fi
+  for p in $EGRESS_MODEL_PROVIDERS; do
+    case "$egress_api_host" in "${p#.}"|*"$p")
+      echo "claude-docker: --egress-lock blocks model providers' own hosts, and ANTHROPIC_BASE_URL points at one ('$egress_api_host') — set it to your gateway" >&2
+      exit 1 ;;
+    esac
+  done
 fi
 
 # Select the container runtime AFTER flag parsing: `-h`/`--help` is handled in
@@ -251,16 +306,20 @@ fi
 # window can race and lose, which fails that session closed with a clear
 # error — rare, safe, retry succeeds. Every failure here is swallowed: a
 # stale resource that resists removal must never abort this run.
-"$RUNTIME" ps -aq --filter "name=^claude-gh-proxy-" \
+# The --egress-lock proxy (claude-egress-proxy-*, claude-egress-*
+# networks) follows the same rules.
+for stale_prefix in claude-gh claude-egress; do
+"$RUNTIME" ps -aq --filter "name=^$stale_prefix-proxy-" \
     --filter "status=exited" --filter "status=created" --filter "status=dead" \
     2>/dev/null | while IFS= read -r gh_stale_cid; do
   [ -z "$gh_stale_cid" ] && continue
   "$RUNTIME" rm -f "$gh_stale_cid" >/dev/null 2>&1 || true
 done || true
-"$RUNTIME" network ls -q --filter "name=^claude-gh-" 2>/dev/null | while IFS= read -r gh_stale_nid; do
+"$RUNTIME" network ls -q --filter "name=^$stale_prefix-" 2>/dev/null | while IFS= read -r gh_stale_nid; do
   [ -z "$gh_stale_nid" ] && continue
   "$RUNTIME" network rm "$gh_stale_nid" >/dev/null 2>&1 || true
 done || true
+done
 
 # Git Bash / MSYS / Cygwin on Windows rewrites POSIX-looking argv into Windows
 # paths before the native docker.exe/podman.exe sees them, corrupting the
@@ -384,6 +443,96 @@ uploads.github.com {
 }
 EOF
 }
+
+# Emit the --egress-lock squid config to stdout (see api-egress-policy
+# design.md). A template, unlike the gh Caddyfile: squid has no env
+# substitution for ACL values. Its only variable input is egress_api_host,
+# which has already passed the hostname validator above, so no whitespace,
+# quote, or newline can reach this file.
+# Rule order is the security property:
+#  - metadata/link-local and loopback are refused first, above every allow.
+#  - the model endpoint is allowed BEFORE the provider deny, then every other
+#    host is allowed: only model traffic is restricted.
+#  - `-n` stops a reverse lookup, so a PTR record can't turn an IP-literal
+#    request into an allowed name.
+# ponytail: a CONNECT to a provider's raw IP isn't matched by the dstdomain
+# deny. Claude Code never does that, and it would still show up in the log
+# and the report; add the providers' published ranges if that's not enough.
+gen_egress_squid_conf() {
+  cat <<'EOF'
+http_port 3128
+visible_hostname claude-docker-egress
+pid_filename none
+coredump_dir none
+cache deny all
+access_log stdio:/dev/stdout
+cache_log /dev/stderr
+logfile_rotate 0
+shutdown_lifetime 1 seconds
+forwarded_for delete
+via off
+httpd_suppress_version_string on
+
+acl CONNECT method CONNECT
+acl egress_ports port 80 443
+acl egress_tls_port port 443
+acl egress_metadata_names dstdomain -n metadata.google.internal metadata.azure.internal
+acl egress_linklocal dst 169.254.0.0/16 fe80::/10
+acl egress_loopback dst 127.0.0.0/8 0.0.0.0/8 ::1
+EOF
+  printf 'acl egress_model_endpoint dstdomain -n %s\n' "$egress_api_host"
+  printf 'acl egress_model_providers dstdomain -n %s\n' "$EGRESS_MODEL_PROVIDERS"
+  cat <<'EOF'
+
+http_access deny egress_metadata_names
+http_access deny !egress_ports
+http_access deny CONNECT !egress_tls_port
+http_access deny egress_linklocal
+http_access deny egress_loopback
+http_access allow egress_model_endpoint
+http_access deny egress_model_providers
+http_access allow all
+EOF
+}
+
+# Save the proxy's access log, the session's evidence, to the host before the
+# sidecar is removed, and summarise what it refused. Called from the EXIT
+# trap; it does nothing unless the sidecar was started (egress_started set).
+# The log dir is never mounted into the agent container. squid's default
+# format on stdout: field 4 is the result/status, field 7 the URL (host:port
+# for CONNECT).
+# ponytail: a SIGKILLed run.sh never runs the trap and loses the session log;
+# bind-mount squid's access_log to the host if that matters.
+egress_save_log() {
+  [ -n "${egress_started:-}" ] || return 0
+  local base="$EGRESS_LOG_DIR/$egress_started-$gh_sid" denied
+  mkdir -p "$EGRESS_LOG_DIR" || return 0
+  "$RUNTIME" logs "$EGRESS_SIDECAR" >"$base.log" 2>/dev/null || true
+  printf 'start=%s\nend=%s\nuser=%s\nhost=%s\nworkspace=%s\nimage=%s\nimage_id=%s\nendpoint=%s\n' \
+    "$egress_started" "$(date -u +%Y%m%dT%H%M%SZ)" "$(id -un)" "$(uname -n)" \
+    "${WORKSPACES[*]}" "$IMAGE" "$egress_image_id" "$egress_api_host" >"$base.meta"
+  denied=$(awk '$4 ~ /^TCP_DENIED\// {print $7}' "$base.log" \
+    | sed -e 's#^[A-Za-z]*://##' -e 's#[/:].*##' | sort -u | tr '\n' ' ') || true
+  [ -n "$denied" ] && echo "claude-docker: egress proxy blocked: ${denied}" >&2
+  echo "claude-docker: egress log saved to $base.log" >&2
+  return 0
+}
+
+# Poll sidecar <name> for up to 15s until `<ready-cmd...>` succeeds. Returns 0
+# when ready, 2 as soon as the container has exited (so a config error is
+# reported as itself instead of waiting out the budget), 1 on timeout.
+wait_sidecar() {
+  local name="$1" i=0
+  shift
+  while [ "$i" -lt 15 ]; do
+    "$@" >/dev/null 2>&1 && return 0
+    [ -z "$("$RUNTIME" ps -q --filter "name=^$name$" 2>/dev/null)" ] && return 2
+    sleep 1
+    i=$((i + 1))
+  done
+  return 1
+}
+
 # Expand a leading ~/ in CLAUDE_CONFIG_DIR — needed when set via env var, where
 # the shell does not perform tilde expansion. Pattern is "~/" not "~" so a
 # user-tilde form like "~alice/path" is not silently misresolved as "$HOME/alice/path".
@@ -598,6 +747,7 @@ DOCKER_FLAGS=()
 [ "$WITH_AZ" = "1" ]       && DOCKER_FLAGS+=("az")
 [ "$WITH_REGISTRY" = "1" ] && DOCKER_FLAGS+=("registry")
 [ "$WITH_API" = "1" ]      && DOCKER_FLAGS+=("api")
+[ "$WITH_EGRESS_LOCK" = "1" ] && DOCKER_FLAGS+=("egress-lock")
 [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
 [ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
 if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
@@ -627,6 +777,10 @@ stage=$(mktemp -d "$stage_root/host.XXXXXX")
 gh_sid="${stage##*.}"
 GH_PROXY_NETWORK="claude-gh-$gh_sid"
 GH_PROXY_SIDECAR="claude-gh-proxy-$gh_sid"
+# --egress-lock resources, named the same way for the same reason.
+EGRESS_NETWORK="claude-egress-$gh_sid"
+EGRESS_OUT_NETWORK="claude-egress-out-$gh_sid"
+EGRESS_SIDECAR="claude-egress-proxy-$gh_sid"
 
 # `case` instead of `[[ ]]` for bash 3.2 friendliness inside the trap string.
 # $HOME/$RUNTIME/$GH_PROXY_* are expanded at trap execution time, * is a glob
@@ -634,11 +788,31 @@ GH_PROXY_SIDECAR="claude-gh-proxy-$gh_sid"
 # not-yet-existing resources (`|| true`): trap-before-create closes the
 # window where a failure between creating a resource and re-trapping would
 # leak it, so this must be in place before the network/sidecar are created.
+# Egress teardown order matters: egress_save_log reads the proxy's logs,
+# so it runs before the proxy is removed. The egress networks are
+# removed last, because the gh sidecar may be attached to the internal one.
 trap '
 case "$stage" in "$HOME/.cache/claude-docker/host."*) rm -rf "$stage" ;; esac
+egress_save_log
+"$RUNTIME" rm -f "$EGRESS_SIDECAR" >/dev/null 2>&1 || true
 "$RUNTIME" rm -f "$GH_PROXY_SIDECAR" >/dev/null 2>&1 || true
 "$RUNTIME" network rm "$GH_PROXY_NETWORK" >/dev/null 2>&1 || true
+"$RUNTIME" network rm "$EGRESS_NETWORK" "$EGRESS_OUT_NETWORK" >/dev/null 2>&1 || true
 ' EXIT
+
+# --egress-lock networks, created before the gh block so that the gh
+# sidecar can join the internal one. The agent's network is --internal: it has
+# no gateway, so a client that ignores the proxy env has no route off the host.
+# The proxy's outbound side gets its own per-session network rather than the
+# engine default. Rootless podman's default (pasta) can't be multi-attached,
+# and a dedicated network keeps other containers away from the proxy port.
+if [ "$WITH_EGRESS_LOCK" = "1" ]; then
+  if ! "$RUNTIME" network create --internal "$EGRESS_NETWORK" >/dev/null \
+     || ! "$RUNTIME" network create "$EGRESS_OUT_NETWORK" >/dev/null; then
+    echo "claude-docker: failed to create the --egress-lock networks — aborting (no container was started)" >&2
+    exit 1
+  fi
+fi
 
 # GitHub auth-proxy sidecar: active only when --gh found a host token
 # (GH_HOST_TOKEN, computed above during token discovery). --gh-direct and
@@ -731,34 +905,35 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   # TLS handshake (verified against the pinned image per design.md) — this
   # loop is a startup-race guard, not a wait for lazy generation. ~15s total
   # budget, short retries.
-  gh_ca_ready=0
-  gh_proxy_exited=0
-  i=0
-  while [ "$i" -lt 15 ]; do
-    if "$RUNTIME" cp "$GH_PROXY_SIDECAR:/data/caddy/pki/authorities/local/root.crt" "$stage/gh-proxy/root.crt" >/dev/null 2>&1; then
-      gh_ca_ready=1
-      break
-    fi
-    # Distinguish "still starting" from "already dead" so a config error is
-    # reported as itself instead of waiting out the budget and blaming the CA.
-    if [ -z "$("$RUNTIME" ps -q --filter "name=^$GH_PROXY_SIDECAR$" 2>/dev/null)" ]; then
-      gh_proxy_exited=1
-      break
-    fi
-    sleep 1
-    i=$((i + 1))
-  done
-  if [ "$gh_proxy_exited" = "1" ]; then
+  gh_wait=0
+  wait_sidecar "$GH_PROXY_SIDECAR" \
+    "$RUNTIME" cp "$GH_PROXY_SIDECAR:/data/caddy/pki/authorities/local/root.crt" "$stage/gh-proxy/root.crt" \
+    || gh_wait=$?
+  if [ "$gh_wait" = "2" ]; then
     echo "claude-docker: the gh-auth-proxy sidecar exited during startup — aborting; the real GitHub token was never forwarded into any container. Caddy's own error follows (an invalid CLAUDE_DOCKER_GH_POLICY snippet is the usual cause):" >&2
     "$RUNTIME" logs "$GH_PROXY_SIDECAR" 2>&1 | tail -15 | sed 's/^/  | /' >&2
     exit 1
   fi
-  if [ "$gh_ca_ready" != "1" ]; then
+  if [ "$gh_wait" != "0" ]; then
     echo "claude-docker: gh-auth-proxy sidecar did not produce a CA certificate within 15s — aborting; the real GitHub token was never forwarded into any container. The sidecar is still running; inspect it with '$RUNTIME logs $GH_PROXY_SIDECAR' (it is removed when this command exits)." >&2
     exit 1
   fi
 
-  gh_proxy_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$GH_PROXY_NETWORK\").IPAddress}}" "$GH_PROXY_SIDECAR" 2>/dev/null)
+  # Under --egress-lock the agent sits only on the internal egress
+  # network, so the sidecar joins that too (keeping claude-gh-<id> for its own
+  # route to GitHub), and every address below is the one on the egress
+  # network. The egress proxy resolves the same three names to it (see the
+  # egress block below).
+  gh_agent_network="$GH_PROXY_NETWORK"
+  if [ "$WITH_EGRESS_LOCK" = "1" ]; then
+    gh_agent_network="$EGRESS_NETWORK"
+    if ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$GH_PROXY_SIDECAR" >/dev/null; then
+      echo "claude-docker: failed to attach the gh-auth-proxy sidecar to '$EGRESS_NETWORK' — aborting; the real GitHub token was never forwarded into any container." >&2
+      exit 1
+    fi
+  fi
+
+  gh_proxy_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$gh_agent_network\").IPAddress}}" "$GH_PROXY_SIDECAR" 2>/dev/null)
   if [ -z "$gh_proxy_ip" ]; then
     echo "claude-docker: could not determine the gh-auth-proxy sidecar's network address — aborting; the real GitHub token was never forwarded into any container." >&2
     exit 1
@@ -769,9 +944,9 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   # resolution inside the agent container only — see design.md on why this
   # beats a network alias), trust the sidecar's CA, and hand `gh` a
   # placeholder that satisfies its "am I authenticated" check without being
-  # a usable credential.
+  # a usable credential. The egress block adds --network itself.
+  [ "$WITH_EGRESS_LOCK" = "1" ] || MOUNT_ARGS+=("--network" "$GH_PROXY_NETWORK")
   MOUNT_ARGS+=(
-    "--network" "$GH_PROXY_NETWORK"
     "--add-host" "github.com:$gh_proxy_ip"
     "--add-host" "api.github.com:$gh_proxy_ip"
     "--add-host" "uploads.github.com:$gh_proxy_ip"
@@ -793,6 +968,79 @@ if [ "$WITH_GH" = "1" ] && [ -n "$GH_HOST_TOKEN" ]; then
   )
   GH_SIDECAR_ACTIVE=1
   echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
+fi
+
+# --egress-lock proxy sidecar: squid from the agent image itself, so
+# there is no extra image to pull or pin (see api-egress-policy design.md).
+# The lifecycle mirrors the gh sidecar above: `run -d` without --rm so a crash
+# leaves logs to diagnose, exited-during-startup detection, and a fail-closed
+# abort on every path. The agent container is never started without the proxy.
+if [ "$WITH_EGRESS_LOCK" = "1" ]; then
+  EGRESS_SIDECAR_ARGS=()
+  if [ "$GH_SIDECAR_ACTIVE" = "1" ]; then
+    # squid's hosts_file is /etc/hosts, so CONNECT github.com:443 lands on
+    # the gh sidecar, which still terminates TLS and injects the token.
+    EGRESS_SIDECAR_ARGS+=(
+      "--add-host" "github.com:$gh_proxy_ip"
+      "--add-host" "api.github.com:$gh_proxy_ip"
+      "--add-host" "uploads.github.com:$gh_proxy_ip"
+    )
+  fi
+  gen_egress_squid_conf >"$stage/egress-squid.conf"
+  egress_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo unknown)
+  egress_started=$(date -u +%Y%m%dT%H%M%SZ)
+
+  # Runs as squid's own unprivileged user with no capabilities: port 3128
+  # needs none, and the proxy holds no secret.
+  if ! "$RUNTIME" run -d \
+      --name "$EGRESS_SIDECAR" \
+      --network "$EGRESS_OUT_NETWORK" \
+      --user proxy \
+      --cap-drop ALL \
+      --security-opt no-new-privileges \
+      ${EGRESS_SIDECAR_ARGS[@]+"${EGRESS_SIDECAR_ARGS[@]}"} \
+      -v "$(hostpath "$stage/egress-squid.conf"):/etc/squid/squid.conf:ro" \
+      --entrypoint /usr/sbin/squid \
+      "$IMAGE" -N >/dev/null \
+     || ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$EGRESS_SIDECAR" >/dev/null; then
+    echo "claude-docker: failed to start the --egress-lock proxy ($IMAGE) — aborting (the agent container was never started)" >&2
+    exit 1
+  fi
+
+  egress_listening() { "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; }
+  egress_wait=0
+  wait_sidecar "$EGRESS_SIDECAR" egress_listening || egress_wait=$?
+  if [ "$egress_wait" != "0" ]; then
+    if [ "$egress_wait" = "2" ]; then
+      echo "claude-docker: the --egress-lock proxy exited during startup — aborting (the agent container was never started). squid's own error follows:" >&2
+    else
+      echo "claude-docker: the --egress-lock proxy was not accepting connections within 15s — aborting (the agent container was never started). Its log follows:" >&2
+    fi
+    "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | tail -15 | sed 's/^/  | /' >&2
+    exit 1
+  fi
+
+  egress_ip=$("$RUNTIME" inspect --format "{{(index .NetworkSettings.Networks \"$EGRESS_NETWORK\").IPAddress}}" "$EGRESS_SIDECAR" 2>/dev/null)
+  if [ -z "$egress_ip" ]; then
+    echo "claude-docker: could not determine the --egress-lock proxy's address — aborting (the agent container was never started)" >&2
+    exit 1
+  fi
+
+  # Both spellings: curl reads only lowercase http_proxy, while other tools
+  # prefer the uppercase names. Loopback is the only thing that bypasses the
+  # proxy. GitHub deliberately does NOT bypass it under --gh: no_proxy=github.com
+  # would also match codeload.github.com, which has no direct route.
+  egress_url="http://$egress_ip:3128"
+  MOUNT_ARGS+=("--network" "$EGRESS_NETWORK")
+  ENV_ARGS+=(
+    "-e" "http_proxy=$egress_url" "-e" "https_proxy=$egress_url"
+    "-e" "HTTP_PROXY=$egress_url" "-e" "HTTPS_PROXY=$egress_url"
+    "-e" "no_proxy=localhost,127.0.0.1,::1" "-e" "NO_PROXY=localhost,127.0.0.1,::1"
+    # Telemetry, error reports and the updater: Anthropic hosts the proxy
+    # refuses anyway. Off, so they don't fill the log with denied requests.
+    "-e" "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+  )
+  echo "claude-docker: egress proxy '$EGRESS_SIDECAR' is active; model traffic goes only to $egress_api_host, every connection is logged to $EGRESS_LOG_DIR" >&2
 fi
 
 for item in agents commands skills; do
