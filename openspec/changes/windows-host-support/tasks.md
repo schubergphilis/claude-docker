@@ -30,7 +30,7 @@
 ## 5. Validation
 
 - [ ] 5.1 `shellcheck run.sh entrypoint.sh smoke/*.sh` and `python3 -m unittest discover -s tests -p 'test_*.py'` pass. (unittest passes, 123 tests; shellcheck not yet run — unavailable in the dev sandbox)
-- [ ] 5.2 `openspec validate windows-host-support --strict` passes.
+- [x] 5.2 `openspec validate windows-host-support --strict` passes.
 
 ## 6. Windows validation (manual, real host, before archive)
 
