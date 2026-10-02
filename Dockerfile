@@ -92,6 +92,10 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # but CI's gha cache kept serving this layer with 8.18.0-1ubuntu2.7 (see
 # .trivyignore); naming them changes the RUN, so the layer is rebuilt. Drop
 # them together with the openssl names.
+# squid is not for the agent: run.sh --api runs this same image as its
+# egress-lock forward-proxy sidecar (--entrypoint /usr/sbin/squid), so there is no
+# second image to pull or pin. It comes from the Ubuntu archive, so it moves
+# only within this base release; a major upgrade arrives with a FROM bump.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
@@ -116,6 +120,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       less \
       openssh-client \
       unzip \
+      squid \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
 
