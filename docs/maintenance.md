@@ -43,6 +43,16 @@ Each cell starts from `env -i` plus an allowlist, so your own `AWS_*`/`GH_TOKEN`
 
 The auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy), [GitLab auth proxy](auth.md#gitlab-auth-proxy), [Custom model endpoint](auth.md#custom-model-endpoint)) has its own harness, [`tests/integration/gh-proxy-integration.sh`](../tests/integration/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock upstream standing in for GitHub, GitLab and the model gateway, credential-free and CI-runnable, since CI has no real credentials to test against. Without a docker daemon it prints SKIP and exits 0; set `GH_PROXY_IT_REQUIRE_DOCKER=1` to make that a failure instead. The sidecar's Caddy config is also exercised directly by [`tests/test_auth_proxy_caddyfile.py`](../tests/test_auth_proxy_caddyfile.py), which runs run.sh's own staging into a real Caddy when a `caddy` binary is on `PATH` (use the version `PROXY_IMAGE` pins) and skips otherwise.
 
+The [API egress lock](auth.md#api-egress-lock) has its own `run.sh`-driven cell, [`tests/smoke/egress.sh`](../tests/smoke/egress.sh) (`IMAGE=claude-code:local bash tests/smoke/egress.sh [--gh]`), which runs in CI. It checks the following:
+
+- a missing, provider-host or config-smuggling `ANTHROPIC_BASE_URL` aborts startup;
+- the endpoint and other hosts are reachable, while `api.anthropic.com` is refused;
+- a proxy-unaware client has no route out;
+- metadata and loopback destinations are denied;
+- the session log and `.meta` are saved on the host;
+- `--gh` traffic reaches the auth proxy through squid;
+- teardown leaves nothing behind.
+
 ### Manual fallback checklist (macOS)
 
 There is **no automated macOS CI job**: GitHub-hosted `macos-latest` runners can't reliably provision a Docker daemon (the `vz` VM driver fails to boot under the runner's nested-virtualization limits, and the `qemu` driver hits an upstream Lima crash), so a hosted job can't even reach the assertions — and Colima's file-sharing may not match Docker Desktop's anyway. The one behaviour unique to macOS is **virtiofs collapsing `st_dev` across bind mounts**, which changes how `entrypoint.sh`'s `-xdev` chown-prune treats the `:ro` mounts under `/root` (see `chown_volumes` in `entrypoint.sh`). Verify it by hand on a real Mac with Docker Desktop before shipping changes to `entrypoint.sh` / `run.sh` / `Dockerfile`:
