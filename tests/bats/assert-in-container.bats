@@ -216,3 +216,35 @@ status_fixture() {
   [[ "$output" == *"PASS: settings-content"* ]]
   [[ "$output" == *"PASS: settings-rename"* ]]
 }
+
+# --- main --------------------------------------------------------------------
+
+# Stub every check but check_settings with a passing one.
+stub_checks() {
+  check_entrypoint_reached() { pass c1; }
+  check_identity() { pass c2; }
+  check_security() { pass c3; }
+  check_path_order() { pass c4; }
+  check_workspace_write() { pass c5; }
+  check_credentials() { pass c6; }
+  check_aws_state_masking() { pass c7; }
+  check_api() { pass c8; }
+}
+
+@test "main exits 1 with RESULT: FAIL when any check fails" {
+  stub_checks
+  check_settings() { fail settings; }
+  run main
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"Results: 8 passed, 1 failed"* ]]
+  [[ "$output" == *"RESULT: FAIL" ]]
+  [[ "$output" != *"RESULT: PASS"* ]]
+}
+
+@test "main exits 0 with RESULT: PASS when every check passes" {
+  stub_checks
+  check_settings() { pass settings; }
+  run main
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"RESULT: PASS" ]]
+}
