@@ -43,9 +43,10 @@ main() {
   set -euo pipefail
   local tools fail=0 count=0 name probe version_re pinned
   # Capture before looping. --list-tools is fail-closed, and `$(...)`
-  # propagates its non-zero exit under `set -e` where a
-  # `done < <(cmd)` process substitution would not.
-  tools=$(list_tools)
+  # propagates its non-zero exit where a `done < <(cmd)` process
+  # substitution would not. `|| return` rather than `set -e` alone,
+  # which is ignored when main runs under `||` or bats `run`.
+  tools=$(list_tools) || return
   while IFS=$'\t' read -r name probe version_re pinned _ _; do
     [ -n "$name" ] || continue
     count=$((count + 1))
