@@ -35,7 +35,7 @@ check_tool() {
   fi
   echo "  ${status}  ${name}  pinned=${pinned}  reported=${actual:-<probe failed>}"
   [ "$status" = PASS ] && return 0
-  echo "::error::${name}: pinned ${pinned}, image reported '${actual:-<probe failed>}'"
+  echo "::error::${name}: pinned ${pinned}, image reported '${actual:-<probe failed>}'" >&2
   return 1
 }
 
