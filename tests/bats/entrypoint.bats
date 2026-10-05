@@ -140,3 +140,26 @@ setup() {
   [ -z "$output" ]
   [ ! -e "$ROOT_HOME/.claude" ]
 }
+
+@test "failed settings seed aborts before the exec" {
+  echo '{}' > "$SEED_SETTINGS"
+  chown() { return 7; }
+  run main echo hello
+  [ "$status" -eq 7 ]
+  [[ "$output" != *hello* ]]
+}
+
+@test "failed groupadd aborts before useradd and runuser" {
+  groupadd() { return 9; }
+  HOST_UID=1000 HOST_GID=1000 run main claude
+  [ "$status" -eq 9 ]
+  [[ "$output" != *useradd* ]]
+  [[ "$output" != *runuser* ]]
+}
+
+@test "failed useradd aborts before runuser" {
+  useradd() { return 9; }
+  HOST_UID=1000 HOST_GID=1000 run main claude
+  [ "$status" -eq 9 ]
+  [[ "$output" != *runuser* ]]
+}

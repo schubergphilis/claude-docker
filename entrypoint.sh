@@ -27,10 +27,10 @@ CA_DIR=/usr/local/share/ca-certificates
 # HOST_UID-owned 0600 file in place would be denied.
 seed_settings() {
   [ -f "$SEED_SETTINGS" ] || return 0
-  mkdir -p "$ROOT_HOME/.claude"
-  chown root "$ROOT_HOME/.claude"
-  rm -f "$ROOT_HOME/.claude/settings.json"
-  cp "$SEED_SETTINGS" "$ROOT_HOME/.claude/settings.json"
+  mkdir -p "$ROOT_HOME/.claude" || return
+  chown root "$ROOT_HOME/.claude" || return
+  rm -f "$ROOT_HOME/.claude/settings.json" || return
+  cp "$SEED_SETTINGS" "$ROOT_HOME/.claude/settings.json" || return
   chmod 600 "$ROOT_HOME/.claude/settings.json"
 }
 
@@ -64,7 +64,8 @@ ensure_user() {
     return 0
   fi
   getent group "$gid" >/dev/null 2>&1 \
-    || groupadd -o -g "$gid" claude
+    || groupadd -o -g "$gid" claude \
+    || return
   useradd -o -K UID_MIN=1 -u "$uid" -g "$gid" -d /root -s /bin/bash -M -N claude
 }
 
@@ -107,14 +108,17 @@ drop_privileges() {
 main() {
   set -euo pipefail
   local uid="${HOST_UID:-0}" gid="${HOST_GID:-0}"
-  seed_settings
-  install_cas
+  # Explicit || return on every step: set -e is ignored when main runs in
+  # an ||/if context or under bats `run`, and a failed step must not
+  # fall through to the exec.
+  seed_settings || return
+  install_cas || return
   if [ "$uid" = 0 ]; then
     exec "$@"
   fi
-  ensure_user "$uid" "$gid"
+  ensure_user "$uid" "$gid" || return
   # Scoped to the walk: the session itself keeps the caller's locale.
-  LC_ALL=C chown_volumes "$uid" "$gid"
+  LC_ALL=C chown_volumes "$uid" "$gid" || return
   drop_privileges "$@"
 }
 
