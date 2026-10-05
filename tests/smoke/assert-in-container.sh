@@ -7,6 +7,8 @@
 #   exec runuser -u claude -- /workspaces/smoke/assert-in-container.sh
 # Reads expectations from env vars set by smoke.sh (via CLAUDE_DOCKER_TEST_ENTRY):
 #   EXPECT_UID        expected numeric UID (matches HOST_UID forwarded by smoke.sh)
+#   EXPECT_GID        expected primary GID (HOST_GID); checked when EXPECT_UID != 0
+#   EXPECT_EPHEMERAL  1 = --ephemeral run: no volumes, so no AWS tmpfs mask to assert
 #   EXPECT_OPTINS     comma-separated list of granted opt-ins (aws glab tfe api az), or empty
 #   WORKSPACE         path to the bind-mounted workspace inside the container
 #   EXPECT_RO         1 = workspace is :ro (skip write probe, only test entrypoint startup)
@@ -21,7 +23,15 @@
 #                     between passes to prove re-seeding overwrites the previous copy.
 # Accumulates per-check PASS/FAIL and exits non-zero at the end if any failed
 # (so one regression doesn't hide the rest of the report).
-set -euo pipefail
+#
+# Filesystem locations, overridable so tests/bats can point them at fixtures.
+# smoke.sh never sets them; the defaults are the real in-container paths.
+PROC_STATUS="${PROC_STATUS:-/proc/self/status}"
+PROC_MOUNTS="${PROC_MOUNTS:-/proc/self/mounts}"
+ROOT_HOME="${ROOT_HOME:-/root}"
+SEED_SETTINGS="${SEED_SETTINGS:-/run/claude-docker/settings.json}"
+API_CA="${API_CA:-/usr/local/share/ca-certificates/claude-docker-api.crt}"
+CA_BUNDLE="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
 
 PASS_COUNT=0
 FAIL_COUNT=0
@@ -123,19 +133,21 @@ check_identity() {
 # ---------------------------------------------------------------------------
 
 check_security() {
-  local status_file="/proc/self/status"
+  local status_file="$PROC_STATUS"
 
   if [ ! -f "$status_file" ]; then
-    fail "security: /proc/self/status not found"
+    fail "security: $status_file not found"
     return
   fi
 
+  # awk alone, not grep | awk: a missing field yields an empty value (which
+  # the assertions below report) instead of a pipefail abort of the run.
   local cap_eff cap_prm cap_amb cap_bnd nnp
-  cap_eff=$(grep '^CapEff:' "$status_file" | awk '{print $2}')
-  cap_prm=$(grep '^CapPrm:' "$status_file" | awk '{print $2}')
-  cap_amb=$(grep '^CapAmb:' "$status_file" | awk '{print $2}')
-  cap_bnd=$(grep '^CapBnd:' "$status_file" | awk '{print $2}')
-  nnp=$(grep '^NoNewPrivs:' "$status_file" | awk '{print $2}')
+  cap_eff=$(awk '/^CapEff:/{print $2}' "$status_file")
+  cap_prm=$(awk '/^CapPrm:/{print $2}' "$status_file")
+  cap_amb=$(awk '/^CapAmb:/{print $2}' "$status_file")
+  cap_bnd=$(awk '/^CapBnd:/{print $2}' "$status_file")
+  nnp=$(awk '/^NoNewPrivs:/{print $2}' "$status_file")
 
   # Universal invariants — these hold regardless of HOST_UID (including the
   # root-legacy path), so assert them BEFORE the uid=0 branch below.
@@ -281,22 +293,23 @@ check_workspace_write() {
 # Format: "config_path:env_var" (env_var may be empty if not applicable)
 optin_config_path() {
   case "$1" in
-    aws)  echo "/root/.aws/config:AWS_PROFILE" ;;
-    glab) echo "/root/.config/glab-cli:GITLAB_TOKEN" ;;
-    tfe)  echo "/root/.terraform.d/credentials.tfrc.json:TF_TOKEN_app_terraform_io" ;;
-    az)   echo "/root/.azure:AZURE_DEVOPS_EXT_PAT" ;;
+    aws)  echo "${ROOT_HOME}/.aws/config:AWS_PROFILE" ;;
+    glab) echo "${ROOT_HOME}/.config/glab-cli:GITLAB_TOKEN" ;;
+    tfe)  echo "${ROOT_HOME}/.terraform.d/credentials.tfrc.json:TF_TOKEN_app_terraform_io" ;;
+    az)   echo "${ROOT_HOME}/.azure:AZURE_DEVOPS_EXT_PAT" ;;
     *)    echo "" ;;
   esac
 }
 
 # All known opt-ins in declaration order.
-ALL_OPTINS="aws glab tfe az"
+ALL_OPTINS=(aws glab tfe az)
 
 check_credentials() {
-  local granted_csv="${EXPECT_OPTINS:-}"
+  local optin g
+  local -a granted_list=()
+  IFS=',' read -ra granted_list <<< "${EXPECT_OPTINS:-}"
 
-  # shellcheck disable=SC2086  # word-split on ALL_OPTINS is intentional (space-separated list)
-  for optin in $ALL_OPTINS; do
+  for optin in "${ALL_OPTINS[@]}"; do
     local spec config_path env_var
     spec=$(optin_config_path "$optin")
     config_path="${spec%%:*}"
@@ -304,16 +317,12 @@ check_credentials() {
 
     # Determine whether this opt-in was granted.
     local granted=0
-    if [ -n "$granted_csv" ]; then
-      local IFS=','
-      # shellcheck disable=SC2086  # word-split on comma-separated list is intentional
-      for g in $granted_csv; do
-        if [ "$g" = "$optin" ]; then
-          granted=1
-          break
-        fi
-      done
-    fi
+    for g in "${granted_list[@]}"; do
+      if [ "$g" = "$optin" ]; then
+        granted=1
+        break
+      fi
+    done
 
     if [ "$granted" = "1" ] && [ "$optin" = "az" ]; then
       # --az mounts no host file (/root/.azure is plain volume state), so the
@@ -397,7 +406,7 @@ check_aws_state_masking() {
   # AWS state carried in from anywhere. Requiring a tmpfs here would fail the
   # ephemeral cell for doing exactly what it is supposed to do.
   if [ "${EXPECT_EPHEMERAL:-0}" = "1" ]; then
-    local cache="/root/.aws/cli/cache"
+    local cache="${ROOT_HOME}/.aws/cli/cache"
     if [ ! -e "$cache" ] || [ "$(find "$cache" -mindepth 1 2>/dev/null | wc -l)" -eq 0 ]; then
       pass "ephemeral-aws: no AWS credential cache present (no volumes mounted)"
     else
@@ -411,10 +420,10 @@ check_aws_state_masking() {
     # Under --aws the mask narrows to the credential cache: the AWS CLI writes
     # assume-role/SSO-derived STS there, and /root is a shared persistent
     # volume, so it must not outlive this session.
-    path="/root/.aws/cli/cache"
+    path="${ROOT_HOME}/.aws/cli/cache"
     label="aws-cache-masked"
   else
-    path="/root/.aws"
+    path="${ROOT_HOME}/.aws"
     label="masked-aws-dir"
   fi
 
@@ -433,10 +442,10 @@ check_aws_state_masking() {
 
   # Under --aws the read-only host mounts must survive the narrower mask.
   if [ "$granted" = "1" ]; then
-    if [ -f /root/.aws/config ]; then
-      pass "aws-cache-masked-scope: /root/.aws/config still visible under the cache mask"
+    if [ -f "${ROOT_HOME}/.aws/config" ]; then
+      pass "aws-cache-masked-scope: ${ROOT_HOME}/.aws/config still visible under the cache mask"
     else
-      fail "aws-cache-masked-scope: /root/.aws/config hidden — mask is too broad"
+      fail "aws-cache-masked-scope: ${ROOT_HOME}/.aws/config hidden — mask is too broad"
     fi
 
     # This is the one mask that must stay WRITABLE. Every other mask exists to
@@ -445,11 +454,11 @@ check_aws_state_masking() {
     # that grants it. Nothing else guarantees it: entrypoint.sh's chown walk
     # runs `find /root ... -xdev`, which by design does not descend into a
     # tmpfs, so ownership here is whatever the mount gave us.
-    if touch /root/.aws/cli/cache/__smoke_write_test 2>/dev/null; then
+    if touch "${path}/__smoke_write_test" 2>/dev/null; then
       pass "aws-cache-writable: the cache mask accepts writes from the session user"
-      rm -f /root/.aws/cli/cache/__smoke_write_test
+      rm -f "${path}/__smoke_write_test"
     else
-      fail "aws-cache-writable: cannot write to /root/.aws/cli/cache as $(id -u):$(id -g) — the AWS CLI would fail to cache credentials under --aws"
+      fail "aws-cache-writable: cannot write to ${path} as $(id -u):$(id -g) — the AWS CLI would fail to cache credentials under --aws"
     fi
   fi
 }
@@ -459,8 +468,7 @@ check_aws_state_masking() {
 # the system bundle (the entrypoint's update-ca-certificates step) — without
 # that, a TLS-terminating gateway fails on the first request.
 check_api() {
-  local ca="/usr/local/share/ca-certificates/claude-docker-api.crt"
-  local bundle="/etc/ssl/certs/ca-certificates.crt"
+  local ca="$API_CA" bundle="$CA_BUNDLE" ca_line=""
   case ",${EXPECT_OPTINS:-}," in
     *,api,*)
       if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
@@ -469,7 +477,11 @@ check_api() {
         fail "optin-api-env: ANTHROPIC_BASE_URL expected but not set"
       fi
       # Line 2 is the first base64 line of the PEM body — unique to this CA.
-      if [ -f "$ca" ] && grep -qF "$(sed -n 2p "$ca")" "$bundle"; then
+      # It must be non-empty: grep -F "" matches any bundle.
+      if [ -f "$ca" ]; then
+        ca_line=$(sed -n 2p "$ca")
+      fi
+      if [ -n "$ca_line" ] && grep -qF -- "$ca_line" "$bundle" 2>/dev/null; then
         pass "optin-api-ca: mounted CA is in the system trust bundle"
       else
         fail "optin-api-ca: mounted CA missing from $bundle (update-ca-certificates not run?)"
@@ -504,7 +516,7 @@ check_mask_set() {
   fi
   # shellcheck disable=SC2086  # word-split of the space-separated list is intended
   expected=$(printf '%s\n' $expected | sort)
-  actual=$(awk '$3 == "tmpfs" && ($2 == "/root" || $2 ~ /^\/root\//) { print $2 }' /proc/self/mounts | sort)
+  actual=$(awk '$3 == "tmpfs" && ($2 == "/root" || $2 ~ /^\/root\//) { print $2 }' "$PROC_MOUNTS" | sort)
   if [ "$actual" = "$expected" ]; then
     pass "mask-set: tmpfs masks under /root are exactly [$(echo "$expected" | tr "\n" " ")]"
   else
@@ -517,7 +529,7 @@ check_mask_set() {
 # ---------------------------------------------------------------------------
 
 check_settings() {
-  local settings="/root/.claude/settings.json"
+  local settings="${ROOT_HOME}/.claude/settings.json"
   local mode="${EXPECT_SETTINGS:-0}"
 
   if [ "$mode" = "0" ]; then
@@ -537,8 +549,8 @@ check_settings() {
     # touch the settings.json a previous run persisted. The shared checks
     # below assert it survived with the previous pass's sentinel and is
     # still atomically replaceable.
-    if [ -e /run/claude-docker/settings.json ]; then
-      fail "settings-keep: seed present at /run/claude-docker/settings.json but this pass expects none"
+    if [ -e "$SEED_SETTINGS" ]; then
+      fail "settings-keep: seed present at $SEED_SETTINGS but this pass expects none"
     else
       pass "settings-keep: no seed mounted this run"
     fi
@@ -557,10 +569,11 @@ check_settings() {
   local sentinel="${EXPECT_SETTINGS_SENTINEL:-}"
   if [ -z "$sentinel" ]; then
     fail "settings-content: EXPECT_SETTINGS_SENTINEL not set (smoke.sh plumbing regression)"
-  elif grep -q "$sentinel" "$settings" 2>/dev/null; then
+  elif grep -qF -- "$sentinel" "$settings" 2>/dev/null; then
     pass "settings-content: settings.json carries expected sentinel '$sentinel'"
   else
-    fail "settings-content: '$sentinel' not found in $settings (content: $(cat "$settings" 2>/dev/null || echo '<unreadable>'))"
+    # Size only: settings.json may hold tokens, and this lands in the CI log.
+    fail "settings-content: '$sentinel' not found in $settings ($(wc -c < "$settings" 2>/dev/null || echo '<unreadable>') bytes)"
   fi
 
   # The reason settings are copied instead of bind-mounted: Claude Code saves
@@ -588,24 +601,32 @@ check_entrypoint_reached() {
 # Main
 # ---------------------------------------------------------------------------
 
-echo "=== assert-in-container starting (UID=$(id -u) GID=$(id -g)) ==="
+main() {
+  set -euo pipefail
 
-check_entrypoint_reached
-check_identity
-check_security
-check_path_order
-check_workspace_write
-check_credentials
-check_aws_state_masking
-check_api
-check_mask_set
-check_settings
+  echo "=== assert-in-container starting (UID=$(id -u) GID=$(id -g)) ==="
 
-echo "==="
-echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"
+  check_entrypoint_reached
+  check_identity
+  check_security
+  check_path_order
+  check_workspace_write
+  check_credentials
+  check_aws_state_masking
+  check_api
+  check_mask_set
+  check_settings
 
-if [ "$FAIL_COUNT" -gt 0 ]; then
-  echo "RESULT: FAIL"
-  exit 1
+  echo "==="
+  echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"
+
+  if [ "$FAIL_COUNT" -gt 0 ]; then
+    echo "RESULT: FAIL"
+    exit 1
+  fi
+  echo "RESULT: PASS"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
 fi
-echo "RESULT: PASS"
