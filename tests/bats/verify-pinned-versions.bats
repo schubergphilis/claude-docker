@@ -69,5 +69,6 @@ $(row good 'good --version' 'good ([0-9.]+)' 1.2.3)"
 @test "failing --list-tools aborts" {
   list_tools() { return 3; }
   run main
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 3 ]
+  [[ "$output" != *"listed no tools"* ]]
 }
