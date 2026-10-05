@@ -43,8 +43,9 @@ jobs:
 
       - name: BATS unit tests — shell scripts
         # Ubuntu's packaged bats; the suites stub docker and friends, so
-        # nothing here needs a daemon or network.
+        # the tests themselves need no daemon or network.
         run: |
+          sudo apt-get update
           sudo apt-get install -y --no-install-recommends bats
           bats tests/bats
 
