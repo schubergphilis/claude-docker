@@ -394,10 +394,10 @@ fi
 
 # 3. Robustness: no spurious 'entrypoint: WARN' on stderr — asserted for EVERY
 #    cell, not just RO. The entrypoint only chowns /root + /root/.claude
-#    (entrypoint.sh:42), so the :ro *workspace* mount never trips the chown→EROFS
+#    (entrypoint.sh chown_volumes), so the :ro *workspace* mount never trips the chown→EROFS
 #    filter; the mounts that DO sit under /root are the credential opt-in mounts
 #    (--aws/--glab/--tfe), so the opt-in cells are what actually pin the
-#    WARN-suppression filter (entrypoint.sh:44). Checking every cell ensures a
+#    WARN-suppression filter (entrypoint.sh chown_volumes). Checking every cell ensures a
 #    triggering condition is covered. NOTE: CONTAINER_STDERR is overwritten per
 #    run_container(), so for a warm cell this reflects only the last pass —
 #    acceptable here since the passes differ only in the settings seed mount
