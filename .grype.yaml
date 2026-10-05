@@ -44,3 +44,16 @@ ignore:
       version: 48.0.1
       location: "**/pins/az-requirements.txt"
     reason: Held by azure-cli-core's msal pin; moves with pins/az.env.
+
+  # GHSA-vfj7-8cjw-p6xm (stack-exhaustion DoS on deeply nested brace patterns)
+  # covers every braces release; 3.0.3 is the latest and none is patched. It
+  # reaches us only as openspec -> fast-glob -> micromatch -> braces, all three
+  # already at their latest. openspec only globs a schema's `generates:` paths,
+  # so the worst case is a repo crashing its own openspec run. Scoped to this
+  # version and openspec's tree, so a patched release or any other copy of
+  # braces stays enforced.
+  - package:
+      name: braces
+      version: 3.0.3
+      location: "**/node_modules/@fission-ai/openspec/**"
+    reason: No patched braces exists; moves with pins/openspec.env.
