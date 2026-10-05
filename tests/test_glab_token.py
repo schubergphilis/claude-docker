@@ -3,12 +3,14 @@
 """Drive run.sh with stub `docker` and `glab` to pin --glab token discovery.
 
 With GITLAB_TOKEN unset, --glab asks host glab for a token (GITLAB_HOST, else
-the workspace's origin host, then glab's default host) and forwards it by bare
-name, never on argv. An explicit GITLAB_TOKEN wins; finding none warns.
+the workspace's origin host -- resolved through worktrees -- then glab's default
+host) and forwards it by bare name, never on argv. An explicit GITLAB_TOKEN
+wins; finding none, or no glab on PATH, warns.
 
 Stdlib only, so CI's unit-test step keeps running with no install step.
 """
 
+import os
 import subprocess
 import tempfile
 import unittest
@@ -25,11 +27,13 @@ printf '%s\\n' "$@" > "$STUB_LOG/argv"
 printf '%s' "${GITLAB_TOKEN:-}" > "$STUB_LOG/token"
 """
 # Host glab: answers `config get host` from GITLAB_HOST (as real glab does) and
-# holds a token only for gl.example.com, returned solely via `config get token
-# --host` -- the call real glab answers from the OS keyring under use_keyring.
+# holds tokens for gl.example.com and other.example.com, returned solely via
+# `config get token --host` -- the call real glab answers from the OS keyring
+# under use_keyring.
 GLAB = f"""#!/bin/sh
 [ "$*" = "config get host" ] && {{ echo "$GITLAB_HOST"; exit 0; }}
 [ "$*" = "config get token --host gl.example.com" ] && echo "{SECRET}"
+[ "$*" = "config get token --host other.example.com" ] && echo "glpat-other-host"
 exit 0
 """
 
@@ -54,9 +58,14 @@ class GlabTokenDiscovery(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def _run(self, drop=(), **extra):
+    @staticmethod
+    def _init_repo(path, origin):
+        subprocess.run(["git", "init", "-q", str(path)], check=True)
+        subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
+
+    def _run(self, drop=(), path="/usr/bin:/bin", **extra):
         env = {
-            "PATH": f"{self.bin}:/usr/bin:/bin",
+            "PATH": f"{self.bin}:{path}",
             "HOME": str(self.home),
             "STUB_LOG": str(self.log),
             "CLAUDE_DOCKER_RUNTIME": "docker",
@@ -87,13 +96,43 @@ class GlabTokenDiscovery(unittest.TestCase):
     def test_origin_remote_host_discovered_without_gitlab_host(self):
         # glab's default host is gitlab.com (no token); origin points at the
         # instance that holds one (#126).
-        (self.ws / ".git").mkdir()
-        (self.ws / ".git" / "config").write_text(
-            '[remote "origin"]\n\turl = git@gl.example.com:group/project.git\n')
+        self._init_repo(self.ws, "git@gl.example.com:group/project.git")
         argv, token = self._run(drop=("GITLAB_HOST",))
         self.assertEqual(token, SECRET)
         self.assertFalse(any(SECRET in a for a in argv))
         self.assertNotIn("no GitLab token", self.stderr)
+
+    def test_gitlab_host_beats_origin(self):
+        # origin's host also has a token; it must not be the one forwarded.
+        self._init_repo(self.ws, "git@other.example.com:group/project.git")
+        _, token = self._run()
+        self.assertEqual(token, SECRET)
+
+    def test_worktree_workspace_uses_main_repo_origin(self):
+        # In a worktree .git is a pointer file; the remote lives in the main repo.
+        main = Path(self.tmp.name) / "main"
+        self._init_repo(main, "git@gl.example.com:group/project.git")
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@t", "-C", str(main)]
+        subprocess.run(git + ["commit", "-q", "--allow-empty", "-m", "init"], check=True)
+        self.ws.rmdir()
+        subprocess.run(git + ["worktree", "add", "-q", "--detach", str(self.ws)], check=True)
+        _, token = self._run(drop=("GITLAB_HOST",))
+        self.assertEqual(token, SECRET)
+
+    def test_no_glab_on_path_warns(self):
+        # Host PATH minus any real glab; with no GITLAB_HOST and no origin the
+        # candidate list is empty, which must not trip bash 3.2's set -u.
+        (self.bin / "glab").unlink()
+        sysbin = Path(self.tmp.name) / "sysbin"
+        sysbin.mkdir()
+        for d in ("/usr/bin", "/bin"):
+            for name in os.listdir(d):
+                if name != "glab" and not (sysbin / name).exists():
+                    (sysbin / name).symlink_to(Path(d) / name)
+        argv, token = self._run(drop=("GITLAB_HOST",), path=str(sysbin))
+        self.assertEqual(token, "")
+        self.assertNotIn("GITLAB_TOKEN", argv)
+        self.assertIn("glab not on host PATH", self.stderr)
 
     def test_no_token_warns_with_hosts_tried(self):
         argv, token = self._run(drop=("GITLAB_HOST",))

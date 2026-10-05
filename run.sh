@@ -580,18 +580,23 @@ GH_HOST_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-$GH_DISCOVERED_TOKEN}}"
 # there is no D-Bus there (#126). `glab config get token --host` reads the
 # OS keyring too, which the read-only config mount can't carry; without
 # --host it never looks at per-host tokens. The origin URL is read as a
-# plain file (no includes), skipping symlinks like the git-config overlay
-# below. Forwarded by bare name, never on argv; warn when nothing is found.
+# plain file (no includes) from the repo's common git dir, so worktree and
+# submodule workspaces (.git is a pointer file) resolve to the main repo /
+# module config; symlinked .git or config is skipped, as in the git-config
+# overlay below. Forwarded by bare name, never on argv; warn when nothing is
+# found.
 if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
   _glab_hosts=()
   if [ -n "${GITLAB_HOST:-}" ]; then
     _glab_hosts=("$GITLAB_HOST")
   else
     _ws0="${SEEN_PATHS[0]}"
-    if [ -d "$_ws0/.git" ] && [ ! -L "$_ws0/.git" ] \
-       && [ -f "$_ws0/.git/config" ] && [ ! -L "$_ws0/.git/config" ]; then
-      _glab_remote=$(git config --file "$_ws0/.git/config" --get remote.origin.url 2>/dev/null) || true
-      [ -n "$_glab_remote" ] && _glab_hosts+=("$_glab_remote")
+    if [ -e "$_ws0/.git" ] && [ ! -L "$_ws0/.git" ]; then
+      _glab_cfg="$(git -C "$_ws0" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/config"
+      if [ -f "$_glab_cfg" ] && [ ! -L "$_glab_cfg" ]; then
+        _glab_remote=$(git config --file "$_glab_cfg" --get remote.origin.url 2>/dev/null) || true
+        [ -n "$_glab_remote" ] && _glab_hosts+=("$_glab_remote")
+      fi
     fi
     if command -v glab >/dev/null 2>&1; then
       _glab_default=$(GLAB_CHECK_UPDATE=false glab config get host 2>/dev/null) || true

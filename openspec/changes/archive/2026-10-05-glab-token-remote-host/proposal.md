@@ -15,8 +15,9 @@ Closes [#126](https://github.com/schubergphilis/claude-docker/issues/126).
 
 - **Try the workspace remote's host.** With `GITLAB_HOST` unset, discovery tries the
   first workspace's `remote.origin.url` host before glab's default host. The URL is read
-  with `git config --file` (no includes, no repo hooks), and symlinked `.git` /
-  `.git/config` are skipped, as the git-config overlay already does.
+  with `git config --file` (no includes, no repo hooks) from the repository's common git
+  dir, so worktree and submodule workspaces work too. A symlinked `.git` or `config` is
+  skipped, as the git-config overlay already does.
 - **Warn instead of staying silent** when `--glab` ends up with no token. One stderr
   line names the hosts tried and the `GITLAB_TOKEN` / `GITLAB_HOST` remedies.
 - An explicit `GITLAB_HOST` still pins the lookup to that one host.
