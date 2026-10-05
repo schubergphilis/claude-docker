@@ -59,38 +59,48 @@
 #     directory instead could also remove docker — on typical CI runners both
 #     live in /usr/bin).
 #
-# This script intentionally does NOT use `set -e`: several scenarios assert a
-# non-zero exit from run.sh, and letting the harness itself abort on the first
-# expected failure would defeat the point. Every fallible command is checked
-# explicitly instead.
-set -uo pipefail
+# `main` runs under `set -euo pipefail`. Several scenarios assert a non-zero
+# exit from run.sh, so those exits are captured explicitly (`rc=0; wait "$pid"
+# || rc=$?`), and every best-effort docker call carries its own `|| true`.
+#
+# Without a docker daemon the harness prints SKIP and exits 0. Set
+# GH_PROXY_IT_REQUIRE_DOCKER=1 (e.g. in CI) to make that a hard failure.
+#
+# Sourcing this file only defines functions and constants; nothing runs.
 
 # ---------------------------------------------------------------------------
 # Preflight — skip gracefully without docker; fail fast on other missing deps.
 # ---------------------------------------------------------------------------
 
-if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
-  echo "SKIP: no working docker daemon in this environment — gh-proxy-integration.sh requires docker (not a failure)."
-  exit 0
-fi
+preflight() {
+  if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
+    if [ "${GH_PROXY_IT_REQUIRE_DOCKER:-}" = "1" ]; then
+      echo "FATAL: no working docker daemon, and GH_PROXY_IT_REQUIRE_DOCKER=1 forbids skipping." >&2
+      exit 1
+    fi
+    echo "SKIP: no working docker daemon in this environment — gh-proxy-integration.sh requires docker (not a failure)."
+    exit 0
+  fi
 
-if ! command -v script >/dev/null 2>&1; then
-  echo "FATAL: 'script' not found (util-linux on Linux; ships with macOS) — required to give run.sh's 'docker run -it' a PTY in a non-interactive shell." >&2
-  exit 1
-fi
+  if ! command -v script >/dev/null 2>&1; then
+    echo "FATAL: 'script' not found (util-linux on Linux; ships with macOS) — required to give run.sh's 'docker run -it' a PTY in a non-interactive shell." >&2
+    exit 1
+  fi
 
-TARGET_IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
-if ! docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
-  echo "FATAL: image '$TARGET_IMAGE' not found — build it first (docker build -t claude-code:local .). CI is expected to build it before running this harness." >&2
-  exit 1
-fi
+  TARGET_IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
+  if ! docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
+    echo "FATAL: image '$TARGET_IMAGE' not found — build it first (docker build -t claude-code:local .). CI is expected to build it before running this harness." >&2
+    exit 1
+  fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_SH="$(cd "$SCRIPT_DIR/.." && pwd)/run.sh"
-if [ ! -f "$RUN_SH" ]; then
-  echo "FATAL: run.sh not found at $RUN_SH" >&2
-  exit 1
-fi
+  local script_dir
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  RUN_SH="$(cd "$script_dir/.." && pwd)/run.sh"
+  if [ ! -f "$RUN_SH" ]; then
+    echo "FATAL: run.sh not found at $RUN_SH" >&2
+    exit 1
+  fi
+}
 
 # Pinned mock image — deliberately the SAME digest-pinned Caddy image the
 # sidecar itself uses (see run.sh's PROXY_IMAGE default), reused here as a
@@ -145,12 +155,25 @@ ingest_results_file() {
 # shares /var/folders) only reliably share $HOME, and this dir is bind-mounted
 # into the mock (Caddyfile) — an unshared source path materializes as an empty
 # directory inside the VM and the file mount fails with ENOTDIR.
-SCRATCH_ROOT="$HOME/.cache/claude-docker"
-mkdir -p "$SCRATCH_ROOT"
-SCRATCH=$(mktemp -d "$SCRATCH_ROOT/ghtest.XXXXXX")
+#
+# Globals the cleanup trap reads; set here so it sees them even when it fires
+# before setup_scratch/start_mock got that far.
+SCRATCH=""
 MOCK_CID=""
 BG_PIDS=()
 CLEANUP_DONE=0
+
+# Fails hard instead of leaving SCRATCH empty: every later path is built as
+# "$SCRATCH/...", which would otherwise resolve under /.
+setup_scratch() {
+  local root="$HOME/.cache/claude-docker"
+  if ! mkdir -p "$root" || ! SCRATCH=$(mktemp -d "$root/ghtest.XXXXXX") \
+     || [ -z "$SCRATCH" ] || [ ! -d "$SCRATCH" ]; then
+    echo "FATAL: could not create a scratch dir under $root" >&2
+    SCRATCH=""
+    return 1
+  fi
+}
 
 # Removes STOPPED claude-gh-* sidecars and unused networks — mirrors run.sh's
 # own startup prune (same prefix, same stopped-only rationale). CRITICAL: never
@@ -162,31 +185,43 @@ CLEANUP_DONE=0
 # networks are removed. Called at pre-flight (so a prior crashed run of THIS
 # harness can't confuse discovery) and from the exit trap (backstop only).
 sweep_stale_claude_gh() {
+  local cid nid
   docker ps -aq --filter "name=^claude-gh-proxy-" \
       --filter "status=exited" --filter "status=created" --filter "status=dead" \
       2>/dev/null | while IFS= read -r cid; do
-    [ -n "$cid" ] && docker rm -f "$cid" >/dev/null 2>&1
-  done
+    [ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true
+  done || true
   docker network ls -q --filter "name=^claude-gh-" 2>/dev/null | while IFS= read -r nid; do
-    [ -n "$nid" ] && docker network rm "$nid" >/dev/null 2>&1
-  done
-  return 0
+    [ -z "$nid" ] || docker network rm "$nid" >/dev/null 2>&1 || true
+  done || true
 }
 
-# shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT INT TERM` below
+# Signals $1 and all its descendants, children first. Killing the process
+# group would miss most of them: timeout(1) moves itself into its own group,
+# and script(1) starts a new session for the PTY, so run.sh and the docker
+# clients under it never share the background subshell's group.
+kill_tree() {
+  local pid="$1" child
+  for child in $(pgrep -P "$pid" 2>/dev/null); do
+    kill_tree "$child"
+  done
+  kill "$pid" >/dev/null 2>&1 || true
+}
+
+# shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT` below
 cleanup() {
-  [ "$CLEANUP_DONE" = "1" ] && return
+  [ "$CLEANUP_DONE" = "1" ] && return 0
   CLEANUP_DONE=1
   local pid
   # Guarded: macOS /bin/bash is 3.2, where expanding an empty array under
   # set -u is fatal (same convention as run.sh).
   if [ "${#BG_PIDS[@]}" -gt 0 ]; then
     for pid in "${BG_PIDS[@]}"; do
-      [ -n "$pid" ] && kill "$pid" >/dev/null 2>&1
+      [ -z "$pid" ] || kill_tree "$pid"
     done
   fi
-  wait 2>/dev/null
-  [ -n "$MOCK_CID" ] && docker rm -f "$MOCK_CID" >/dev/null 2>&1
+  wait 2>/dev/null || true
+  [ -z "$MOCK_CID" ] || docker rm -f "$MOCK_CID" >/dev/null 2>&1 || true
   sweep_stale_claude_gh
   # Keep the scratch dir (session transcripts, captured sidecar/mock logs,
   # results files) whenever anything failed — it's the only debugging
@@ -194,14 +229,10 @@ cleanup() {
   # --rm containers are gone.
   if [ "$TOTAL_FAIL" -gt 0 ]; then
     echo "Failures recorded — keeping scratch dir for debugging: $SCRATCH"
-  else
-    [ -n "$SCRATCH" ] && rm -rf "$SCRATCH"
+  elif [ -n "$SCRATCH" ]; then
+    rm -rf "$SCRATCH" || true
   fi
 }
-trap cleanup EXIT INT TERM
-
-echo "Pre-flight: sweeping any stale claude-gh-* resources from a previous run..."
-sweep_stale_claude_gh
 
 # Baseline: claude-gh-* resources that already exist AFTER the sweep — i.e. a
 # concurrent live `claude-docker --gh` session's network/sidecar on this host
@@ -209,10 +240,17 @@ sweep_stale_claude_gh
 # whole run, so teardown assertions must judge "clean" as "nothing NEW beyond
 # this baseline", never "nothing at all". Space-padded for whole-word `case`
 # membership tests.
-BASELINE_NETS=" $(docker network ls --filter 'name=claude-gh-' --format '{{.Name}}' 2>/dev/null | tr '\n' ' ')"
-BASELINE_SIDECARS=" $(docker ps -a --filter 'name=claude-gh-proxy-' --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')"
-[ "$(printf '%s' "$BASELINE_NETS" | tr -d ' ')" != "" ] \
-  && echo "Pre-flight: detected pre-existing claude-gh-* resources (likely a live --gh session) — excluding from teardown checks:$BASELINE_NETS"
+BASELINE_NETS=" "
+BASELINE_SIDECARS=" "
+capture_baseline() {
+  echo "Pre-flight: sweeping any stale claude-gh-* resources from a previous run..."
+  sweep_stale_claude_gh
+  BASELINE_NETS=" $(snapshot_claude_gh_nets)"
+  BASELINE_SIDECARS=" $({ docker ps -a --filter 'name=claude-gh-proxy-' --format '{{.Names}}' 2>/dev/null || true; } | tr '\n' ' ')"
+  if [ -n "$(printf '%s' "$BASELINE_NETS" | tr -d ' ')" ]; then
+    echo "Pre-flight: detected pre-existing claude-gh-* resources (likely a live --gh session) — excluding from teardown checks:$BASELINE_NETS"
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -236,22 +274,22 @@ run_wrapped() {
   local quoted rcfile rc
   rcfile="$SCRATCH/rc.$$.$RANDOM"
   quoted="$(printf '%q ' "$@"); echo \$? > $(printf '%q' "$rcfile")"
-  if script --version 2>/dev/null | grep -q util-linux; then
-    set -- script -qec "$quoted" "$logfile"
-  else
-    set -- script -q "$logfile" /bin/bash -c "$quoted"
-  fi
+  case "$(script --version 2>/dev/null || true)" in
+    *util-linux*) set -- script -qec "$quoted" "$logfile" ;;
+    *) set -- script -q "$logfile" /bin/bash -c "$quoted" ;;
+  esac
   if command -v timeout >/dev/null 2>&1; then
     set -- timeout -k 10 300 "$@"
   elif command -v gtimeout >/dev/null 2>&1; then
     set -- gtimeout -k 10 300 "$@"
   fi
-  SHELL=/bin/bash "$@" >/dev/null 2>&1
-  rc=$(cat "$rcfile" 2>/dev/null)
+  SHELL=/bin/bash "$@" >/dev/null 2>&1 || true
+  rc=$(cat "$rcfile" 2>/dev/null) || rc=""
   rm -f "$rcfile"
-  # Missing rc file means the wrapped shell never got to write it (timeout
-  # kill, script(1) failure) — report it as a timeout-style failure.
-  return "${rc:-124}"
+  # Missing (or garbled) rc file means the wrapped shell never got to write
+  # it (timeout kill, script(1) failure) — report it as a timeout-style failure.
+  case "$rc" in ''|*[!0-9]*) rc=124 ;; esac
+  return "$rc"
 }
 
 # sha256 of a file, portable: sha256sum (Linux) vs shasum -a 256 (macOS).
@@ -322,7 +360,7 @@ wait_for_absence_claude_gh() {
 poll_new_network() {
   local timeout="$1" exclude="$2" i=0 candidates line
   while [ "$i" -lt "$timeout" ]; do
-    candidates=$(docker network ls --filter "name=claude-gh-" --format '{{.Name}}' 2>/dev/null)
+    candidates=$(docker network ls --filter "name=claude-gh-" --format '{{.Name}}' 2>/dev/null) || candidates=""
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       case " $exclude " in
@@ -344,7 +382,7 @@ poll_new_network() {
 # can never be misidentified as this session's freshly-created network — the
 # failure mode that otherwise cascades into wrong-network mock attachment.
 snapshot_claude_gh_nets() {
-  docker network ls --filter "name=claude-gh-" --format '{{.Name}}' 2>/dev/null | tr '\n' ' '
+  { docker network ls --filter "name=claude-gh-" --format '{{.Name}}' 2>/dev/null || true; } | tr '\n' ' '
 }
 
 # Builds a PATH whose first entry holds an always-failing `gh` stub, for the
@@ -380,13 +418,13 @@ gen_assert_script() {
   {
     printf '#!/usr/bin/env bash\n'
     printf 'set -uo pipefail\n'
-    printf "MODE='%s'\n" "$mode"
-    printf "FAKE_TOKEN='%s'\n" "$fake"
-    printf "POLICY_EXT='%s'\n" "$policy_ext"
-    printf "RESULTS='%s'\n" "$results"
-    printf "DONE_MARKER='%s'\n" "$done_marker"
-    printf "RELEASE_MARKER='%s'\n" "$release_marker"
-    printf "SENTINEL='%s'\n" "$sentinel"
+    printf 'MODE=%q\n' "$mode"
+    printf 'FAKE_TOKEN=%q\n' "$fake"
+    printf 'POLICY_EXT=%q\n' "$policy_ext"
+    printf 'RESULTS=%q\n' "$results"
+    printf 'DONE_MARKER=%q\n' "$done_marker"
+    printf 'RELEASE_MARKER=%q\n' "$release_marker"
+    printf 'SENTINEL=%q\n' "$sentinel"
     cat <<'BODY'
 : > "$RESULTS"
 pass() { printf 'PASS: %s\n' "$1" >> "$RESULTS"; }
@@ -475,8 +513,9 @@ run_main_checks() {
   # itself is expected to then fail: the mock is a generic JSON echo, not a
   # git-protocol-aware server, so it can't return a valid smart-HTTP response
   # body. That's intentional; this check doesn't gate on git's own exit code.
+  # Nothing is recorded here: the harness checks arrival and the Basic header
+  # host-side, from the mock/sidecar logs.
   timeout 15 git ls-remote https://github.com/o/r >/tmp/gh_git_out.$$ 2>/tmp/gh_git_err.$$
-  pass "4.2 git ls-remote against github.com attempted through the sidecar (arrival + Basic header verified host-side via mock/sidecar logs)"
   rm -f /tmp/gh_git_out.$$ /tmp/gh_git_err.$$
 
   if curl -sS --max-time 10 -o /dev/null -w '%{http_code}' https://api.github.com/repos/o/r 2>/dev/null | grep -q '^200$'; then
@@ -604,9 +643,11 @@ BODY
 # must NOT log headers) as JSON to stdout for host-side `docker logs` grepping.
 # ---------------------------------------------------------------------------
 
-MOCK_NAME="ghtest-mock-$$-$(date +%s 2>/dev/null || echo 0)"
-MOCK_CADDYFILE="$SCRATCH/mock-Caddyfile"
-cat > "$MOCK_CADDYFILE" <<'CADDYFILE'
+start_mock() {
+  local name caddyfile
+  name="ghtest-mock-$$-$(date +%s 2>/dev/null || echo 0)"
+  caddyfile="$SCRATCH/mock-Caddyfile"
+  cat > "$caddyfile" <<'CADDYFILE'
 {
 	auto_https off
 	servers {
@@ -624,34 +665,42 @@ cat > "$MOCK_CADDYFILE" <<'CADDYFILE'
 }
 CADDYFILE
 
-echo "Starting mock GitHub upstream ($MOCK_NAME, image $MOCK_IMAGE)..."
-MOCK_CID=$(docker run -d --name "$MOCK_NAME" \
-  -v "$MOCK_CADDYFILE:/etc/caddy/Caddyfile:ro" \
-  "$MOCK_IMAGE" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile 2>"$SCRATCH/mock-start-err.log") || {
-  echo "FATAL: could not start the mock GitHub upstream container ($MOCK_IMAGE)" >&2
-  cat "$SCRATCH/mock-start-err.log" >&2 2>/dev/null
-  exit 1
+  echo "Starting mock GitHub upstream ($name, image $MOCK_IMAGE)..."
+  MOCK_CID=$(docker run -d --name "$name" \
+    -v "$caddyfile:/etc/caddy/Caddyfile:ro" \
+    "$MOCK_IMAGE" caddy run --config /etc/caddy/Caddyfile --adapter caddyfile 2>"$SCRATCH/mock-start-err.log") || {
+    MOCK_CID=""
+    echo "FATAL: could not start the mock GitHub upstream container ($MOCK_IMAGE)" >&2
+    cat "$SCRATCH/mock-start-err.log" >&2 2>/dev/null || true
+    return 1
+  }
+  sleep 2
+  if [ -z "$(docker ps --filter "id=$MOCK_CID" --filter status=running -q 2>/dev/null)" ]; then
+    echo "FATAL: mock GitHub upstream container exited immediately; logs:" >&2
+    docker logs "$MOCK_CID" >&2 2>&1 || true
+    return 1
+  fi
 }
-sleep 2
-if [ -z "$(docker ps --filter "id=$MOCK_CID" --filter status=running -q)" ]; then
-  echo "FATAL: mock GitHub upstream container exited immediately; logs:" >&2
-  docker logs "$MOCK_CID" >&2 2>&1
-  exit 1
-fi
+
+# Records PASS when $1 (an exit status) is 0, FAIL otherwise.
+record_rc_zero() {
+  if [ "$1" -eq 0 ]; then record_pass "$2 exited 0"; else record_fail "$2 exited $1${3:+ (see $3)}"; fi
+}
 
 # ===========================================================================
 # Phase 1 (tasks 4.2, 4.3, 4.4): one proxied session, functional + policy +
 # audit-log checks combined so it only pays for one sidecar/CA/network setup.
 # ===========================================================================
-echo
-echo "=== Phase 1: main proxied session (4.2 token isolation/injection, 4.3 policy, 4.4 audit log) ==="
+phase1_main_session() {
+  echo
+  echo "=== Phase 1: main proxied session (4.2 token isolation/injection, 4.3 policy, 4.4 audit log) ==="
 
-WS1="$SCRATCH/ghtest-main"
-mkdir -p "$WS1"
-gen_assert_script "$WS1/assert.sh" main "$FAKE1" "1"
+  local ws="$SCRATCH/ghtest-main" log="$SCRATCH/run1.log" policy_file="$SCRATCH/gh-policy-snippet.Caddyfile"
+  local pre net sidecar="" pid rc=0 lines asset_uri
+  mkdir -p "$ws"
+  gen_assert_script "$ws/assert.sh" main "$FAKE1" "1"
 
-POLICY_FILE="$SCRATCH/gh-policy-snippet.Caddyfile"
-cat > "$POLICY_FILE" <<'POLICY'
+  cat > "$policy_file" <<'POLICY'
 @claude_docker_test_policy_ext {
 	method DELETE
 	path_regexp ^/repos/[^/]+/[^/]+/git/refs/.*
@@ -659,123 +708,120 @@ cat > "$POLICY_FILE" <<'POLICY'
 respond @claude_docker_test_policy_ext "claude-docker gh-proxy policy (test extension): destructive ref deletion blocked" 403
 POLICY
 
-LOG1="$SCRATCH/run1.log"
-PRE1=$(snapshot_claude_gh_nets)
-run_wrapped "$LOG1" env \
-  GH_TOKEN="$FAKE1" \
-  CLAUDE_DOCKER_RUNTIME=docker \
-  CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
-  CLAUDE_DOCKER_GH_UPSTREAM="http://ghmock:8080" \
-  CLAUDE_DOCKER_GH_POLICY="$POLICY_FILE" \
-  CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-main/assert.sh" \
-  bash "$RUN_SH" --gh "$WS1" &
-PID1=$!
-BG_PIDS+=("$PID1")
+  pre=$(snapshot_claude_gh_nets)
+  run_wrapped "$log" env \
+    GH_TOKEN="$FAKE1" \
+    CLAUDE_DOCKER_RUNTIME=docker \
+    CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
+    CLAUDE_DOCKER_GH_UPSTREAM="http://ghmock:8080" \
+    CLAUDE_DOCKER_GH_POLICY="$policy_file" \
+    CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-main/assert.sh" \
+    bash "$RUN_SH" --gh "$ws" &
+  pid=$!
+  BG_PIDS+=("$pid")
 
-NET1=$(poll_new_network 30 "$PRE1") || NET1=""
-SIDECAR1=""
-if [ -n "$NET1" ]; then
-  record_pass "setup: session network '$NET1' appeared (task 2.1 naming: claude-gh-<id>)"
-  if docker network connect --alias ghmock "$NET1" "$MOCK_CID" 2>/dev/null; then
-    record_pass "setup: mock attached to $NET1 as alias 'ghmock'"
+  net=$(poll_new_network 30 "$pre") || net=""
+  if [ -n "$net" ]; then
+    record_pass "setup: session network '$net' appeared (task 2.1 naming: claude-gh-<id>)"
+    if docker network connect --alias ghmock "$net" "$MOCK_CID" 2>/dev/null; then
+      record_pass "setup: mock attached to $net as alias 'ghmock'"
+    else
+      record_fail "setup: could not attach mock to $net"
+    fi
+    sidecar="claude-gh-proxy-${net#claude-gh-}"
+    if wait_for_container_running "$sidecar" 15; then
+      record_pass "4.4 sidecar '$sidecar' is running (task 2.1 naming: claude-gh-proxy-<id>)"
+    else
+      record_fail "4.4 derived sidecar name '$sidecar' never appeared as a running container"
+      sidecar=""
+    fi
+
+    if wait_for_file "$ws/checks-done" 90; then
+      record_pass "setup: in-container assert script for the main session reached checks-done"
+    else
+      record_fail "setup: in-container assert script for the main session never reached checks-done (timeout)"
+    fi
+
+    # Snapshot logs BEFORE releasing: both containers run --rm and vanish (taking
+    # `docker logs` with them) the moment run.sh's own EXIT trap fires.
+    if [ -n "$sidecar" ]; then
+      docker logs "$sidecar" >"$SCRATCH/sidecar1.log" 2>&1 || true
+    fi
+    docker logs "$MOCK_CID" >"$SCRATCH/mock-phase1.log" 2>&1 || true
+
+    docker network disconnect "$net" "$MOCK_CID" >/dev/null 2>&1 || true
+    touch "$ws/release" || true
   else
-    record_fail "setup: could not attach mock to $NET1"
+    record_fail "setup: session network never appeared within 30s — cannot run phase 1 checks"
   fi
-  SIDECAR1="claude-gh-proxy-${NET1#claude-gh-}"
-  if wait_for_container_running "$SIDECAR1" 15; then
-    record_pass "4.4 sidecar '$SIDECAR1' is running (task 2.1 naming: claude-gh-proxy-<id>)"
+
+  wait "$pid" || rc=$?
+  record_rc_zero "$rc" "setup: main session's run.sh" "$log"
+
+  # Transcript greps only AFTER the session exits: macOS/BSD script(1) buffers
+  # the typescript and flushes on exit, so a mid-session grep reads an empty
+  # file even though run.sh already printed the line.
+  if [ -n "$sidecar" ] && grep -qF "$sidecar" "$log" 2>/dev/null; then
+    record_pass "4.4 run.sh printed the sidecar name '$sidecar' before the agent session began"
   else
-    record_fail "4.4 derived sidecar name '$SIDECAR1' never appeared as a running container"
-    SIDECAR1=""
+    record_fail "4.4 run.sh's output never mentioned the sidecar name (see $log)"
   fi
-else
-  record_fail "setup: session network never appeared within 30s — cannot run phase 1 checks"
-fi
 
-if [ -n "$NET1" ]; then
-  if wait_for_file "$WS1/checks-done" 90; then
-    record_pass "setup: in-container assert script for the main session reached checks-done"
+  ingest_results_file "$ws/results.txt" "main-session"
+
+  local sidecar_log="$SCRATCH/sidecar1.log" mock_log="$SCRATCH/mock-phase1.log"
+  if [ -f "$sidecar_log" ]; then
+    if grep -q '"status":200' "$sidecar_log"; then
+      record_pass "4.4 sidecar audit log contains a structured entry with status 200"
+    else
+      record_fail "4.4 sidecar audit log missing an expected status-200 entry"
+    fi
+    lines=$(grep -F '"uri":"/repos/o/r"' "$sidecar_log" 2>/dev/null || true)
+    if printf '%s\n' "$lines" | grep -qF '"method":"DELETE"'; then
+      record_pass "4.3/4.4 sidecar audit log recorded the blocked DELETE /repos/o/r"
+    else
+      record_fail "4.3/4.4 sidecar audit log missing the blocked DELETE /repos/o/r entry"
+    fi
+    if grep -F "$FAKE1" "$sidecar_log" >/dev/null 2>&1; then
+      record_fail "4.4 sidecar audit log leaks the fake host token"
+    else
+      record_pass "4.4 sidecar audit log never contains the fake host token"
+    fi
   else
-    record_fail "setup: in-container assert script for the main session never reached checks-done (timeout)"
+    record_fail "4.4 sidecar audit log was never captured (sidecar unresolved or session never started)"
   fi
 
-  # Snapshot logs BEFORE releasing: both containers run --rm and vanish (taking
-  # `docker logs` with them) the moment run.sh's own EXIT trap fires.
-  [ -n "$SIDECAR1" ] && docker logs "$SIDECAR1" >"$SCRATCH/sidecar1.log" 2>&1
-  docker logs "$MOCK_CID" >"$SCRATCH/mock-phase1.log" 2>&1
-
-  docker network disconnect "$NET1" "$MOCK_CID" >/dev/null 2>&1
-  touch "$WS1/release"
-fi
-
-wait "$PID1"
-RC1=$?
-if [ "$RC1" -eq 0 ]; then
-  record_pass "setup: main session's run.sh exited 0"
-else
-  record_fail "setup: main session's run.sh exited $RC1 (see $LOG1)"
-fi
-
-# Transcript greps only AFTER the session exits: macOS/BSD script(1) buffers
-# the typescript and flushes on exit, so a mid-session grep reads an empty
-# file even though run.sh already printed the line.
-if [ -n "$SIDECAR1" ] && grep -qF "$SIDECAR1" "$LOG1" 2>/dev/null; then
-  record_pass "4.4 run.sh printed the sidecar name '$SIDECAR1' before the agent session began"
-else
-  record_fail "4.4 run.sh's output never mentioned the sidecar name (see $LOG1)"
-fi
-
-ingest_results_file "$WS1/results.txt" "main-session"
-
-if [ -f "$SCRATCH/sidecar1.log" ]; then
-  if grep -q '"status":200' "$SCRATCH/sidecar1.log"; then
-    record_pass "4.4 sidecar audit log contains a structured entry with status 200"
-  else
-    record_fail "4.4 sidecar audit log missing an expected status-200 entry"
+  if [ ! -f "$mock_log" ]; then
+    record_fail "4.2/4.3 mock upstream log for phase 1 was never captured"
+    return 0
   fi
-  delete_default_sidecar_lines=$(grep -F '"uri":"/repos/o/r"' "$SCRATCH/sidecar1.log" 2>/dev/null || true)
-  if printf '%s\n' "$delete_default_sidecar_lines" | grep -qF '"method":"DELETE"'; then
-    record_pass "4.3/4.4 sidecar audit log recorded the blocked DELETE /repos/o/r"
-  else
-    record_fail "4.3/4.4 sidecar audit log missing the blocked DELETE /repos/o/r entry"
-  fi
-  if grep -F "$FAKE1" "$SCRATCH/sidecar1.log" >/dev/null 2>&1; then
-    record_fail "4.4 sidecar audit log leaks the fake host token"
-  else
-    record_pass "4.4 sidecar audit log never contains the fake host token"
-  fi
-else
-  record_fail "4.4 sidecar audit log was never captured (sidecar unresolved or session never started)"
-fi
-
-if [ -f "$SCRATCH/mock-phase1.log" ]; then
-  delete_default_mock_lines=$(grep -F '"uri":"/repos/o/r"' "$SCRATCH/mock-phase1.log" 2>/dev/null || true)
-  if printf '%s\n' "$delete_default_mock_lines" | grep -qF '"method":"DELETE"'; then
+  lines=$(grep -F '"uri":"/repos/o/r"' "$mock_log" 2>/dev/null || true)
+  if printf '%s\n' "$lines" | grep -qF '"method":"DELETE"'; then
     record_fail "4.3 default-policy DELETE /repos/o/r reached the mock upstream (should have been blocked at the sidecar)"
   else
     record_pass "4.3 default-policy DELETE /repos/o/r never reached the mock upstream"
   fi
-  if printf '%s\n' "$delete_default_mock_lines" | grep -qF '"method":"GET"'; then
+  if printf '%s\n' "$lines" | grep -qF '"method":"GET"'; then
     record_pass "4.3 benign GET /repos/o/r arrived at the mock upstream"
   else
     record_fail "4.3 benign GET /repos/o/r never arrived at the mock upstream"
   fi
-  if grep -qF '"uri":"/repositories/123"' "$SCRATCH/mock-phase1.log"; then
+  if grep -qF '"uri":"/repositories/123"' "$mock_log"; then
     record_fail "4.3 default-policy DELETE /repositories/123 reached the mock upstream (should have been blocked at the sidecar)"
   else
     record_pass "4.3 default-policy DELETE /repositories/123 never reached the mock upstream"
   fi
-  refs_mock_lines=$(grep -F '"uri":"/repos/o/r/git/refs/heads/foo"' "$SCRATCH/mock-phase1.log" 2>/dev/null || true)
-  if [ -n "$refs_mock_lines" ]; then
+  lines=$(grep -F '"uri":"/repos/o/r/git/refs/heads/foo"' "$mock_log" 2>/dev/null || true)
+  if [ -n "$lines" ]; then
     record_fail "4.3 CLAUDE_DOCKER_GH_POLICY-extended DELETE .../git/refs/heads/foo reached the mock upstream"
   else
     record_pass "4.3 CLAUDE_DOCKER_GH_POLICY-extended DELETE .../git/refs/heads/foo never reached the mock upstream"
   fi
-  git_lines=$(grep -F '/o/r/info/refs' "$SCRATCH/mock-phase1.log" 2>/dev/null || true)
-  if [ -n "$git_lines" ] && printf '%s\n' "$git_lines" | grep -qF '"Authorization":["Basic'; then
+  lines=$(grep -F '/o/r/info/refs' "$mock_log" 2>/dev/null || true)
+  if [ -n "$lines" ] && printf '%s\n' "$lines" | grep -qF '"Authorization":["Basic'; then
     record_pass "4.2 git ls-remote's smart-HTTP discovery request reached the mock with a Basic Authorization header"
   else
-    record_fail "4.2 could not confirm git's request + Basic header arrived at the mock (see $SCRATCH/mock-phase1.log)"
+    record_fail "4.2 could not confirm git's request + Basic header arrived at the mock (see $mock_log)"
   fi
 
   # Issue #22, the two halves that matter for regressions: the HEAD must arrive
@@ -785,272 +831,272 @@ if [ -f "$SCRATCH/mock-phase1.log" ]; then
   # widened into traffic that works today). Caddy omits the key entirely when
   # the header is absent, so its presence/absence is a reliable signal.
   asset_uri='"uri":"/o/r/releases/download/v1.0.0/pkg-1.0.0-py3-none-any.whl"'
-  asset_head_lines=$(grep -F "$asset_uri" "$SCRATCH/mock-phase1.log" 2>/dev/null | grep -F '"method":"HEAD"' || true)
-  if [ -z "$asset_head_lines" ]; then
-    record_fail "#22 the release-asset HEAD never reached the mock upstream (see $SCRATCH/mock-phase1.log)"
-  elif printf '%s\n' "$asset_head_lines" | grep -qF '"Authorization"'; then
+  lines=$(grep -F "$asset_uri" "$mock_log" 2>/dev/null | grep -F '"method":"HEAD"' || true)
+  if [ -z "$lines" ]; then
+    record_fail "#22 the release-asset HEAD never reached the mock upstream (see $mock_log)"
+  elif printf '%s\n' "$lines" | grep -qF '"Authorization"'; then
     record_fail "#22 the release-asset HEAD still carried an Authorization header upstream — GitHub would route it to the 401ing objects.githubusercontent.com URL"
   else
     record_pass "#22 the release-asset HEAD reached the upstream with no Authorization header"
   fi
-  asset_get_lines=$(grep -F "$asset_uri" "$SCRATCH/mock-phase1.log" 2>/dev/null | grep -F '"method":"GET"' || true)
-  if printf '%s\n' "$asset_get_lines" | grep -qF '"Authorization":["Basic'; then
+  lines=$(grep -F "$asset_uri" "$mock_log" 2>/dev/null | grep -F '"method":"GET"' || true)
+  if printf '%s\n' "$lines" | grep -qF '"Authorization":["Basic'; then
     record_pass "#22 the release-asset GET still reached the upstream with the injected Basic header (exclusion did not widen past HEAD)"
   else
-    record_fail "#22 the release-asset GET lost its injected Basic header (see $SCRATCH/mock-phase1.log)"
+    record_fail "#22 the release-asset GET lost its injected Basic header (see $mock_log)"
   fi
-else
-  record_fail "4.2/4.3 mock upstream log for phase 1 was never captured"
-fi
+}
+
+# Starts one concurrent-phase session in the background: $1 workspace name,
+# $2 fake token. Sets PID and NET (empty when the network never appeared).
+start_concurrent_session() {
+  local ws_name="$1" fake="$2" pre
+  pre=$(snapshot_claude_gh_nets)
+  run_wrapped "$SCRATCH/run-$ws_name.log" env \
+    GH_TOKEN="$fake" \
+    CLAUDE_DOCKER_RUNTIME=docker \
+    CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
+    CLAUDE_DOCKER_GH_UPSTREAM="http://ghmock:8080" \
+    CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/$ws_name/assert.sh" \
+    bash "$RUN_SH" --gh "$SCRATCH/$ws_name" &
+  PID=$!
+  BG_PIDS+=("$PID")
+  NET=$(poll_new_network 30 "$pre") || NET=""
+}
 
 # ===========================================================================
 # Phase 2 (task 4.5): two concurrent sessions — isolation + CA difference +
 # teardown, with no leftovers once both exit.
 # ===========================================================================
-echo
-echo "=== Phase 2: two concurrent sessions (4.5 isolation, distinct CAs, clean teardown) ==="
+phase2_concurrent() {
+  echo
+  echo "=== Phase 2: two concurrent sessions (4.5 isolation, distinct CAs, clean teardown) ==="
 
-WS2A="$SCRATCH/ghtest-concA"
-WS2B="$SCRATCH/ghtest-concB"
-mkdir -p "$WS2A" "$WS2B"
-gen_assert_script "$WS2A/assert.sh" concurrent "$FAKE_A" ""
-gen_assert_script "$WS2B/assert.sh" concurrent "$FAKE_B" ""
+  local ws_a="$SCRATCH/ghtest-concA" ws_b="$SCRATCH/ghtest-concB"
+  local PID NET pid_a pid_b net_a net_b sidecar_a="" sidecar_b="" ok_a=0 ok_b=0 rc_a=0 rc_b=0 hash_a hash_b
+  mkdir -p "$ws_a" "$ws_b"
+  gen_assert_script "$ws_a/assert.sh" concurrent "$FAKE_A" ""
+  gen_assert_script "$ws_b/assert.sh" concurrent "$FAKE_B" ""
 
-LOG2A="$SCRATCH/run2a.log"
-LOG2B="$SCRATCH/run2b.log"
-
-PRE2A=$(snapshot_claude_gh_nets)
-run_wrapped "$LOG2A" env \
-  GH_TOKEN="$FAKE_A" \
-  CLAUDE_DOCKER_RUNTIME=docker \
-  CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
-  CLAUDE_DOCKER_GH_UPSTREAM="http://ghmock:8080" \
-  CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-concA/assert.sh" \
-  bash "$RUN_SH" --gh "$WS2A" &
-PID2A=$!
-BG_PIDS+=("$PID2A")
-
-NET2A=$(poll_new_network 30 "$PRE2A") || NET2A=""
-if [ -n "$NET2A" ]; then
-  record_pass "4.5 session A got its own network '$NET2A'"
-  docker network connect --alias ghmock "$NET2A" "$MOCK_CID" 2>/dev/null \
-    || record_fail "4.5 could not attach mock to session A's network"
-else
-  record_fail "4.5 session A's network never appeared within 30s"
-fi
-
-PRE2B=$(snapshot_claude_gh_nets)
-run_wrapped "$LOG2B" env \
-  GH_TOKEN="$FAKE_B" \
-  CLAUDE_DOCKER_RUNTIME=docker \
-  CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
-  CLAUDE_DOCKER_GH_UPSTREAM="http://ghmock:8080" \
-  CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-concB/assert.sh" \
-  bash "$RUN_SH" --gh "$WS2B" &
-PID2B=$!
-BG_PIDS+=("$PID2B")
-
-# PRE2B already includes NET2A (captured after A's network appeared), so B's
-# discovery excludes both leftovers and session A's network.
-NET2B=$(poll_new_network 30 "$PRE2B") || NET2B=""
-if [ -n "$NET2B" ] && [ "$NET2B" != "$NET2A" ]; then
-  record_pass "4.5 session B got its own, distinct network '$NET2B'"
-  docker network connect --alias ghmock "$NET2B" "$MOCK_CID" 2>/dev/null \
-    || record_fail "4.5 could not attach mock to session B's network"
-else
-  record_fail "4.5 session B's network never appeared, or collided with session A's ('$NET2A' vs '$NET2B')"
-fi
-
-SIDECAR2A=""
-SIDECAR2B=""
-[ -n "$NET2A" ] && SIDECAR2A="claude-gh-proxy-${NET2A#claude-gh-}"
-[ -n "$NET2B" ] && SIDECAR2B="claude-gh-proxy-${NET2B#claude-gh-}"
-
-ok_a=0
-ok_b=0
-[ -n "$NET2A" ] && wait_for_file "$WS2A/checks-done" 90 && ok_a=1
-[ -n "$NET2B" ] && wait_for_file "$WS2B/checks-done" 90 && ok_b=1
-
-if [ "$ok_a" -eq 1 ] && [ "$ok_b" -eq 1 ]; then
-  if wait_for_container_running "$SIDECAR2A" 5 && wait_for_container_running "$SIDECAR2B" 5; then
-    record_pass "4.5 both sidecars ('$SIDECAR2A', '$SIDECAR2B') are running at the same time"
+  start_concurrent_session ghtest-concA "$FAKE_A"
+  pid_a=$PID net_a=$NET
+  if [ -n "$net_a" ]; then
+    record_pass "4.5 session A got its own network '$net_a'"
+    docker network connect --alias ghmock "$net_a" "$MOCK_CID" 2>/dev/null \
+      || record_fail "4.5 could not attach mock to session A's network"
   else
-    record_fail "4.5 could not confirm both sidecars were simultaneously running"
+    record_fail "4.5 session A's network never appeared within 30s"
   fi
-  # CA roots must differ — extract while both sidecars are still alive: --rm
-  # destroys the container (and its filesystem) the instant its session tears
-  # down, so this has to happen inside the release-handshake window.
-  if docker cp "${SIDECAR2A}:/data/caddy/pki/authorities/local/root.crt" "$SCRATCH/root2a.crt" 2>/dev/null \
-    && docker cp "${SIDECAR2B}:/data/caddy/pki/authorities/local/root.crt" "$SCRATCH/root2b.crt" 2>/dev/null; then
-    hash_a=$(hash_file "$SCRATCH/root2a.crt")
-    hash_b=$(hash_file "$SCRATCH/root2b.crt")
-    if [ -n "$hash_a" ] && [ "$hash_a" != "$hash_b" ]; then
-      record_pass "4.5 the two sessions' root CAs differ ($hash_a vs $hash_b)"
+
+  # B's snapshot is taken after A's network appeared, so B's discovery
+  # excludes both leftovers and session A's network.
+  start_concurrent_session ghtest-concB "$FAKE_B"
+  pid_b=$PID net_b=$NET
+  if [ -n "$net_b" ] && [ "$net_b" != "$net_a" ]; then
+    record_pass "4.5 session B got its own, distinct network '$net_b'"
+    docker network connect --alias ghmock "$net_b" "$MOCK_CID" 2>/dev/null \
+      || record_fail "4.5 could not attach mock to session B's network"
+  else
+    record_fail "4.5 session B's network never appeared, or collided with session A's ('$net_a' vs '$net_b')"
+  fi
+
+  if [ -n "$net_a" ]; then
+    sidecar_a="claude-gh-proxy-${net_a#claude-gh-}"
+    if wait_for_file "$ws_a/checks-done" 90; then ok_a=1; fi
+  fi
+  if [ -n "$net_b" ]; then
+    sidecar_b="claude-gh-proxy-${net_b#claude-gh-}"
+    if wait_for_file "$ws_b/checks-done" 90; then ok_b=1; fi
+  fi
+
+  if [ "$ok_a" -eq 1 ] && [ "$ok_b" -eq 1 ]; then
+    if wait_for_container_running "$sidecar_a" 5 && wait_for_container_running "$sidecar_b" 5; then
+      record_pass "4.5 both sidecars ('$sidecar_a', '$sidecar_b') are running at the same time"
     else
-      record_fail "4.5 the two sessions' root CAs are identical or unreadable (a=$hash_a b=$hash_b)"
+      record_fail "4.5 could not confirm both sidecars were simultaneously running"
+    fi
+    # CA roots must differ — extract while both sidecars are still alive: --rm
+    # destroys the container (and its filesystem) the instant its session tears
+    # down, so this has to happen inside the release-handshake window.
+    if docker cp "${sidecar_a}:/data/caddy/pki/authorities/local/root.crt" "$SCRATCH/root2a.crt" 2>/dev/null \
+      && docker cp "${sidecar_b}:/data/caddy/pki/authorities/local/root.crt" "$SCRATCH/root2b.crt" 2>/dev/null; then
+      hash_a=$(hash_file "$SCRATCH/root2a.crt") || hash_a=""
+      hash_b=$(hash_file "$SCRATCH/root2b.crt") || hash_b=""
+      if [ -n "$hash_a" ] && [ "$hash_a" != "$hash_b" ]; then
+        record_pass "4.5 the two sessions' root CAs differ ($hash_a vs $hash_b)"
+      else
+        record_fail "4.5 the two sessions' root CAs are identical or unreadable (a=$hash_a b=$hash_b)"
+      fi
+    else
+      record_fail "4.5 could not extract root.crt from one or both sidecars via docker cp"
     fi
   else
-    record_fail "4.5 could not extract root.crt from one or both sidecars via docker cp"
+    record_fail "4.5 one or both concurrent sessions never reached checks-done (session-A-ok=$ok_a session-B-ok=$ok_b)"
   fi
-else
-  record_fail "4.5 one or both concurrent sessions never reached checks-done (session-A-ok=$ok_a session-B-ok=$ok_b)"
-fi
 
-[ -n "$NET2A" ] && docker network disconnect "$NET2A" "$MOCK_CID" >/dev/null 2>&1
-[ -n "$NET2B" ] && docker network disconnect "$NET2B" "$MOCK_CID" >/dev/null 2>&1
-touch "$WS2A/release" "$WS2B/release" 2>/dev/null
+  if [ -n "$net_a" ]; then docker network disconnect "$net_a" "$MOCK_CID" >/dev/null 2>&1 || true; fi
+  if [ -n "$net_b" ]; then docker network disconnect "$net_b" "$MOCK_CID" >/dev/null 2>&1 || true; fi
+  touch "$ws_a/release" "$ws_b/release" 2>/dev/null || true
 
-wait "$PID2A"
-RC2A=$?
-wait "$PID2B"
-RC2B=$?
-if [ "$RC2A" -eq 0 ]; then record_pass "4.5 session A's run.sh exited 0"; else record_fail "4.5 session A's run.sh exited $RC2A"; fi
-if [ "$RC2B" -eq 0 ]; then record_pass "4.5 session B's run.sh exited 0"; else record_fail "4.5 session B's run.sh exited $RC2B"; fi
+  wait "$pid_a" || rc_a=$?
+  wait "$pid_b" || rc_b=$?
+  record_rc_zero "$rc_a" "4.5 session A's run.sh"
+  record_rc_zero "$rc_b" "4.5 session B's run.sh"
 
-ingest_results_file "$WS2A/results.txt" "concurrent-A"
-ingest_results_file "$WS2B/results.txt" "concurrent-B"
+  ingest_results_file "$ws_a/results.txt" "concurrent-A"
+  ingest_results_file "$ws_b/results.txt" "concurrent-B"
 
-if wait_for_absence_claude_gh 20; then
-  record_pass "4.5 teardown: no claude-gh-* containers or networks remain after both sessions exit"
-else
-  record_fail "4.5 teardown: harness-created claude-gh-* leftovers remain (baseline/live-session resources excluded): [$(new_claude_gh_leftovers)]"
-fi
+  if wait_for_absence_claude_gh 20; then
+    record_pass "4.5 teardown: no claude-gh-* containers or networks remain after both sessions exit"
+  else
+    record_fail "4.5 teardown: harness-created claude-gh-* leftovers remain (baseline/live-session resources excluded): [$(new_claude_gh_leftovers)]"
+  fi
+}
+
+# Runs run_wrapped in the background, so the cleanup trap can still reach it
+# on Ctrl-C, and waits for it. Sets RC to its exit status; never fails. Not a
+# `$(...)`: BG_PIDS must be appended in this shell, where cleanup reads it.
+run_wrapped_wait() {
+  local pid
+  run_wrapped "$@" &
+  pid=$!
+  BG_PIDS+=("$pid")
+  RC=0
+  wait "$pid" || RC=$?
+}
 
 # ===========================================================================
 # Phase 3 (task 4.6): --gh-direct, no-token silence, flag conflict, bad image.
 # Run only after phase 1/2 have fully torn down, so "no claude-gh-* resources"
 # checks below aren't confused by an unrelated leftover from an earlier phase.
 # ===========================================================================
-echo
-echo "=== Phase 3: --gh-direct / no-token / conflicting flags / bad sidecar image (4.6) ==="
+phase3_flags() {
+  echo
+  echo "=== Phase 3: --gh-direct / no-token / conflicting flags / bad sidecar image (4.6) ==="
 
-# 4.6.a: --gh-direct forwards the real (fake) token, no sidecar at all.
-WS3D="$SCRATCH/ghtest-direct"
-mkdir -p "$WS3D"
-gen_assert_script "$WS3D/assert.sh" direct "$FAKE_DIRECT" ""
-LOG3D="$SCRATCH/run3d.log"
-run_wrapped "$LOG3D" env \
-  GH_TOKEN="$FAKE_DIRECT" \
-  CLAUDE_DOCKER_RUNTIME=docker \
-  CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
-  CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-direct/assert.sh" \
-  bash "$RUN_SH" --gh-direct "$WS3D" &
-PID3D=$!
-BG_PIDS+=("$PID3D")
-wait "$PID3D"
-RC3D=$?
-if [ "$RC3D" -eq 0 ]; then record_pass "4.6 --gh-direct session exited 0"; else record_fail "4.6 --gh-direct session exited $RC3D"; fi
-ingest_results_file "$WS3D/results.txt" "gh-direct"
-if no_new_claude_gh_resources; then
-  record_pass "4.6 --gh-direct started no claude-gh-* sidecar or network"
-else
-  record_fail "4.6 --gh-direct unexpectedly left claude-gh-* resources behind"
-fi
+  local ws log safe_path RC
 
-# 4.6.b: --gh with no discoverable host token — silent, no sidecar.
-WS3N="$SCRATCH/ghtest-notoken"
-mkdir -p "$WS3N"
-gen_assert_script "$WS3N/assert.sh" notoken "" ""
-LOG3N="$SCRATCH/run3n.log"
-SAFE_PATH=$(make_no_gh_path)
-run_wrapped "$LOG3N" env -u GH_TOKEN -u GITHUB_TOKEN PATH="$SAFE_PATH" \
-  CLAUDE_DOCKER_RUNTIME=docker \
-  CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
-  CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-notoken/assert.sh" \
-  bash "$RUN_SH" --gh "$WS3N" &
-PID3N=$!
-BG_PIDS+=("$PID3N")
-wait "$PID3N"
-RC3N=$?
-if [ "$RC3N" -eq 0 ]; then
-  record_pass "4.6 --gh with no host token exits 0 (silent fallback)"
-else
-  record_fail "4.6 --gh with no host token exited $RC3N"
-fi
-# Heuristic, not a strict silence check: "error" is specific enough in
-# practice (unlike e.g. "gh", which false-positives on ordinary English words)
-# to flag a regression that starts printing warnings on this path.
-if grep -qi 'error' "$LOG3N"; then
-  record_fail "4.6 --gh with no host token printed something matching /error/i (expected silence): $(grep -i error "$LOG3N" | head -3 | tr '\n' ' ')"
-else
-  record_pass "4.6 --gh with no host token printed no error-like output"
-fi
-ingest_results_file "$WS3N/results.txt" "gh-no-token"
-if no_new_claude_gh_resources; then
-  record_pass "4.6 --gh with no host token started no sidecar or network"
-else
-  record_fail "4.6 --gh with no host token unexpectedly left claude-gh-* resources behind"
-fi
+  # 4.6.a: --gh-direct forwards the real (fake) token, no sidecar at all.
+  ws="$SCRATCH/ghtest-direct" log="$SCRATCH/run3d.log"
+  mkdir -p "$ws"
+  gen_assert_script "$ws/assert.sh" direct "$FAKE_DIRECT" ""
+  run_wrapped_wait "$log" env \
+    GH_TOKEN="$FAKE_DIRECT" \
+    CLAUDE_DOCKER_RUNTIME=docker \
+    CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
+    CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-direct/assert.sh" \
+    bash "$RUN_SH" --gh-direct "$ws"
+  record_rc_zero "$RC" "4.6 --gh-direct session"
+  ingest_results_file "$ws/results.txt" "gh-direct"
+  if no_new_claude_gh_resources; then
+    record_pass "4.6 --gh-direct started no claude-gh-* sidecar or network"
+  else
+    record_fail "4.6 --gh-direct unexpectedly left claude-gh-* resources behind"
+  fi
 
-# 4.6.c: --gh and --gh-direct together are rejected before anything starts.
-WS3X="$SCRATCH/ghtest-conflict"
-mkdir -p "$WS3X"
-LOG3X="$SCRATCH/run3x.log"
-run_wrapped "$LOG3X" env GH_TOKEN="$FAKE1" CLAUDE_DOCKER_RUNTIME=docker CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
-  bash "$RUN_SH" --gh --gh-direct "$WS3X" &
-PID3X=$!
-BG_PIDS+=("$PID3X")
-wait "$PID3X"
-RC3X=$?
-if [ "$RC3X" -ne 0 ]; then
-  record_pass "4.6 --gh --gh-direct together exits non-zero ($RC3X)"
-else
-  record_fail "4.6 --gh --gh-direct together exited 0 (expected rejection)"
-fi
-if grep -qF -- '--gh' "$LOG3X" && grep -qF -- 'gh-direct' "$LOG3X"; then
-  record_pass "4.6 --gh --gh-direct rejection message names the conflicting flags"
-else
-  record_fail "4.6 --gh --gh-direct rejection message doesn't clearly name both flags (see $LOG3X)"
-fi
-if no_new_claude_gh_resources; then
-  record_pass "4.6 --gh --gh-direct started no container or sidecar"
-else
-  record_fail "4.6 --gh --gh-direct unexpectedly left claude-gh-* resources behind"
-fi
+  # 4.6.b: --gh with no discoverable host token — silent, no sidecar.
+  ws="$SCRATCH/ghtest-notoken" log="$SCRATCH/run3n.log"
+  mkdir -p "$ws"
+  gen_assert_script "$ws/assert.sh" notoken "" ""
+  safe_path=$(make_no_gh_path)
+  run_wrapped_wait "$log" env -u GH_TOKEN -u GITHUB_TOKEN PATH="$safe_path" \
+    CLAUDE_DOCKER_RUNTIME=docker \
+    CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
+    CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-notoken/assert.sh" \
+    bash "$RUN_SH" --gh "$ws"
+  record_rc_zero "$RC" "4.6 --gh with no host token (silent fallback)"
+  # Heuristic, not a strict silence check: "error" is specific enough in
+  # practice (unlike e.g. "gh", which false-positives on ordinary English words)
+  # to flag a regression that starts printing warnings on this path.
+  if grep -qi 'error' "$log" 2>/dev/null; then
+    record_fail "4.6 --gh with no host token printed something matching /error/i (expected silence): $(grep -i error "$log" | head -3 | tr '\n' ' ')"
+  else
+    record_pass "4.6 --gh with no host token printed no error-like output"
+  fi
+  ingest_results_file "$ws/results.txt" "gh-no-token"
+  if no_new_claude_gh_resources; then
+    record_pass "4.6 --gh with no host token started no sidecar or network"
+  else
+    record_fail "4.6 --gh with no host token unexpectedly left claude-gh-* resources behind"
+  fi
 
-# 4.6.d: sidecar start failure (unresolvable pinned image) fails closed.
-WS3I="$SCRATCH/ghtest-badimage"
-mkdir -p "$WS3I"
-gen_assert_script "$WS3I/assert.sh" badimage-sentinel "$FAKE1" ""
-LOG3I="$SCRATCH/run3i.log"
-run_wrapped "$LOG3I" env \
-  GH_TOKEN="$FAKE1" \
-  CLAUDE_DOCKER_RUNTIME=docker \
-  CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
-  CLAUDE_DOCKER_PROXY_IMAGE="localhost/does-not-exist:0" \
-  CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-badimage/assert.sh" \
-  bash "$RUN_SH" --gh "$WS3I" &
-PID3I=$!
-BG_PIDS+=("$PID3I")
-wait "$PID3I"
-RC3I=$?
-if [ "$RC3I" -ne 0 ]; then
-  record_pass "4.6 sidecar start failure (bad image) exits non-zero ($RC3I)"
-else
-  record_fail "4.6 sidecar start failure (bad image) exited 0 (expected fatal error)"
-fi
-# Absence of the sentinel is the pass condition: the assert script must NEVER
-# run in this scenario, so results.txt is deliberately not ingested here.
-if [ -f "$WS3I/should-not-exist" ]; then
-  record_fail "4.6 agent container started and ran despite the sidecar failing to start — fail-closed regression (a real token could have been forwarded)"
-else
-  record_pass "4.6 agent container never started when the sidecar failed to start (fail-closed)"
-fi
-if no_new_claude_gh_resources; then
-  record_pass "4.6 sidecar start failure left no claude-gh-* resources behind"
-else
-  record_fail "4.6 sidecar start failure left claude-gh-* resources behind"
-fi
+  # 4.6.c: --gh and --gh-direct together are rejected before anything starts.
+  ws="$SCRATCH/ghtest-conflict" log="$SCRATCH/run3x.log"
+  mkdir -p "$ws"
+  run_wrapped_wait "$log" env GH_TOKEN="$FAKE1" CLAUDE_DOCKER_RUNTIME=docker CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
+    bash "$RUN_SH" --gh --gh-direct "$ws"
+  if [ "$RC" -ne 0 ]; then
+    record_pass "4.6 --gh --gh-direct together exits non-zero ($RC)"
+  else
+    record_fail "4.6 --gh --gh-direct together exited 0 (expected rejection)"
+  fi
+  # `--gh` must not be satisfied by the `--gh` prefix of `--gh-direct`.
+  if grep -qE -- '--gh([^-]|$)' "$log" 2>/dev/null && grep -qF -- '--gh-direct' "$log" 2>/dev/null; then
+    record_pass "4.6 --gh --gh-direct rejection message names the conflicting flags"
+  else
+    record_fail "4.6 --gh --gh-direct rejection message doesn't clearly name both flags (see $log)"
+  fi
+  if no_new_claude_gh_resources; then
+    record_pass "4.6 --gh --gh-direct started no container or sidecar"
+  else
+    record_fail "4.6 --gh --gh-direct unexpectedly left claude-gh-* resources behind"
+  fi
 
-# ---------------------------------------------------------------------------
-# Summary
-# ---------------------------------------------------------------------------
-echo
-echo "=== gh-proxy-integration summary ==="
-echo "PASS=$TOTAL_PASS FAIL=$TOTAL_FAIL SKIP=$TOTAL_SKIP"
-if [ "$TOTAL_FAIL" -gt 0 ]; then
-  echo "RESULT: FAIL"
-  exit 1
-fi
-echo "RESULT: PASS"
-exit 0
+  # 4.6.d: sidecar start failure (unresolvable pinned image) fails closed.
+  ws="$SCRATCH/ghtest-badimage" log="$SCRATCH/run3i.log"
+  mkdir -p "$ws"
+  gen_assert_script "$ws/assert.sh" badimage-sentinel "$FAKE1" ""
+  run_wrapped_wait "$log" env \
+    GH_TOKEN="$FAKE1" \
+    CLAUDE_DOCKER_RUNTIME=docker \
+    CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
+    CLAUDE_DOCKER_PROXY_IMAGE="localhost/does-not-exist:0" \
+    CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-badimage/assert.sh" \
+    bash "$RUN_SH" --gh "$ws"
+  if [ "$RC" -ne 0 ]; then
+    record_pass "4.6 sidecar start failure (bad image) exits non-zero ($RC)"
+  else
+    record_fail "4.6 sidecar start failure (bad image) exited 0 (expected fatal error)"
+  fi
+  # Absence of the sentinel is the pass condition: the assert script must NEVER
+  # run in this scenario, so results.txt is deliberately not ingested here.
+  if [ -f "$ws/should-not-exist" ]; then
+    record_fail "4.6 agent container started and ran despite the sidecar failing to start — fail-closed regression (a real token could have been forwarded)"
+  else
+    record_pass "4.6 agent container never started when the sidecar failed to start (fail-closed)"
+  fi
+  if no_new_claude_gh_resources; then
+    record_pass "4.6 sidecar start failure left no claude-gh-* resources behind"
+  else
+    record_fail "4.6 sidecar start failure left claude-gh-* resources behind"
+  fi
+}
+
+summary() {
+  echo
+  echo "=== gh-proxy-integration summary ==="
+  echo "PASS=$TOTAL_PASS FAIL=$TOTAL_FAIL SKIP=$TOTAL_SKIP"
+  if [ "$TOTAL_FAIL" -gt 0 ]; then
+    echo "RESULT: FAIL"
+    return 1
+  fi
+  echo "RESULT: PASS"
+}
+
+main() {
+  set -euo pipefail
+  preflight
+  setup_scratch || return 1
+  trap cleanup EXIT
+  # Exit (and so run cleanup once) on Ctrl-C/TERM instead of resuming the phases.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  capture_baseline
+  start_mock || return 1
+  phase1_main_session
+  phase2_concurrent
+  phase3_flags
+  summary
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then main "$@"; fi
