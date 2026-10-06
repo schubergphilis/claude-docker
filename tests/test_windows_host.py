@@ -55,6 +55,9 @@ STUBS = {
           echo true
           exit 0
         fi
+        if [ "$1" = "-C" ] && [ "$3" = "rev-parse" ]; then
+          printf '%s\\n' "$2" >>"$RECORD/git-C-rev-parse"
+        fi
         exit 1
         """,
     "docker": """\
@@ -170,6 +173,12 @@ class GitBashTest(unittest.TestCase):
         self.assertIn("autocrlf = true", (self.h.record / "overlay").read_text())
         # git.exe is native: the -C path must be Windows-form too.
         self.assertEqual((self.h.record / "git-C").read_text().strip(), f"W:{self.h.ws}")
+
+    def test_glab_origin_lookup_passes_windows_form_to_git(self):
+        self.start("--glab")
+        # Same native git.exe as the autocrlf lookup: a POSIX -C path would
+        # miss the repo and silently skip the origin host.
+        self.assertEqual((self.h.record / "git-C-rev-parse").read_text().strip(), f"W:{self.h.ws}")
 
     def test_gh_proxy_cp_destination_is_windows_form(self):
         self.start("--gh", GH_TOKEN="ghp_fake")

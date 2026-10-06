@@ -10,6 +10,7 @@
 - [x] 2.4 Under MSYS, forward `HOST_UID=1000` / `HOST_GID=1000`.
 - [x] 2.5 Under MSYS, pass `safe.directory=/workspaces/*` via `GIT_CONFIG_COUNT` env.
 - [x] 2.6 Under MSYS, append the host workspace's effective `core.autocrlf` to its `.git/config` overlay (`git -C "$(hostpath …)"`).
+- [x] 2.7 Route the `--glab` origin lookup's `git -C` through `hostpath()` too (added by #127 after this change was drafted).
 
 ## 2b. PowerShell launcher
 

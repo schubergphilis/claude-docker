@@ -637,7 +637,9 @@ if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
   else
     _ws0="${SEEN_PATHS[0]}"
     if [ -e "$_ws0/.git" ] && [ ! -L "$_ws0/.git" ]; then
-      _glab_cfg=$(git -C "$_ws0" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || true
+      # git.exe is native under Git Bash and argv conversion is off, so -C
+      # needs hostpath(), as for the core.autocrlf lookup below.
+      _glab_cfg=$(git -C "$(hostpath "$_ws0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || true
       if [ -n "$_glab_cfg" ] && [ -f "$_glab_cfg/config" ] && [ ! -L "$_glab_cfg/config" ]; then
         _glab_remote=$(git config --file "$_glab_cfg/config" --get remote.origin.url 2>/dev/null) || true
         # The port of an ssh:// or scp-style (user@host:path) remote is the SSH
