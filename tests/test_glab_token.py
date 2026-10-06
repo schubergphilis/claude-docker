@@ -34,6 +34,7 @@ GLAB = f"""#!/bin/sh
 [ "$*" = "config get host" ] && {{ echo "$GITLAB_HOST"; exit 0; }}
 [ "$*" = "config get token --host gl.example.com" ] && echo "{SECRET}"
 [ "$*" = "config get token --host other.example.com" ] && echo "glpat-other-host"
+[ "$*" = "config get token --host port.example.com:8443" ] && echo "glpat-port-host"
 exit 0
 """
 
@@ -139,6 +140,62 @@ class GlabTokenDiscovery(unittest.TestCase):
         self.assertEqual(token, "")
         self.assertNotIn("GITLAB_TOKEN", argv)
         self.assertIn("no GitLab token found for gitlab.com", self.stderr)
+
+    # -- host parsing (#131) --
+
+    def test_gitlab_host_keeps_port(self):
+        _, token = self._run(GITLAB_HOST="port.example.com:8443")
+        self.assertEqual(token, "glpat-port-host")
+
+    def test_https_origin_keeps_port(self):
+        self._init_repo(self.ws, "https://port.example.com:8443/group/project.git")
+        _, token = self._run(drop=("GITLAB_HOST",))
+        self.assertEqual(token, "glpat-port-host")
+
+    def test_ssh_origin_drops_ssh_port(self):
+        self._init_repo(self.ws, "ssh://git@gl.example.com:2222/group/project.git")
+        _, token = self._run(drop=("GITLAB_HOST",))
+        self.assertEqual(token, SECRET)
+
+    def test_at_in_path_and_password_does_not_move_host(self):
+        for url in ("https://gl.example.com/group/repo@x.git",
+                    "https://user:p@ss@gl.example.com/group/repo.git"):
+            with self.subTest(url=url):
+                subprocess.run(["rm", "-rf", str(self.ws / ".git")], check=True)
+                self._init_repo(self.ws, url)
+                _, token = self._run(drop=("GITLAB_HOST",))
+                self.assertEqual(token, SECRET)
+
+    def test_duplicate_host_tried_once(self):
+        self._init_repo(self.ws, "git@gitlab.com:group/project.git")
+        self._run(drop=("GITLAB_HOST",))
+        self.assertIn("no GitLab token found for gitlab.com;", self.stderr)
+
+    # -- origin lookup skips (#131): only glab's default host is tried --
+
+    def _assert_only_default_tried(self):
+        _, token = self._run(drop=("GITLAB_HOST",))
+        self.assertEqual(token, "")
+        self.assertIn("no GitLab token found for gitlab.com;", self.stderr)
+
+    def test_symlinked_dot_git_skipped(self):
+        other = Path(self.tmp.name) / "other"
+        self._init_repo(other, "git@gl.example.com:group/project.git")
+        (self.ws / ".git").symlink_to(other / ".git")
+        self._assert_only_default_tried()
+
+    def test_symlinked_config_skipped(self):
+        other = Path(self.tmp.name) / "other"
+        self._init_repo(other, "git@gl.example.com:group/project.git")
+        self._init_repo(self.ws, "git@gitlab.com:group/project.git")
+        cfg = self.ws / ".git" / "config"
+        cfg.unlink()
+        cfg.symlink_to(other / ".git" / "config")
+        self._assert_only_default_tried()
+
+    def test_unresolvable_git_pointer_skipped(self):
+        (self.ws / ".git").write_text("gitdir: /nonexistent/claude-docker-test\n")
+        self._assert_only_default_tried()
 
 
 if __name__ == "__main__":
