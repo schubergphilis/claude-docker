@@ -2,9 +2,11 @@
 
 [← Back to the README](../README.md)
 
-Three routes work.
+Three routes work. All three require Git for Windows except WSL2, because `run.sh` is a bash script.
 
-**PowerShell.** Run `claude-docker` straight from PowerShell (in Windows Terminal) against the Windows `docker.exe`/`podman.exe`. [`claude-docker.ps1`](../claude-docker.ps1) is a thin launcher: it runs `run.sh` with the `bash.exe` that ships with Git for Windows, so you need Git for Windows installed but never have to open Git Bash, and every flag works the same. Everything under "Git Bash" below applies, because that's what runs underneath — except the mintty TTY caveat, since PowerShell runs in a real console. One-time setup, from the repo folder:
+**Tested with podman only.** The Windows support was validated on Windows 11 with rootless podman (`podman machine`, WSL2 backend), from PowerShell 7 through the launcher and from WSL2. Docker Desktop has not been tested: we are not allowed to use it. Nothing in the wrapper is engine-specific, but treat Docker Desktop on Windows as untested.
+
+**PowerShell.** Run `claude-docker` straight from PowerShell (in Windows Terminal) against the Windows `podman.exe`. [`claude-docker.ps1`](../claude-docker.ps1) is a thin launcher: it runs `run.sh` with the `bash.exe` that ships with Git for Windows, so you need Git for Windows installed but never have to open Git Bash, and every flag works the same. Everything under "Git Bash" below applies, because that's what runs underneath — except the mintty TTY caveat, since PowerShell runs in a real console. One-time setup, from the repo folder:
 
 ```powershell
 podman build --format docker -t claude-code:local .
@@ -26,9 +28,9 @@ $env:CLAUDE_DOCKER_CONFIG_DIR = "$env:USERPROFILE\.claude-docker"   # same, for 
 
 Windows paths (`C:\...`) are accepted anywhere `run.sh` takes a path. `~` inside `--claude-dir` / `CLAUDE_DOCKER_CONFIG_DIR` means `%USERPROFILE%`. Don't run `bash run.sh` from PowerShell yourself: a bare `bash` there is usually WSL's (`C:\Windows\System32\bash.exe`), which runs the script inside Linux with a different home folder; the launcher avoids it on purpose.
 
-**WSL2.** Clone this repo and your projects into the WSL filesystem (`~/…` inside the distro, not `/mnt/c/…`) and run `claude-docker` from the WSL shell, against Docker Desktop's WSL integration or podman. `run.sh` sees a plain Linux host, so everything behaves exactly as on Linux — real UIDs, Linux git config, and native ext4 file access, which is far faster than bind-mounting NTFS; prefer it for large repos. Note that inside WSL, `~/.claude`, `~/.aws` etc. are the *WSL* home's copies, not your Windows profile's.
+**WSL2.** Clone this repo and your projects into the WSL filesystem (`~/…` inside the distro, not `/mnt/c/…`) and run `claude-docker` from the WSL shell, against podman installed in the distro. `run.sh` sees a plain Linux host, so everything behaves exactly as on Linux — real UIDs, Linux git config, and native ext4 file access, which is far faster than bind-mounting NTFS; prefer it for large repos. Note that inside WSL, `~/.claude`, `~/.aws` etc. are the *WSL* home's copies, not your Windows profile's.
 
-**Git Bash.** Run `claude-docker` from Git Bash (MSYS/MINGW) against the Windows `docker.exe`/`podman.exe`, with projects on NTFS. The wrapper handles the Windows-specific parts itself:
+**Git Bash.** Run `claude-docker` from Git Bash (MSYS/MINGW) against the Windows `podman.exe`, with projects on NTFS. The wrapper handles the Windows-specific parts itself:
 
 - MSYS's automatic POSIX→Windows argv rewriting is disabled, and every host path handed to a native executable (mount sources, `cp` destinations, `git -C`) is translated with `cygpath`, so container-side paths reach the engine intact — no `invalid option type "\Program Files\Git\workspaces\..."`.
 - The container user is UID/GID `1000`, not Git Bash's synthetic SID-derived `id -u` (e.g. `197609`, outside rootless podman's ID range). NTFS mounts have no real POSIX ownership, so nothing on the host is affected; the agent still runs non-root.
@@ -43,3 +45,13 @@ Git Bash caveats:
 - **Statusline:** a host `statusline-command.sh` saved with CRLF line endings fails under the container's `sh` — save it with LF.
 
 The repo's `.gitattributes` forces LF checkouts, so a Windows clone builds as-is even with `core.autocrlf=true`.
+
+## Named volumes backed by a Windows folder
+
+`run.sh` keeps `/root` and `/root/.claude` in the `claude-code-root` and `claude-code-home` named volumes, which it creates inside the podman VM on first use. You can instead create those volumes yourself as binds to a Windows folder (`podman volume create --opt type=none --opt o=bind --opt device=C:\... claude-code-root`), for example to keep them on your Windows disk. That works, but the folder is an NTFS drive mount without POSIX permissions:
+
+- `chmod` and `chown` fail with `Operation not permitted`, and every file shows as `777 root`.
+- Tools that chmod a lock or temp file then fail: `git config` and `gh auth setup-git` (`chmod on ~/.gitconfig.lock failed`), and `npm`/`npx` (`ECOMPROMISED`). Edit the config file directly instead.
+- Files that must not be world-readable, such as SSH keys, can't be protected.
+
+For a clean test run, back up the folders, `podman volume rm claude-code-root claude-code-home`, and let `run.sh` recreate both volumes in the VM. Remove them again afterwards and recreate your bind-backed ones.
