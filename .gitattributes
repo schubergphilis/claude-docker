@@ -1,0 +1,4 @@
+# Check out every text file with LF, whatever the host's core.autocrlf. Git for
+# Windows defaults to autocrlf=true, and a CRLF entrypoint.sh (copied into the
+# image), pins/*.env (sourced by the Dockerfile) or run.sh breaks outright.
+* text=auto eol=lf

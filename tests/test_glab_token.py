@@ -25,6 +25,7 @@ DOCKER = """#!/bin/sh
 [ "$1" = run ] || exit 0
 printf '%s\\n' "$@" > "$STUB_LOG/argv"
 printf '%s' "${GITLAB_TOKEN:-}" > "$STUB_LOG/token"
+printf '%s' "${GITLAB_HOST:-}" > "$STUB_LOG/host"
 """
 # Host glab: answers `config get host` from GITLAB_HOST (as real glab does) and
 # holds tokens for gl.example.com and other.example.com, returned solely via
@@ -102,6 +103,15 @@ class GlabTokenDiscovery(unittest.TestCase):
         self.assertEqual(token, SECRET)
         self.assertFalse(any(SECRET in a for a in argv))
         self.assertNotIn("no GitLab token", self.stderr)
+        # The token is for gl.example.com, so the in-container glab must target
+        # it too, not its gitlab.com default.
+        self.assertIn("GITLAB_HOST", argv)
+        self.assertEqual((self.log / "host").read_text(), "gl.example.com")
+
+    def test_explicit_gitlab_host_forwarded_unchanged(self):
+        argv, _ = self._run()
+        self.assertEqual(argv.count("GITLAB_HOST"), 1)
+        self.assertEqual((self.log / "host").read_text(), "https://gl.example.com")
 
     def test_gitlab_host_beats_origin(self):
         # origin's host also has a token; it must not be the one forwarded.

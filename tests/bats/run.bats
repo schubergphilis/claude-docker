@@ -237,6 +237,20 @@ run_script_fn() {
   [ "$IS_MSYS" = 0 ]
 }
 
+@test "detect_msys: Git Bash uses UID 1000 and trusts only /workspaces" {
+  uname() { echo MINGW64_NT-10.0; }
+  detect_msys
+  [ "$HOST_UID" = 1000 ] && [ "$HOST_GID" = 1000 ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *$'GIT_CONFIG_KEY_0=safe.directory\n-e\nGIT_CONFIG_VALUE_0=/workspaces/*'* ]]
+}
+
+@test "detect_msys: Linux keeps id -u and adds no git config" {
+  uname() { echo Linux; }
+  detect_msys
+  [ "$HOST_UID" = "$(id -u)" ] && [ "$HOST_GID" = "$(id -g)" ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_CONFIG_* ]]
+}
+
 @test "hostpath: identity off MSYS" {
   run hostpath "/c/Users/me dir"
   [ "$output" = "/c/Users/me dir" ]
