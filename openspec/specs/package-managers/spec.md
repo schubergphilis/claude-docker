@@ -157,10 +157,12 @@ When `--registry` is set, `run.sh`:
 - SHALL mount read-only, and only when present on the host (a missing file is a
   silent no-op), each of: the host npm config (`~/.npmrc`, or the file named by
   `npm_config_userconfig` / `NPM_CONFIG_USERCONFIG` when set) at `/root/.npmrc`,
-  `~/.config/uv/uv.toml` at `/root/.config/uv/uv.toml`, and the
-  platform-appropriate pip config — `~/.config/pip/pip.conf` on Linux or
-  `~/Library/Application Support/pip/pip.conf` on macOS — at
-  `/root/.config/pip/pip.conf`.
+  the platform-appropriate uv config — `%APPDATA%\uv\uv.toml` on Windows (Git
+  Bash), `~/.config/uv/uv.toml` on Linux/macOS and as the fallback everywhere —
+  at `/root/.config/uv/uv.toml`, and the platform-appropriate pip config —
+  `~/.config/pip/pip.conf` on Linux, `~/Library/Application Support/pip/pip.conf`
+  on macOS, or `%APPDATA%\pip\pip.ini` on Windows (Git Bash; same INI format
+  under pip's Windows file name) — at `/root/.config/pip/pip.conf`.
 - SHALL NOT mount `~/.netrc`. Because netrc is a machine-keyed store that
   commonly holds credentials for hosts unrelated to the package registry,
   forwarding the whole file into a full-egress container is too broad; netrc-
@@ -232,6 +234,14 @@ own native config.
 
 - **WHEN** the user runs `claude-docker --registry ~/repo`
 - **THEN** the statusline `docker:` prefix includes `registry` in the opt-in tag list
+
+#### Scenario: --registry finds Windows uv and pip config under %APPDATA%
+
+- **GIVEN** `run.sh` runs under Git Bash on Windows
+- **AND** the host has `%APPDATA%\uv\uv.toml` and `%APPDATA%\pip\pip.ini`
+- **WHEN** the user runs `claude-docker --registry ~/repo`
+- **THEN** `/root/.config/uv/uv.toml` inside the container contains the host `uv.toml`
+- **AND** `/root/.config/pip/pip.conf` inside the container contains the host `pip.ini`
 
 ### Requirement: pnpm runs its native binary, asserted at build time
 
