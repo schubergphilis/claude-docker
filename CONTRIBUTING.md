@@ -55,6 +55,9 @@ hadolint --config .hadolint.yaml Dockerfile
 # Unit tests for the pin tooling
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 
+# BATS unit tests for the shell scripts
+bats tests/bats
+
 # Build the image and run a smoke cell against it
 docker build -t claude-code:local .
 IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
