@@ -592,9 +592,25 @@ if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
   else
     _ws0="${SEEN_PATHS[0]}"
     if [ -e "$_ws0/.git" ] && [ ! -L "$_ws0/.git" ]; then
-      _glab_cfg="$(git -C "$_ws0" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/config"
-      if [ -f "$_glab_cfg" ] && [ ! -L "$_glab_cfg" ]; then
-        _glab_remote=$(git config --file "$_glab_cfg" --get remote.origin.url 2>/dev/null) || true
+      _glab_cfg=$(git -C "$_ws0" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || true
+      if [ -n "$_glab_cfg" ] && [ -f "$_glab_cfg/config" ] && [ ! -L "$_glab_cfg/config" ]; then
+        _glab_remote=$(git config --file "$_glab_cfg/config" --get remote.origin.url 2>/dev/null) || true
+        # The port of an ssh:// or scp-style (user@host:path) remote is the SSH
+        # port, not GitLab's: reduce those to the bare host here. http(s) URLs
+        # keep theirs and are trimmed with the other candidates below.
+        case "$_glab_remote" in
+          http://* | https://*) ;;
+          *://*)
+            _glab_remote=${_glab_remote#*://}
+            _glab_remote=${_glab_remote%%/*}
+            _glab_remote=${_glab_remote##*@}
+            _glab_remote=${_glab_remote%%:*}
+            ;;
+          *)
+            _glab_remote=${_glab_remote%%:*}
+            _glab_remote=${_glab_remote##*@}
+            ;;
+        esac
         [ -n "$_glab_remote" ] && _glab_hosts+=("$_glab_remote")
       fi
     fi
@@ -608,11 +624,13 @@ if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
   # expansion is safe under bash 3.2's set -u.
   if command -v glab >/dev/null 2>&1; then
     for _glab_host in "${_glab_hosts[@]}"; do
-      # Hostname from https://user@host:port/path, ssh://..., or scp-style git@host:path.
+      # host[:port] from https://user@host:port/path or a bare host[:port].
+      # Path first, so an @ in the path or password can't move the cut.
       _glab_host=${_glab_host#*://}
-      _glab_host=${_glab_host#*@}
-      _glab_host=${_glab_host%%[:/]*}
+      _glab_host=${_glab_host%%/*}
+      _glab_host=${_glab_host##*@}
       [ -n "$_glab_host" ] || continue
+      case ", $_glab_tried, " in *", $_glab_host, "*) continue ;; esac
       _glab_tried="${_glab_tried:+$_glab_tried, }$_glab_host"
       GITLAB_TOKEN=$(GLAB_CHECK_UPDATE=false glab config get token --host "$_glab_host" 2>/dev/null) || true
       [ -n "$GITLAB_TOKEN" ] && break
