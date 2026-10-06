@@ -11,6 +11,7 @@
 - [x] 2.5 Under MSYS, pass `safe.directory=/workspaces/*` via `GIT_CONFIG_COUNT` env.
 - [x] 2.6 Under MSYS, append the host workspace's effective `core.autocrlf` to its `.git/config` overlay (`git -C "$(hostpath …)"`).
 - [x] 2.7 Route the `--glab` origin lookup's `git -C` through `hostpath()` too (added by #127 after this change was drafted).
+- [x] 2.8 Forward the host a discovered `--glab` token was found for as `GITLAB_HOST` when it isn't set, so the in-container glab doesn't fall back to `gitlab.com` (found in 6.4).
 
 ## 2b. PowerShell launcher
 
@@ -30,14 +31,17 @@
 
 ## 5. Validation
 
-- [ ] 5.1 `shellcheck run.sh entrypoint.sh smoke/*.sh` and `python3 -m unittest discover -s tests -p 'test_*.py'` pass. (unittest passes, 123 tests; shellcheck not yet run — unavailable in the dev sandbox)
+- [x] 5.1 `shellcheck run.sh entrypoint.sh smoke/*.sh` and `python3 -m unittest discover -s tests -p 'test_*.py'` pass. (unittest passes locally, 145 tests; shellcheck runs in CI's Validate job, not available in the dev sandbox)
 - [x] 5.2 `openspec validate windows-host-support --strict` passes.
 
 ## 6. Windows validation (manual, real host, before archive)
 
-- [ ] 6.1 Fresh clone with `core.autocrlf=true`: image builds, `claude-docker` starts from Git Bash.
-- [ ] 6.2 Docker Desktop and rootless podman: agent runs as UID 1000; `git status` works in a workspace and doesn't list CRLF files as modified.
-- [ ] 6.3 `--gh` with a host token: sidecar starts, `gh api /user` works.
-- [ ] 6.4 `--tfe`, `--glab`, `--registry` mount their `%APPDATA%` files.
-- [ ] 6.5 PowerShell 7 in Windows Terminal: `claude-docker C:\path\to\repo` starts the container; `--claude-dir="$env:USERPROFILE\.claude-docker"` is honoured; exit code propagates; `$env:HOME`/`$env:TERM` unchanged afterwards.
-- [ ] 6.6 WSL2 route: `run.sh` from a WSL distro with a repo in the WSL filesystem works unchanged.
+Run on a Windows 11 host with rootless podman (`podman machine`, WSL2 backend), from PowerShell 7 through `claude-docker.ps1`, against an image built from this branch.
+
+- [x] 6.1 Fresh clone with `core.autocrlf=true`: image builds, `claude-docker` starts from Git Bash.
+- [x] 6.2 Rootless podman: agent runs as UID 1000; `git status` works in a workspace and doesn't list CRLF files as modified.
+- [ ] 6.2b Docker Desktop: same as 6.2. **Not tested:** we are not allowed to use Docker Desktop. Nothing in the change is engine-specific beyond what 6.2 covers, but the UID 1000 / NTFS-ownership behaviour is unverified on it.
+- [x] 6.3 `--gh` with a host token: sidecar starts, `gh api /user` works.
+- [x] 6.4 `--tfe`, `--glab`, `--registry` mount their `%APPDATA%` files. The `--glab` token was found for the workspace's origin host, but `GITLAB_HOST` didn't reach the container, so the in-container glab targeted `gitlab.com`; fixed in 2.8.
+- [x] 6.5 PowerShell 7 in Windows Terminal: `claude-docker C:\path\to\repo` starts the container; `--claude-dir="$env:USERPROFILE\.claude-docker"` is honoured; exit code propagates; `$env:HOME`/`$env:TERM` unchanged afterwards.
+- [x] 6.6 WSL2 route: `run.sh` from a WSL distro with a repo in the WSL filesystem works unchanged.

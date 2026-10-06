@@ -686,6 +686,13 @@ if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
   if [ -n "${GITLAB_TOKEN:-}" ]; then
     export GITLAB_TOKEN
     ENV_ARGS+=("-e" "GITLAB_TOKEN")
+    # The token belongs to the host it was found for. Without GITLAB_HOST the
+    # in-container glab targets gitlab.com, so pass that host along (a set
+    # GITLAB_HOST was already forwarded with the other opt-in vars above).
+    if [ -z "${GITLAB_HOST:-}" ]; then
+      export GITLAB_HOST="$_glab_host"
+      ENV_ARGS+=("-e" "GITLAB_HOST")
+    fi
   elif command -v glab >/dev/null 2>&1; then
     echo "claude-docker: --glab: no GitLab token found for ${_glab_tried:-any host}; set GITLAB_HOST=<host> (after host 'glab auth login') or export GITLAB_TOKEN" >&2
   else
