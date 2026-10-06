@@ -64,7 +64,8 @@ Wrapper flags:
                       Mutually exclusive with --gh.
   --glab              Opt in to GitLab: mount glab-cli config (:ro) and
                       forward GITLAB_TOKEN (env, else host glab's stored
-                      token, keyring included) and GITLAB_HOST; unmask
+                      token for GITLAB_HOST or the repo's origin host,
+                      keyring included) and GITLAB_HOST; unmask
                       in-container glab login.
   --tfe               Opt in to Terraform Cloud (app.terraform.io): mount
                       ~/.terraform.d/credentials.tfrc.json (:ro) when
@@ -572,20 +573,58 @@ fi
 # when --gh wasn't passed or no token was found either way.
 GH_HOST_TOKEN="${GH_TOKEN:-${GITHUB_TOKEN:-$GH_DISCOVERED_TOKEN}}"
 # GitLab token discovery for --glab, same shape as gh's: host GITLAB_TOKEN
-# wins; else ask host glab for the token of its default host (GITLAB_HOST,
-# else config.yml's `host`, else gitlab.com). `glab config get token --host`
-# reads the OS keyring too, which the read-only config mount can't carry;
-# without --host it never looks at per-host tokens. Silent skip when glab is
-# absent or not logged in. Forwarded by bare name, never on argv.
-if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ] \
-   && command -v glab >/dev/null 2>&1; then
-  _glab_host=$(GLAB_CHECK_UPDATE=false glab config get host 2>/dev/null) || true
-  _glab_host=${_glab_host#*://}
-  _glab_host=${_glab_host%%/*}
-  GITLAB_TOKEN=$(GLAB_CHECK_UPDATE=false glab config get token --host "${_glab_host:-gitlab.com}" 2>/dev/null) || true
-  if [ -n "$GITLAB_TOKEN" ]; then
+# wins; else ask host glab for a token, trying GITLAB_HOST alone when set,
+# otherwise the first workspace's origin host and then glab's default host
+# (config.yml's `host`, else gitlab.com). Without a token the in-container
+# glab falls back to the keyring when config.yml says use_keyring: true, and
+# there is no D-Bus there (#126). `glab config get token --host` reads the
+# OS keyring too, which the read-only config mount can't carry; without
+# --host it never looks at per-host tokens. The origin URL is read as a
+# plain file (no includes) from the repo's common git dir, so worktree and
+# submodule workspaces (.git is a pointer file) resolve to the main repo /
+# module config; symlinked .git or config is skipped, as in the git-config
+# overlay below. Forwarded by bare name, never on argv; warn when nothing is
+# found.
+if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
+  _glab_hosts=()
+  if [ -n "${GITLAB_HOST:-}" ]; then
+    _glab_hosts=("$GITLAB_HOST")
+  else
+    _ws0="${SEEN_PATHS[0]}"
+    if [ -e "$_ws0/.git" ] && [ ! -L "$_ws0/.git" ]; then
+      _glab_cfg="$(git -C "$_ws0" rev-parse --path-format=absolute --git-common-dir 2>/dev/null || true)/config"
+      if [ -f "$_glab_cfg" ] && [ ! -L "$_glab_cfg" ]; then
+        _glab_remote=$(git config --file "$_glab_cfg" --get remote.origin.url 2>/dev/null) || true
+        [ -n "$_glab_remote" ] && _glab_hosts+=("$_glab_remote")
+      fi
+    fi
+    if command -v glab >/dev/null 2>&1; then
+      _glab_default=$(GLAB_CHECK_UPDATE=false glab config get host 2>/dev/null) || true
+      _glab_hosts+=("${_glab_default:-gitlab.com}")
+    fi
+  fi
+  _glab_tried=""
+  # Non-empty whenever glab is on PATH (default host always appended), so the
+  # expansion is safe under bash 3.2's set -u.
+  if command -v glab >/dev/null 2>&1; then
+    for _glab_host in "${_glab_hosts[@]}"; do
+      # Hostname from https://user@host:port/path, ssh://..., or scp-style git@host:path.
+      _glab_host=${_glab_host#*://}
+      _glab_host=${_glab_host#*@}
+      _glab_host=${_glab_host%%[:/]*}
+      [ -n "$_glab_host" ] || continue
+      _glab_tried="${_glab_tried:+$_glab_tried, }$_glab_host"
+      GITLAB_TOKEN=$(GLAB_CHECK_UPDATE=false glab config get token --host "$_glab_host" 2>/dev/null) || true
+      [ -n "$GITLAB_TOKEN" ] && break
+    done
+  fi
+  if [ -n "${GITLAB_TOKEN:-}" ]; then
     export GITLAB_TOKEN
     ENV_ARGS+=("-e" "GITLAB_TOKEN")
+  elif command -v glab >/dev/null 2>&1; then
+    echo "claude-docker: --glab: no GitLab token found for ${_glab_tried:-any host}; set GITLAB_HOST=<host> (after host 'glab auth login') or export GITLAB_TOKEN" >&2
+  else
+    echo "claude-docker: --glab: glab not on host PATH, no GitLab token to forward; export GITLAB_TOKEN" >&2
   fi
 fi
 

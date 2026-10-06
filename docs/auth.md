@@ -57,11 +57,11 @@ glab auth login --hostname gitlab.example.com   # one-time, on the host
 GITLAB_HOST=gitlab.example.com claude-docker --glab ~/repo
 ```
 
-If `GITLAB_TOKEN` is unset, the wrapper runs `glab config get token --host <host>` on the host, where `<host>` is glab's default host: `GITLAB_HOST`, else the `host:` key in glab's `config.yml`, else `gitlab.com`. The token is forwarded as `GITLAB_TOKEN` by name, never on the `docker run` command line. `GITLAB_HOST` is forwarded too when set.
+If `GITLAB_TOKEN` is unset, the wrapper runs `glab config get token --host <host>` on the host and stops at the first host that returns a token. With `GITLAB_HOST` set, that is the only host it tries. Otherwise it tries the host of the first workspace's `origin` remote (read from the repository's git config; a worktree or submodule workspace uses its main repository's or module's config), then glab's default host (the `host:` key in glab's `config.yml`, else `gitlab.com`). The token is forwarded as `GITLAB_TOKEN` by name, never on the `docker run` command line. `GITLAB_HOST` is forwarded too when set.
 
 This is what makes keyring logins work. When glab keeps the token in the OS keyring (`use_keyring: true` for the host, no `token:` in `config.yml`), the read-only `glab-cli` mount carries no token, but `glab config get token --host` reads it from the keyring (glab's `internal/config/config.go`, `GetWithSource`; checked against glab 1.118.0 and 1.119.0). Without `--host` glab never consults per-host tokens, so the wrapper always passes it.
 
-An exported `GITLAB_TOKEN` always wins. If `glab` isn't installed or has no token for that host, the container starts without one and no error is shown. Only the default host's token is discovered; for a second instance, export its `GITLAB_TOKEN` and `GITLAB_HOST` yourself.
+An exported `GITLAB_TOKEN` always wins. If `glab` isn't installed or has no token for any of those hosts, the container starts without one and the wrapper prints a warning naming the hosts it tried. That matters because without a token, the in-container glab goes to the keyring (when `config.yml` says `use_keyring: true`), which the container doesn't have, and fails with a D-Bus / `dbus-launch` error. Plain HTTPS API calls still work for public projects, which hides the cause ([#126](https://github.com/schubergphilis/claude-docker/issues/126)). For an instance that isn't the first workspace's remote, set `GITLAB_HOST` or export `GITLAB_TOKEN` yourself.
 
 ## Terraform Cloud workflow
 
