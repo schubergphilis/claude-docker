@@ -20,8 +20,8 @@ Host credentials (files or env vars) SHALL NOT reach the container unless the us
   `--gh-direct` together SHALL exit with an error. The mode SHALL surface as
   a distinct `gh-direct` entry in `CLAUDE_DOCKER_FLAGS` so the statusline tag
   distinguishes it from proxied `gh`.
-- `--glab`: mount the platform-appropriate glab config dir — `~/Library/Application Support/glab-cli` on macOS, `%APPDATA%\glab-cli` on Windows (Git Bash), `~/.config/glab-cli` on Linux and as the fallback everywhere — at `/root/.config/glab-cli:ro`; forward `GITLAB_TOKEN` and `GITLAB_HOST` when set on the host. If `GITLAB_TOKEN` is not set, `run.sh` SHALL attempt to retrieve the host glab token by running `glab config get token --host <host>` for each candidate host in turn, stopping at the first that returns a token. When `GITLAB_HOST` is set, its host (with any port) is the only candidate. Otherwise the candidates are, in order, the host of the first workspace's `remote.origin.url` (read as a file from the `config` in the repository's common git dir, `git rev-parse --git-common-dir`, so a worktree or submodule workspace resolves to its main repository's or module's config; skipped when `.git` or that `config` is a symlink or absent, or when the common git dir can't be resolved) and the host of glab's default host (`glab config get host`; `gitlab.com` if empty). A host keeps its port, except for an `ssh://` or scp-style (`user@host:path`) remote, where the port is the SSH port and SHALL be dropped. A host already tried SHALL NOT be tried or named again. That command also reads tokens glab stored in the OS keyring. A discovered token SHALL be forwarded as `GITLAB_TOKEN` by bare name so it never appears in argv. If `glab` is not on the host PATH or returns no token for any candidate, `run.sh` SHALL continue without one and print a one-line warning to stderr naming the hosts tried and the `GITLAB_TOKEN` / `GITLAB_HOST` remedies; the warning SHALL NOT contain any token value.
-- `--tfe`: when present on the host, mount the `terraform login` credentials file — `%APPDATA%\terraform.d\credentials.tfrc.json` on Windows (Git Bash), `~/.terraform.d/credentials.tfrc.json` on Linux/macOS and as the fallback everywhere — at `/root/.terraform.d/credentials.tfrc.json:ro`; forward `TF_TOKEN_app_terraform_io` when set on the host. Targets `app.terraform.io` (HCP Terraform); self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are out of scope for this opt-in.
+- `--glab`: mount the platform-appropriate glab config dir — `~/Library/Application Support/glab-cli` on macOS, `~/.config/glab-cli` on Linux — at `/root/.config/glab-cli:ro`; forward `GITLAB_TOKEN` and `GITLAB_HOST` when set on the host. If `GITLAB_TOKEN` is not set, `run.sh` SHALL attempt to retrieve the host glab token by running `glab config get token --host <host>` for each candidate host in turn, stopping at the first that returns a token. When `GITLAB_HOST` is set, its host (with any port) is the only candidate. Otherwise the candidates are, in order, the host of the first workspace's `remote.origin.url` (read as a file from the `config` in the repository's common git dir, `git rev-parse --git-common-dir`, so a worktree or submodule workspace resolves to its main repository's or module's config; skipped when `.git` or that `config` is a symlink or absent, or when the common git dir can't be resolved) and the host of glab's default host (`glab config get host`; `gitlab.com` if empty). A host keeps its port, except for an `ssh://` or scp-style (`user@host:path`) remote, where the port is the SSH port and SHALL be dropped. A host already tried SHALL NOT be tried or named again. That command also reads tokens glab stored in the OS keyring. A discovered token SHALL be forwarded as `GITLAB_TOKEN` by bare name so it never appears in argv. If `glab` is not on the host PATH or returns no token for any candidate, `run.sh` SHALL continue without one and print a one-line warning to stderr naming the hosts tried and the `GITLAB_TOKEN` / `GITLAB_HOST` remedies; the warning SHALL NOT contain any token value.
+- `--tfe`: when present on the host, mount `~/.terraform.d/credentials.tfrc.json` at `/root/.terraform.d/credentials.tfrc.json:ro`; forward `TF_TOKEN_app_terraform_io` when set on the host. Targets `app.terraform.io` (HCP Terraform); self-hosted Terraform Enterprise hostnames and other `TF_TOKEN_<host>` variables are out of scope for this opt-in.
 - `--az`: forward `AZURE_DEVOPS_EXT_PAT` and `AZURE_DEVOPS_ORG_URL` when set on the host, and SHALL NOT mount any host `~/.azure` file: the PAT is the whole credential, and the profile would only carry tenant / subscription IDs and the account name into the container. `AZURE_DEVOPS_ORG_URL` SHALL be the only source of the Azure DevOps hostname — nothing SHALL assume `dev.azure.com`, so Azure DevOps Server (on-prem, custom hostname) works the same as Services. `run.sh` SHALL NOT attempt host-side PAT discovery (`az` has no command that prints a usable PAT). When `CLAUDE_DOCKER_AZ_CA` is set on the host, `run.sh` SHALL mount the file it names read-only at `/usr/local/share/ca-certificates/claude-docker-az.crt`, the entrypoint SHALL install it into the system trust store before the privilege drop, and `az` SHALL use the system bundle; the host value itself SHALL NOT be forwarded. When it is set but does not name a file, `run.sh` SHALL exit 1 before starting any container. The host's `REQUESTS_CA_BUNDLE` SHALL NOT be read, since it is often set for unrelated reasons. The certificate is trusted for every TLS connection in the container, not only the Azure DevOps Server; the documentation SHALL say so. Targets the `azure-devops` extension only; general Azure resource management and its credentials (`ARM_*`, `AZURE_CLIENT_SECRET`, service principals) are out of scope for this opt-in.
 
 All credential bind-mounts SHALL be read-only so a compromised container cannot rewrite host config or tokens. `~/.aws/credentials` and `~/.aws/cli/cache/` SHALL NEVER be mounted, even under `--aws`. Likewise nothing under `~/.azure/` SHALL be mounted under `--az` — in particular never the Azure token caches `msal_token_cache.json` or `accessTokens.json`.
@@ -114,13 +114,6 @@ copied in from the host or derived inside the container.
 - **WHEN** user runs `claude-docker --glab ~/repo`
 - **THEN** host glab is asked for the token of `gitlab.example.com:8443`
 
-#### Scenario: --glab finds the Windows config dir under %APPDATA%
-
-- **GIVEN** `run.sh` runs under Git Bash on Windows
-- **AND** the host glab config lives at `%APPDATA%\glab-cli`
-- **WHEN** user runs `claude-docker --glab ~/repo`
-- **THEN** that directory is mounted read-only at `/root/.config/glab-cli`
-
 #### Scenario: --gh keeps the host token out of the agent container
 
 - **GIVEN** `GH_TOKEN=ghp_x` is exported in the host shell
@@ -177,13 +170,6 @@ copied in from the host or derived inside the container.
 - **AND** `/root/.terraform.d/` inside the container is empty
 - **AND** `echo $TF_TOKEN_app_terraform_io` inside the container is empty
 
-#### Scenario: --tfe finds the Windows credentials file under %APPDATA%
-
-- **GIVEN** `run.sh` runs under Git Bash on Windows
-- **AND** `terraform login` wrote `%APPDATA%\terraform.d\credentials.tfrc.json` on the host
-- **WHEN** user runs `claude-docker --tfe ~/repo`
-- **THEN** `/root/.terraform.d/credentials.tfrc.json` inside the container contains that file's contents, mounted read-only
-
 #### Scenario: --az forwards the PAT and the org URL
 
 - **GIVEN** `AZURE_DEVOPS_EXT_PAT=pat_x` and `AZURE_DEVOPS_ORG_URL=https://devops.example.com/DefaultCollection` are exported in the host shell
@@ -216,3 +202,4 @@ copied in from the host or derived inside the container.
 - **GIVEN** the host exports `CLAUDE_DOCKER_AZ_CA=/nonexistent.pem`
 - **WHEN** user runs `claude-docker --az ~/repo`
 - **THEN** `run.sh` exits 1 with an error naming the path and starts no container
+
