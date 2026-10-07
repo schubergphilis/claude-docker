@@ -26,6 +26,7 @@ DOCKER = """#!/bin/sh
 printf '%s\\n' "$@" > "$STUB_LOG/argv"
 printf '%s' "${GITLAB_TOKEN:-}" > "$STUB_LOG/token"
 printf '%s' "${GITLAB_HOST:-}" > "$STUB_LOG/host"
+for a; do case "$a" in *:/root/.config/glab-cli/config.yml:ro) cp "${a%%:*}" "$STUB_LOG/glab-config.yml" ;; esac; done
 """
 # Host glab: answers `config get host` from GITLAB_HOST (as real glab does) and
 # holds tokens for gl.example.com and other.example.com, returned solely via
@@ -90,6 +91,15 @@ class GlabTokenDiscovery(unittest.TestCase):
         self.assertIn("GITLAB_TOKEN", argv)
         self.assertIn("GITLAB_HOST", argv)
         self.assertFalse(any(SECRET in a for a in argv))
+
+    def test_config_overlay_turns_keyring_off(self):
+        # In-container glab reads job_token via the keyring under use_keyring,
+        # even with GITLAB_TOKEN set, and fails without D-Bus.
+        self._run()
+        cfg = (self.log / "glab-config.yml").read_text()
+        self.assertIn("    use_keyring: false\n", cfg)
+        self.assertNotIn("true", cfg)
+        self.assertIn("api_host: gl.example.com", cfg)
 
     def test_explicit_token_wins(self):
         _, token = self._run(GITLAB_TOKEN="glpat-explicit")

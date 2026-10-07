@@ -178,6 +178,7 @@ HOST_UID=""
 HOST_GID=""
 RUNTIME=""
 stage=""
+GLAB_SRC=""
 GH_PROXY_NETWORK=""
 GH_PROXY_SIDECAR=""
 GH_HOST_TOKEN=""
@@ -409,20 +410,19 @@ build_workspace_mounts() {
 }
 
 build_cred_mounts() {
-  local glab_src tfe_src npmrc_src uv_toml pip_conf
+  local tfe_src npmrc_src uv_toml pip_conf
   # File-based host creds. gh uses macOS Keychain → log in inside the container once; persists via claude-code-root.
   # glab on macOS lives under ~/Library/Application Support/glab-cli (not XDG), on Windows under %APPDATA%\glab-cli;
   # fall back to ~/.config/glab-cli (Linux, and older glab releases on Windows).
   if [ "$WITH_GLAB" = "1" ]; then
-    glab_src=""
     if [ -d "$HOME/Library/Application Support/glab-cli" ]; then
-      glab_src="$HOME/Library/Application Support/glab-cli"
+      GLAB_SRC="$HOME/Library/Application Support/glab-cli"
     elif [ -n "$APPDATA_DIR" ] && [ -d "$APPDATA_DIR/glab-cli" ]; then
-      glab_src="$APPDATA_DIR/glab-cli"
+      GLAB_SRC="$APPDATA_DIR/glab-cli"
     elif [ -d "$HOME/.config/glab-cli" ]; then
-      glab_src="$HOME/.config/glab-cli"
+      GLAB_SRC="$HOME/.config/glab-cli"
     fi
-    [ -n "$glab_src" ] && MOUNT_ARGS+=("-v" "$(hostpath "$glab_src"):/root/.config/glab-cli:ro")
+    [ -n "$GLAB_SRC" ] && MOUNT_ARGS+=("-v" "$(hostpath "$GLAB_SRC"):/root/.config/glab-cli:ro")
   fi
 
   # Scoped AWS mount: only non-secret config + short-lived SSO bearer cache.
@@ -1115,6 +1115,16 @@ EOF
   done
 }
 
+# The in-container glab reads job_token through the OS keyring whenever the
+# host's config.yml says use_keyring: true, even with GITLAB_TOKEN set (no env
+# var covers job_token), and that read fails hard without D-Bus. Overlay a copy
+# with the keyring turned off; the token itself arrives as GITLAB_TOKEN.
+stage_glab_config() {
+  [ -n "$GLAB_SRC" ] && [ -f "$GLAB_SRC/config.yml" ] || return 0
+  sed 's/^\([[:space:]]*use_keyring:\).*/\1 false/' "$GLAB_SRC/config.yml" >"$stage/glab-config.yml" || exit 1
+  MOUNT_ARGS+=("-v" "$(hostpath "$stage/glab-config.yml"):/root/.config/glab-cli/config.yml:ro")
+}
+
 build_cmd() {
   local n i HOLD_ON_ERR
   CMD=(claude)
@@ -1228,6 +1238,7 @@ main() {
   start_gh_sidecar
   stage_host_config
   stage_git_overlays
+  stage_glab_config
   build_cmd
   build_volume_mounts
   run_container
