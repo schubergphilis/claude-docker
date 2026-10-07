@@ -61,7 +61,7 @@ jobs:
       # .hadolint.yaml, .dockleignore and .grype.yaml. Tagging is
       # metadata-action's defaults with latest=false, so a v0.1.0 tag publishes
       # :v0.1.0 and nothing else.
-      - uses: schubergphilis/mcvs-docker-action@e2dd2c7de4d02535bf8500dc7d1a84639af86880 # v0.13.0
+      - uses: schubergphilis/mcvs-docker-action@e0d519535bd0bc2380e69ad0e1ce0bfa063c3e7f # v0.13.2
         with:
           images: ghcr.io/${{ github.repository }}
           platforms: linux/amd64,linux/arm64
