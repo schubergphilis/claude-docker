@@ -128,14 +128,18 @@ chmod +x "${WORKSPACE_HOST}/assert-in-container.sh"
 #   - the named volumes, so a cell never touches the user's real
 #     claude-code-root / claude-code-home and every cell starts cold
 #   - `-it`, since CI has no TTY
-# It fails closed if run.sh's invocation no longer carries those args, so a
-# rename in run.sh cannot silently point a cell at the real volumes.
+# Only the agent run (the one carrying $IMAGE) is rewritten; sidecar runs such
+# as --gh's proxy pass through untouched. It fails closed if the agent run no
+# longer carries those args, so a rename in run.sh cannot silently point a cell
+# at the real volumes.
 # ---------------------------------------------------------------------------
 SMOKE_REAL_DOCKER=$(command -v docker) || die "docker not found on PATH"
-export SMOKE_REAL_DOCKER HOST_UID_ARG HOST_GID_ARG VOL_NAME
 cat > "${SHIM_DIR}/docker" <<'SHIM'
 #!/usr/bin/env bash
 [ "${1:-}" = "run" ] || exec "$SMOKE_REAL_DOCKER" "$@"
+agent=0
+for a in "$@"; do [ "$a" = "$SMOKE_IMAGE" ] && agent=1; done
+[ "$agent" = 1 ] || exec "$SMOKE_REAL_DOCKER" "$@"
 args=()
 ids=0
 vols=0
@@ -158,6 +162,9 @@ fi
 exec "$SMOKE_REAL_DOCKER" "${args[@]}"
 SHIM
 chmod +x "${SHIM_DIR}/docker"
+DOCKER_ENV=("DOCKER_CONFIG=${DOCKER_CONFIG:-${HOME}/.docker}")
+[ -n "${DOCKER_HOST:-}" ] && DOCKER_ENV+=("DOCKER_HOST=${DOCKER_HOST}")
+[ -n "${DOCKER_CONTEXT:-}" ] && DOCKER_ENV+=("DOCKER_CONTEXT=${DOCKER_CONTEXT}")
 
 # ---------------------------------------------------------------------------
 # run.sh flags + fixtures
@@ -258,8 +265,13 @@ run_container() {
   # forward it to the terminal so CI logs show container output.
   # "${arr[@]+"${arr[@]}"}" is the set -u-safe empty-array expansion idiom
   # (bash 3.2 on macOS errors on a plain empty "${arr[@]}").
-  env -u CLAUDE_DOCKER_TMUX -u CLAUDE_DOCKER_CONFIG_DIR \
-    HOME="${FAKE_HOME}" PATH="${SHIM_DIR}:${PATH}" \
+  # env -i: the cell sees only this allowlist, never the developer's own
+  # AWS_*/GH_TOKEN/CLAUDE_DOCKER_* env. The DOCKER_* vars keep the docker CLI
+  # on the caller's daemon despite the fake $HOME.
+  env -i HOME="${FAKE_HOME}" PATH="${SHIM_DIR}:${PATH}" \
+    "${DOCKER_ENV[@]}" \
+    SMOKE_REAL_DOCKER="${SMOKE_REAL_DOCKER}" SMOKE_IMAGE="${IMAGE}" VOL_NAME="${VOL_NAME}" \
+    HOST_UID_ARG="${HOST_UID_ARG}" HOST_GID_ARG="${HOST_GID_ARG}" \
     CLAUDE_DOCKER_RUNTIME=docker CLAUDE_DOCKER_IMAGE="${IMAGE}" \
     CLAUDE_DOCKER_TEST_ENTRY="${entry}" \
     "${OPTIN_ENV[@]+"${OPTIN_ENV[@]}"}" \
