@@ -46,7 +46,9 @@ class Endpoint(unittest.TestCase):
         self.assertIn("CLAUDE_DOCKER_RUNTIME must be", r.stderr)
 
     def test_provider_endpoint_refused(self):
-        for url in ("https://api.anthropic.com", "https://x.claude.ai/v1", "https://claude.com"):
+        for url in ("https://api.anthropic.com", "https://x.claude.ai/v1", "https://claude.com",
+                    # Hostnames are case-insensitive, and so is squid's dstdomain.
+                    "https://Api.Anthropic.com", "https://X.CLAUDE.AI/v1"):
             with self.subTest(url=url):
                 self.assert_refused("points at one", ANTHROPIC_BASE_URL=url)
 
@@ -55,8 +57,16 @@ class Endpoint(unittest.TestCase):
                             ANTHROPIC_BASE_URL="https://a.eu\nhttp_access allow all/")
         self.assert_refused("is not a valid hostname", ANTHROPIC_BASE_URL="https://a b.eu/")
 
+    def test_invalid_port_refused(self):
+        # The port is written into squid.conf, so it is validated like the host.
+        for url in ("https://gw.example.eu:0", "https://gw.example.eu:65536",
+                    "https://gw.example.eu:80a/v1", "https://gw.example.eu:123456"):
+            with self.subTest(url=url):
+                self.assert_refused("is not a port number", ANTHROPIC_BASE_URL=url)
+
     def test_gateway_passes(self):
-        for url in ("https://llm.example.eu/v1", "https://u:p@10.1.2.3:8443", "https://notanthropic.com"):
+        for url in ("https://llm.example.eu/v1", "https://u:p@10.1.2.3:8443", "https://notanthropic.com",
+                    "http://litellm:4000", "https://gw.example.eu:443/v1"):
             with self.subTest(url=url):
                 r = run(["--api", "--egress-lock"], ANTHROPIC_BASE_URL=url)
                 self.assertIn("CLAUDE_DOCKER_RUNTIME must be", r.stderr)

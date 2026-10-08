@@ -75,16 +75,21 @@ this too. Older engines leave the side channel open (documented).
 The `http_access` rules, in order:
 
 1. deny `metadata.google.internal`, `metadata.azure.internal` (name);
-2. deny ports other than 80/443, and `CONNECT` to anything but 443;
-3. deny `dst 169.254.0.0/16 fe80::/10` (metadata, link-local);
-4. deny `dst 127.0.0.0/8 0.0.0.0/8 ::1` (loopback);
-5. allow `dstdomain -n <ANTHROPIC_BASE_URL host>`;
-6. deny `dstdomain -n .anthropic.com .claude.ai .claude.com`;
-7. allow all.
+2. deny `dst 169.254.0.0/16 fe80::/10` (metadata, link-local);
+3. deny `dst 127.0.0.0/8 0.0.0.0/8 ::1` (loopback);
+4. allow `dstdomain -n <ANTHROPIC_BASE_URL host>` on the endpoint's port;
+5. deny ports other than 80/443, and `CONNECT` to anything but 443;
+6. allow `dstdomain -n <ANTHROPIC_BASE_URL host>`;
+7. deny `dstdomain -n .anthropic.com .claude.ai .claude.com`;
+8. allow all.
 
-The denies in 1–4 come first, so nothing re-opens them. The `dst` rules
+The address denies in 1–3 come first, so nothing re-opens them. Rule 4 lets
+a gateway on another port work (an `https://gw:8443` gateway, LiteLLM's
+default `http://litellm:4000`) while every other host stays on 80/443. The
+endpoint's port is the one in `ANTHROPIC_BASE_URL`, else the scheme's
+default. The `dst` rules
 apply to the address squid resolves, so a name that resolves to loopback is
-refused too. The endpoint allow comes before the provider deny. Startup
+refused too. The endpoint allows come before the provider deny. Startup
 already refuses a provider endpoint (D4), so this only matters if that check
 is wrong. `-n` stops a PTR record from turning an IP-literal request into an
 allowed name. Private ranges are reachable, so an on-prem git server or
@@ -104,10 +109,15 @@ if any of these holds:
   `api.anthropic.com`, which the lock refuses.
 - Its host fails the hostname/IPv4 validator, which allows only letters,
   digits, `-` and `.`, at most 253 characters.
-- Its host is a provider host.
+- Its port isn't a number from 1 to 65535.
+- Its host is a provider host. The host is lowercased after the validator,
+  because `dstdomain` is case-insensitive: compared as written,
+  `https://Api.Anthropic.com` passed the check, and rule 5 then let provider
+  traffic through (found in review, reproduced in tasks.md 6.7).
 
-The validator is also config-injection defence. The host is the only variable
-written into `squid.conf`, so no whitespace, quote or newline can reach it.
+The validators are also config-injection defence. The host and port are the
+only variables written into `squid.conf`, so no whitespace, quote or newline
+can reach it.
 
 ### D5. squid, installed into the agent image (open: see Open Questions)
 
@@ -204,11 +214,6 @@ It never falls back to open egress.
   project can therefore send model traffic to any non-provider host. The proxy
   can't tell model traffic from other traffic without TLS interception.
   Documented as a limitation; see Open Questions.
-- **The endpoint's port is unchecked.** A gateway on `:8443` passes startup,
-  then every `CONNECT` to it is refused.
-- **Case.** The startup provider check is case-sensitive and `dstdomain` is
-  not, so `https://Api.Anthropic.com` starts, and rule 5 then allows provider
-  traffic.
 - **squid's cache manager** isn't reachable from the agent, but only because
   the port rule refuses 3128 (tasks.md 6.6). There is no explicit
   `http_access deny manager` (CVE-2024-23638's workaround), so a change to
@@ -239,5 +244,3 @@ It never falls back to open egress.
    endpoint. One candidate, untested: put `ANTHROPIC_BASE_URL` in Claude Code's
    managed settings in the container (`/etc/claude-code/managed-settings.json`),
    which take precedence over project settings.
-3. **Port and case.** Lowercase the host before checking it. Then either refuse
-   a non-443 endpoint at startup, or allow that port for the endpoint only.
