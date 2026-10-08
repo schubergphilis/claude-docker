@@ -205,6 +205,7 @@ EGRESS_NETWORK=""
 EGRESS_OUT_NETWORK=""
 EGRESS_SIDECAR=""
 egress_api_host=""
+egress_api_port=""
 egress_started=""
 egress_image_id=""
 
@@ -302,16 +303,33 @@ validate_opts() {
       echo "claude-docker: --egress-lock needs ANTHROPIC_BASE_URL (your model gateway); without it Claude Code calls api.anthropic.com, which --egress-lock blocks" >&2
       exit 1
     fi
-    # ANTHROPIC_BASE_URL is scheme://[userinfo@]host[:port][/path]. The host is
-    # written into the squid config, so it must pass the validator first.
+    # ANTHROPIC_BASE_URL is scheme://[userinfo@]host[:port][/path]. The host
+    # and port are written into the squid config, so both must pass a
+    # validator first. No port means the scheme's default.
     egress_api_host="${ANTHROPIC_BASE_URL#*://}"
     egress_api_host="${egress_api_host%%/*}"
     egress_api_host="${egress_api_host##*@}"
+    egress_api_port=""
+    case "$egress_api_host" in *:*) egress_api_port="${egress_api_host##*:}" ;; esac
     egress_api_host="${egress_api_host%:*}"
     if [ "${#egress_api_host}" -gt 253 ] || ! [[ $egress_api_host =~ ^([A-Za-z0-9-]+\.)*[A-Za-z0-9-]+$ ]]; then
       printf 'claude-docker: ANTHROPIC_BASE_URL host %q is not a valid hostname or IPv4 address\n' "$egress_api_host" >&2
       exit 1
     fi
+    if [ -z "$egress_api_port" ]; then
+      case "$ANTHROPIC_BASE_URL" in [Hh][Tt][Tt][Pp]://*) egress_api_port=80 ;; *) egress_api_port=443 ;; esac
+    fi
+    if ! [[ $egress_api_port =~ ^[0-9]{1,5}$ ]] || [ "$((10#$egress_api_port))" -lt 1 ] || [ "$((10#$egress_api_port))" -gt 65535 ]; then
+      printf 'claude-docker: ANTHROPIC_BASE_URL port %q is not a port number (1-65535)\n' "$egress_api_port" >&2
+      exit 1
+    fi
+    egress_api_port=$((10#$egress_api_port))
+    # Hostnames are case-insensitive, and so is squid's dstdomain: without
+    # this, Api.Anthropic.com passes the check below and the endpoint allow
+    # then admits provider traffic. After the validator, so the command
+    # substitution can't strip a newline out of an invalid value; tr, not
+    # ${,,}, for bash 3.2.
+    egress_api_host=$(printf '%s' "$egress_api_host" | tr '[:upper:]' '[:lower:]')
     for p in $EGRESS_MODEL_PROVIDERS; do
       case "$egress_api_host" in "${p#.}"|*"$p")
         echo "claude-docker: --egress-lock blocks model providers' own hosts, and ANTHROPIC_BASE_URL points at one ('$egress_api_host') — set it to your gateway" >&2
@@ -531,11 +549,15 @@ EOF
 
 # Emit the --egress-lock squid config to stdout (see
 # openspec/specs/api-egress-policy). A template, unlike the gh Caddyfile: squid
-# has no env substitution for ACL values. Its only variable input is egress_api_host,
-# which has already passed the hostname validator in validate_opts, so no
-# whitespace, quote, or newline can reach this file.
+# has no env substitution for ACL values. Its only variable inputs are
+# egress_api_host and egress_api_port, which have already passed the hostname
+# and port validators in validate_opts, so no whitespace, quote, or newline can
+# reach this file.
 # Rule order is the security property:
 #  - metadata/link-local and loopback are refused first, above every allow.
+#  - the model endpoint's own port is allowed for the endpoint only, above the
+#    80/443 port rules, so a gateway on e.g. :8443 or LiteLLM's :4000 works
+#    while every other host stays on 80/443.
 #  - the model endpoint is allowed BEFORE the provider deny, then every other
 #    host is allowed: only model traffic is restricted.
 #  - `-n` stops a reverse lookup, so a PTR record can't turn an IP-literal
@@ -566,14 +588,16 @@ acl egress_linklocal dst 169.254.0.0/16 fe80::/10
 acl egress_loopback dst 127.0.0.0/8 0.0.0.0/8 ::1
 EOF
   printf 'acl egress_model_endpoint dstdomain -n %s\n' "$egress_api_host"
+  printf 'acl egress_model_port port %s\n' "$egress_api_port"
   printf 'acl egress_model_providers dstdomain -n %s\n' "$EGRESS_MODEL_PROVIDERS"
   cat <<'EOF'
 
 http_access deny egress_metadata_names
-http_access deny !egress_ports
-http_access deny CONNECT !egress_tls_port
 http_access deny egress_linklocal
 http_access deny egress_loopback
+http_access allow egress_model_endpoint egress_model_port
+http_access deny !egress_ports
+http_access deny CONNECT !egress_tls_port
 http_access allow egress_model_endpoint
 http_access deny egress_model_providers
 http_access allow all

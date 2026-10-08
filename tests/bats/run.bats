@@ -137,6 +137,50 @@ run_script_fn() {
   [[ "$output" == *"--api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY"* ]]
 }
 
+@test "validate_opts: --egress-lock stores the endpoint host lowercased" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  ANTHROPIC_BASE_URL="https://u:p@LLM.Example.EU:443/v1"
+  validate_opts
+  [ "$egress_api_host" = "llm.example.eu" ]
+}
+
+@test "validate_opts: --egress-lock takes the endpoint port, else the scheme default" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  local url want
+  for url in "https://gw.eu/v1=443" "http://litellm/=80" "HTTP://litellm=80" \
+             "https://u:p@gw.eu:8443/v1=8443" "http://litellm:4000=4000" "https://gw.eu:08443=8443"; do
+    want="${url##*=}"
+    ANTHROPIC_BASE_URL="${url%=*}"
+    validate_opts
+    [ "$egress_api_port" = "$want" ] || { echo "$ANTHROPIC_BASE_URL -> '$egress_api_port', want $want"; return 1; }
+  done
+}
+
+@test "gen_egress_squid_conf: the endpoint port is opened for the endpoint only, below the address denies" {
+  egress_api_host=gw.eu egress_api_port=8443
+  run gen_egress_squid_conf
+  [[ "$output" == *$'\nacl egress_model_port port 8443\n'* ]]
+  local rules
+  rules=$(grep '^http_access' <<<"$output")
+  [ "$rules" = "http_access deny egress_metadata_names
+http_access deny egress_linklocal
+http_access deny egress_loopback
+http_access allow egress_model_endpoint egress_model_port
+http_access deny !egress_ports
+http_access deny CONNECT !egress_tls_port
+http_access allow egress_model_endpoint
+http_access deny egress_model_providers
+http_access allow all" ]
+}
+
+@test "validate_opts: --egress-lock refuses a provider host in any case" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  ANTHROPIC_BASE_URL="https://Api.Anthropic.com"
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"points at one ('api.anthropic.com')"* ]]
+}
+
 @test "validate_opts: missing CLAUDE_DOCKER_AZ_CA is fatal" {
   WITH_AZ=1 CLAUDE_DOCKER_AZ_CA="$BATS_TEST_TMPDIR/nope.pem"
   run validate_opts
