@@ -583,10 +583,10 @@ discover_tokens() {
   # wins; else ask host glab for a token, trying GITLAB_HOST alone when set,
   # otherwise the first workspace's origin host and then glab's default host
   # (config.yml's `host`, else gitlab.com). Without a token the in-container
-  # glab falls back to the keyring when config.yml says use_keyring: true, and
-  # there is no D-Bus there (#126). `glab config get token --host` reads the
-  # OS keyring too, which the read-only config mount can't carry; without
-  # --host it never looks at per-host tokens. The origin URL is read as a
+  # glab calls the API unauthenticated, which public projects mask (#126); its
+  # config.yml has the keyring off (stage_glab_config). `glab config get token
+  # --host` reads the OS keyring, which the read-only config mount can't carry;
+  # without --host it never looks at per-host tokens. The origin URL is read as a
   # plain file (no includes) from the repo's common git dir, so worktree and
   # submodule workspaces (.git is a pointer file) resolve to the main repo /
   # module config; symlinked .git or config is skipped, as in the git-config
