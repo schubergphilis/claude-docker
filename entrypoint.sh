@@ -60,9 +60,7 @@ install_cas() {
 # below Ubuntu's default 1000) don't trigger a warning.
 ensure_user() {
   local uid=$1 gid=$2
-  if getent passwd claude >/dev/null 2>&1; then
-    return 0
-  fi
+  getent passwd claude >/dev/null 2>&1 && return 0
   getent group "$gid" >/dev/null 2>&1 \
     || groupadd -o -g "$gid" claude \
     || return
@@ -94,17 +92,6 @@ chown_volumes() {
   fi
 }
 
-# runuser uses setresuid()/setresgid() — needs CAP_SETUID and CAP_SETGID
-# at this point (we're still UID 0). The kernel clears effective,
-# permitted, and ambient caps on the UID→non-zero transition; the bounding
-# set retains the setup caps but is inert under `no-new-privileges`. So
-# claude itself runs with no usable capabilities downstream — a stricter
-# posture than the previous "root + DAC_OVERRIDE for the entire session"
-# model where claude held DAC_OVERRIDE for its whole lifetime.
-drop_privileges() {
-  exec runuser -u claude -- "$@"
-}
-
 main() {
   set -euo pipefail
   local uid="${HOST_UID:-0}" gid="${HOST_GID:-0}"
@@ -119,7 +106,14 @@ main() {
   ensure_user "$uid" "$gid" || return
   # Scoped to the walk: the session itself keeps the caller's locale.
   LC_ALL=C chown_volumes "$uid" "$gid" || return
-  drop_privileges "$@"
+  # runuser uses setresuid()/setresgid() — needs CAP_SETUID and CAP_SETGID
+  # at this point (we're still UID 0). The kernel clears effective,
+  # permitted, and ambient caps on the UID→non-zero transition; the bounding
+  # set retains the setup caps but is inert under `no-new-privileges`. So
+  # claude itself runs with no usable capabilities downstream — a stricter
+  # posture than the previous "root + DAC_OVERRIDE for the entire session"
+  # model where claude held DAC_OVERRIDE for its whole lifetime.
+  exec runuser -u claude -- "$@"
 }
 
 if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
