@@ -315,3 +315,56 @@ record_passes() {
   [ "$status" -eq 0 ]
   [[ "$output" == *"Cell PASS: uid=1000 gid=1000 optins='az'"* ]]
 }
+
+# --- cleanup and setup failures --------------------------------------------
+
+@test "cleanup removes the temp dir and the cell's volumes" {
+  setup_cell
+  fake_docker_bin
+  docker() { echo "$*" >> "${BATS_TEST_TMPDIR}/docker.calls"; }
+  cleanup
+  [ ! -e "$TMPROOT" ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/docker.calls")" = "volume rm smoke-test-$$-root
+volume rm smoke-test-$$-home" ]
+}
+
+@test "cleanup with nothing set up does nothing" {
+  docker() { echo "$*" >> "${BATS_TEST_TMPDIR}/docker.calls"; }
+  rm() { echo "rm $*" >> "${BATS_TEST_TMPDIR}/docker.calls"; }
+  unset TMPROOT VOL_NAME
+  cleanup
+  [ ! -e "${BATS_TEST_TMPDIR}/docker.calls" ]
+}
+
+# A copy of smoke/ with only the named files, so setup_workspace can miss one.
+partial_repo() {
+  local repo="${BATS_TEST_TMPDIR}/repo" f
+  mkdir -p "$repo/smoke"
+  cp "${BATS_TEST_DIRNAME}/../../smoke/smoke.sh" "$repo/smoke/"
+  for f in "$@"; do cp "${BATS_TEST_DIRNAME}/../../$f" "$repo/$f"; done
+  echo "$repo/smoke/smoke.sh"
+}
+
+@test "setup_workspace dies without assert-in-container.sh" {
+  local sut
+  sut=$(partial_repo run.sh)
+  run bash -c 'source "$1"; parse_args; setup_workspace' _ "$sut"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"assert-in-container.sh not found"* ]]
+}
+
+@test "setup_workspace dies without run.sh" {
+  local sut
+  sut=$(partial_repo smoke/assert-in-container.sh)
+  run bash -c 'source "$1"; parse_args; setup_workspace' _ "$sut"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"run.sh not found"* ]]
+}
+
+@test "write_docker_shim dies without docker on PATH" {
+  setup_cell
+  mkdir -p "${BATS_TEST_TMPDIR}/nodocker"
+  PATH="${BATS_TEST_TMPDIR}/nodocker" run write_docker_shim
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docker not found on PATH"* ]]
+}
