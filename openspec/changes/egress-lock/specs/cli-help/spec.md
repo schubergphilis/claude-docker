@@ -4,21 +4,23 @@
 
 The help output SHALL include a one-line description for each of the following, grouped so wrapper flags are visually distinct from the `--` passthrough contract:
 
-- Wrapper flags: `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--api`, `--report`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`/`--help`. The `--api` description SHALL state that it requires `ANTHROPIC_BASE_URL`, locks model traffic to that endpoint and logs every connection.
+- Wrapper flags: `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--api`, `--egress-lock`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`/`--help`. The `--egress-lock` description SHALL state that it requires `--api` and `ANTHROPIC_BASE_URL`, locks model traffic to that endpoint and logs every connection.
 - The `--` separator and its passthrough semantics for `claude` flags.
 - Positional workspace arguments and the default-to-`$PWD` behaviour.
 - The `CLAUDE_DOCKER_TMUX` environment variable and its accepted values (`1`, `cc`).
 - The `CLAUDE_DOCKER_CONFIG_DIR` environment variable and its relationship to `--claude-dir`.
 - The `CLAUDE_DOCKER_API_CA` environment variable and its relationship to `--api`.
-- The `XDG_STATE_HOME` environment variable as the location of the saved `--api` egress logs.
+- The `CLAUDE_DOCKER_AZ_CA` environment variable and its relationship to `--az`.
+- The `XDG_STATE_HOME` environment variable as the location of the saved `--egress-lock` logs.
 - A brief note that `settings.docker.json` is mounted as `settings.json` in the container.
 
 #### Scenario: All wrapper flags documented
 
 - **WHEN** user runs `claude-docker --help`
-- **THEN** the output contains each of `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--api`, `--report`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`, `--help`, `--`, `CLAUDE_DOCKER_TMUX`, `CLAUDE_DOCKER_CONFIG_DIR`, `CLAUDE_DOCKER_API_CA`, `XDG_STATE_HOME`, and `settings.docker.json`
+- **THEN** the output contains each of `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--api`, `--egress-lock`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`, `--help`, `--`, `CLAUDE_DOCKER_TMUX`, `CLAUDE_DOCKER_CONFIG_DIR`, `CLAUDE_DOCKER_API_CA`, `CLAUDE_DOCKER_AZ_CA`, `XDG_STATE_HOME`, and `settings.docker.json`
 
 #### Scenario: Each wrapper flag has an explanation
 
 - **WHEN** user runs `claude-docker --help`
 - **THEN** every wrapper flag listed in the output is followed on the same or next line by a human-readable description of what it does (not just the flag name)
+
