@@ -86,6 +86,13 @@ preflight() {
     exit 1
   fi
 
+  # kill_tree walks the process tree with it; without it Ctrl-C would leave
+  # run.sh and its docker clients running.
+  if ! command -v pgrep >/dev/null 2>&1; then
+    echo "FATAL: 'pgrep' not found (procps) — required to stop background sessions on exit." >&2
+    exit 1
+  fi
+
   TARGET_IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
   if ! docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
     echo "FATAL: image '$TARGET_IMAGE' not found — build it first (docker build -t claude-code:local .). CI is expected to build it before running this harness." >&2
@@ -166,8 +173,7 @@ CLEANUP_DONE=0
 # "$SCRATCH/...", which would otherwise resolve under /.
 setup_scratch() {
   local root="$HOME/.cache/claude-docker"
-  if ! mkdir -p "$root" || ! SCRATCH=$(mktemp -d "$root/ghtest.XXXXXX") \
-     || [ -z "$SCRATCH" ] || [ ! -d "$SCRATCH" ]; then
+  if ! mkdir -p "$root" || ! SCRATCH=$(mktemp -d "$root/ghtest.XXXXXX"); then
     echo "FATAL: could not create a scratch dir under $root" >&2
     SCRATCH=""
     return 1
@@ -209,6 +215,7 @@ kill_tree() {
 
 # shellcheck disable=SC2329  # invoked indirectly via `trap cleanup EXIT` below
 cleanup() {
+  local rc=$?
   [ "$CLEANUP_DONE" = "1" ] && return 0
   CLEANUP_DONE=1
   local pid
@@ -225,9 +232,10 @@ cleanup() {
   # Keep the scratch dir (session transcripts, captured sidecar/mock logs,
   # results files) whenever anything failed — it's the only debugging
   # evidence, and several artifacts in it can't be regenerated after the
-  # --rm containers are gone.
-  if [ "$TOTAL_FAIL" -gt 0 ]; then
-    echo "Failures recorded — keeping scratch dir for debugging: $SCRATCH"
+  # --rm containers are gone. A non-zero exit counts too: under set -e an
+  # unexpected error, or Ctrl-C, can end the run before any FAIL is recorded.
+  if [ "$TOTAL_FAIL" -gt 0 ] || [ "$rc" -ne 0 ]; then
+    [ -z "$SCRATCH" ] || echo "Run failed — keeping scratch dir for debugging: $SCRATCH"
   elif [ -n "$SCRATCH" ]; then
     rm -rf "$SCRATCH" || true
   fi
