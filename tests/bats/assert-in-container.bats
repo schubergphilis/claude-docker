@@ -11,7 +11,7 @@ setup() {
   API_CA="${BATS_TEST_TMPDIR}/api.crt"
   CA_BUNDLE="${BATS_TEST_TMPDIR}/bundle.crt"
   mkdir -p "$ROOT_HOME"
-  unset EXPECT_OPTINS AWS_PROFILE GITLAB_TOKEN TF_TOKEN_app_terraform_io \
+  unset EXPECT_OPTINS EXPECT_EPHEMERAL AWS_PROFILE GITLAB_TOKEN TF_TOKEN_app_terraform_io \
     AZURE_DEVOPS_EXT_PAT ANTHROPIC_BASE_URL EXPECT_SETTINGS EXPECT_SETTINGS_SENTINEL
   # A writable fixture can't produce EROFS; that check needs a real :ro mount.
   assert_write_fails_ro() { pass "$1: stubbed"; }
@@ -159,21 +159,48 @@ status_fixture() {
   [[ "$output" == *done* ]]
 }
 
-# --- check_aws_state_masking -------------------------------------------------
+# --- check_mask_set ----------------------------------------------------------
 
-@test "check_aws_state_masking: tmpfs mask matched by exact mountpoint" {
-  mkdir -p "${ROOT_HOME}/.aws"
-  echo "tmpfs ${ROOT_HOME}/.aws tmpfs rw 0 0" > "$PROC_MOUNTS"
-  run check_aws_state_masking
-  [[ "$output" == *"PASS: masked-aws-dir-mount"* ]]
+# One tmpfs line per mountpoint, plus a non-tmpfs mount under /root to ignore.
+write_mounts() {
+  : > "$PROC_MOUNTS"
+  local m
+  for m in "$@"; do echo "tmpfs $m tmpfs rw 0 0" >> "$PROC_MOUNTS"; done
+  echo "/dev/vda1 /root/.claude ext4 rw 0 0" >> "$PROC_MOUNTS"
 }
 
-@test "check_aws_state_masking: a mountpoint that only regex-matches fails" {
-  mkdir -p "${ROOT_HOME}/.aws"
-  # '.' in the path would match any char as an ERE.
-  echo "tmpfs ${ROOT_HOME}/xaws tmpfs rw 0 0" > "$PROC_MOUNTS"
-  run check_aws_state_masking
-  [[ "$output" == *"FAIL: masked-aws-dir-mount"* ]]
+@test "check_mask_set: no opt-ins expects every mask" {
+  write_mounts /root/.config/gh /root/.config/glab-cli /root/.terraform.d /root/.azure /root/.aws
+  run check_mask_set
+  [[ "$output" == "PASS: mask-set:"* ]]
+}
+
+@test "check_mask_set: aws narrows its mask to the cli cache" {
+  EXPECT_OPTINS=aws,glab
+  write_mounts /root/.config/gh /root/.terraform.d /root/.azure /root/.aws/cli/cache
+  run check_mask_set
+  [[ "$output" == "PASS: mask-set:"* ]]
+}
+
+@test "check_mask_set: a dropped mask fails" {
+  write_mounts /root/.config/gh /root/.terraform.d /root/.azure /root/.aws
+  run check_mask_set
+  [[ "$output" == "FAIL: mask-set:"* ]]
+}
+
+@test "check_mask_set: an extra mask fails" {
+  EXPECT_EPHEMERAL=1
+  write_mounts /root/.aws
+  run check_mask_set
+  [[ "$output" == "FAIL: mask-set:"* ]]
+}
+
+@test "check_mask_set: a mountpoint that only regex-matches is not a mask" {
+  EXPECT_EPHEMERAL=1
+  # '.' would match any char as an ERE.
+  write_mounts /rootxaws
+  run check_mask_set
+  [[ "$output" == "PASS: mask-set:"* ]]
 }
 
 # --- check_api ---------------------------------------------------------------
@@ -229,6 +256,7 @@ stub_checks() {
   check_credentials() { pass c6; }
   check_aws_state_masking() { pass c7; }
   check_api() { pass c8; }
+  check_mask_set() { pass c9; }
 }
 
 @test "main exits 1 with RESULT: FAIL when any check fails" {
@@ -236,7 +264,7 @@ stub_checks() {
   check_settings() { fail settings; }
   run main
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Results: 8 passed, 1 failed"* ]]
+  [[ "$output" == *"Results: 9 passed, 1 failed"* ]]
   [[ "$output" == *"RESULT: FAIL" ]]
   [[ "$output" != *"RESULT: PASS"* ]]
 }
