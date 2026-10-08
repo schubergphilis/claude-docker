@@ -13,6 +13,10 @@ jobs:
           - testing-type: lint-action
           - testing-type: lint-commit
           - testing-type: yamllint
+          # Blocking: README's reference material lives in docs/, so a link now
+          # breaks on a heading rename in a file the author wasn't looking at.
+          # Offline via lychee.toml, so only local paths and #fragments.
+          - testing-type: lint-links
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -20,10 +24,10 @@ jobs:
           persist-credentials: false
       # The previous ref was the zizmor-advanced-security feature branch, which
       # has since been merged and deleted, so every run failed to resolve the
-      # action. Pinned to v0.6.1 by commit SHA rather than by tag name: this
+      # action. Pinned by commit SHA rather than by tag name: this
       # job's own zizmor audit reports a tag ref as unpinned-uses, and a tag is
       # mutable. Same style as the actions/checkout pin above.
       # yamllint disable rule:line-length
-      - uses: schubergphilis/mcvs-general-action@5be6cc746008ec82646e52cf7e07770a7ed7c7eb # v0.7.0
+      - uses: schubergphilis/mcvs-general-action@5a7badc4df54a0f496bcaa033a840fbd22a1cf00 # v0.7.2
         with:
           testing-type: ${{ matrix.args.testing-type }}

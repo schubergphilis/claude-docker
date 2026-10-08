@@ -105,10 +105,12 @@ The documentation SHALL group these by whether they add a capability the image d
 
 For the last of these, the documentation SHALL state that naming a package manager or a runtime provisions that release rather than installing the npm package of the same name; that the version is selected by the caller or by a workspace field rather than pinned in the image; that pnpm resolves these through npm's trusted package-manager registries and verifies an npm-published one against npm's signature for its exact version before executing it, so provenance is checked even though the version is not pinned; and that no refusal switch equivalent to `GOTOOLCHAIN=local` is documented upstream.
 
+These scenarios describe what the documentation says, not which file says it.
+
 #### Scenario: README threat model includes runtime-fetch bullet
 
-- **WHEN** a reader inspects `claude-docker/README.md` § Threat model
-- **THEN** the section contains a bullet covering `npx`, `pnpm dlx`, `uvx`, and `tfenv install` as runtime code-fetch primitives
+- **WHEN** a reader inspects the project's threat-model documentation
+- **THEN** it contains a bullet covering `npx`, `pnpm dlx`, `uvx`, and `tfenv install` as runtime code-fetch primitives
 - **AND** the bullet identifies `uvx` (PyPI) and `tfenv install` (HashiCorp releases) as runtime-fetch primitives whose downloaded binaries are not pinned in the image
 - **AND** the bullet names `pnpx`, `pnx`, and `pn dlx` as aliases of `pnpm dlx`, so a reader does not read them as separate, undocumented commands
 
@@ -123,14 +125,14 @@ For the last of these, the documentation SHALL state that naming a package manag
 
 #### Scenario: persistence of provisioned runtimes is documented
 
-- **GIVEN** `tfenv install` writes to `/opt/tfenv/versions/`, which the README notes does not persist across `docker run --rm`
+- **GIVEN** `tfenv install` writes to `/opt/tfenv/versions/`, which the documentation notes does not persist across `docker run --rm`
 - **WHEN** a reader compares that to pnpm's provisioning
 - **THEN** the documentation states that provisioned runtimes and package managers are stored under the container's home directory — in pnpm's package-manager store and cache — which is inside the `claude-code-root` named volume
 - **AND** it states that they therefore survive container exit and are reused by later sessions, unlike the `tfenv install` downloads
 
 #### Scenario: bundled CLIs list includes new tools
 
-- **WHEN** a reader inspects the preinstalled-CLI list at the top of `claude-docker/README.md`
+- **WHEN** a reader inspects the preinstalled-CLI list at the top of the project's front-page documentation
 - **THEN** the line names `uv`, `pnpm`, and `tfenv` alongside the existing entries
 - **AND** alias bins that ship with those tools (`uvx`; `pnpx`, `pn`, `pnx`) are documented under the command they alias rather than enumerated in that line, which lists one entry per tool
 
@@ -155,10 +157,12 @@ When `--registry` is set, `run.sh`:
 - SHALL mount read-only, and only when present on the host (a missing file is a
   silent no-op), each of: the host npm config (`~/.npmrc`, or the file named by
   `npm_config_userconfig` / `NPM_CONFIG_USERCONFIG` when set) at `/root/.npmrc`,
-  `~/.config/uv/uv.toml` at `/root/.config/uv/uv.toml`, and the
-  platform-appropriate pip config — `~/.config/pip/pip.conf` on Linux or
-  `~/Library/Application Support/pip/pip.conf` on macOS — at
-  `/root/.config/pip/pip.conf`.
+  the platform-appropriate uv config — `%APPDATA%\uv\uv.toml` on Windows (Git
+  Bash), `~/.config/uv/uv.toml` on Linux/macOS and as the fallback everywhere —
+  at `/root/.config/uv/uv.toml`, and the platform-appropriate pip config —
+  `~/.config/pip/pip.conf` on Linux, `~/Library/Application Support/pip/pip.conf`
+  on macOS, or `%APPDATA%\pip\pip.ini` on Windows (Git Bash; same INI format
+  under pip's Windows file name) — at `/root/.config/pip/pip.conf`.
 - SHALL NOT mount `~/.netrc`. Because netrc is a machine-keyed store that
   commonly holds credentials for hosts unrelated to the package registry,
   forwarding the whole file into a full-egress container is too broad; netrc-
@@ -230,6 +234,14 @@ own native config.
 
 - **WHEN** the user runs `claude-docker --registry ~/repo`
 - **THEN** the statusline `docker:` prefix includes `registry` in the opt-in tag list
+
+#### Scenario: --registry finds Windows uv and pip config under %APPDATA%
+
+- **GIVEN** `run.sh` runs under Git Bash on Windows
+- **AND** the host has `%APPDATA%\uv\uv.toml` and `%APPDATA%\pip\pip.ini`
+- **WHEN** the user runs `claude-docker --registry ~/repo`
+- **THEN** `/root/.config/uv/uv.toml` inside the container contains the host `uv.toml`
+- **AND** `/root/.config/pip/pip.conf` inside the container contains the host `pip.ini`
 
 ### Requirement: pnpm runs its native binary, asserted at build time
 

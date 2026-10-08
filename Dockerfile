@@ -38,10 +38,11 @@ ARG TASK_VERSION=3.53.1
 # Every other tool's version (and per-arch sha256) is a GENERATED pin under
 # pins/<tool>.env — NOT an ARG. Each install RUN below COPYs and sources its
 # fragment, so `docker build .` is reproducible from the committed lockfile with
-# no --build-arg. Refresh them with uv run update_pins.py (see README): it selects
-# the newest stable version already past its soak window (7 days; 1 day for
-# claude-code) and recomputes the hashes. The soak policy that used to be hand-applied here now lives in that
-# script. To override a single tool: uv run update_pins.py --pin <tool>=<version>.
+# no --build-arg. Refresh them with uv run update_pins.py (see
+# docs/maintenance.md): it selects the newest stable version already past its
+# soak window (7 days; 1 day for claude-code) and recomputes the hashes. The
+# soak policy that used to be hand-applied here now lives in that script. To
+# override a single tool: uv run update_pins.py --pin <tool>=<version>.
 
 # Make apt runnable under --cap-drop ALL at runtime. Two pieces:
 #  1. APT::Sandbox::User "root" stops the http method from setgroups()→_apt
@@ -73,11 +74,8 @@ RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
 # the base image's own Cmd is plain /bin/bash, and claude-docker sets its
 # own tini + runuser + claude entrypoint regardless. Its statically-linked
 # stdlib is the source of all 8 pebble findings; removal is the only fix
-# since no rebuild against a patched stdlib exists yet. Purges an owning
-# package instead, in case a future base image ships it that way.
-RUN owner="$(dpkg -S /usr/bin/pebble 2>/dev/null | cut -d: -f1 || true)" \
- && if [ -n "$owner" ]; then apt-get purge -y "$owner"; else rm -f /usr/bin/pebble; fi \
- && ! test -e /usr/bin/pebble
+# since no rebuild against a patched stdlib exists yet.
+RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
@@ -352,6 +350,16 @@ set -s extended-keys always
 set -as terminal-features "*:extkeys"
 EOF
 
+# Ghostty sets TERM=xterm-ghostty, which run.sh forwards. ncurses-term ships
+# Ghostty's entry only as `ghostty` (Debian's build has no xterm-ghostty
+# alias), so tput, less and tmux would fail to look up the terminal. Link
+# the name to the packaged entry rather than vendoring Ghostty's own
+# terminfo: the bytes stay those of the signed Ubuntu package. infocmp fails
+# the build if the lookup doesn't resolve. Late layer so it doesn't
+# invalidate the downloads above.
+RUN ln -sfn ../g/ghostty /usr/share/terminfo/x/xterm-ghostty \
+ && infocmp xterm-ghostty >/dev/null
+
 # Go environment. Spelled with a literal /root rather than ${HOME}: Docker does
 # not define HOME during the build, so "${HOME}/go" would expand to "/go". /root
 # is correct for both paths through the entrypoint — the legacy root fallback,
@@ -382,7 +390,7 @@ ENV GOBIN=/root/go/bin \
 # system binary (git, gh, aws, …) on a later run. Tools installed into either
 # stay runnable by name; only deliberate overrides are given up. This covers
 # binary shadowing only — rc/config files on the same volume still carry a
-# compromise into later sessions (README "Threat model").
+# compromise into later sessions (docs/security.md "Threat model").
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     DISABLE_AUTOUPDATER=1 \
     IS_SANDBOX=1 \

@@ -41,6 +41,14 @@ jobs:
         # no third-party action (the suite imports only the standard library).
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
+      - name: BATS unit tests — shell scripts
+        # Ubuntu's packaged bats; the suites stub docker and friends, so
+        # the tests themselves need no daemon or network.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bats
+          bats tests/bats
+
       - name: Hadolint Dockerfile
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:
@@ -57,12 +65,6 @@ jobs:
         continue-on-error: true
         with:
           globs: "**/*.md"
-
-      - name: Broken relative links (advisory, offline)
-        uses: lycheeverse/lychee-action@e7477775783ea5526144ba13e8db5eec57747ce8 # v2.9.0
-        continue-on-error: true
-        with:
-          args: --offline --include-fragments --no-progress .
 
   docker-build:
     name: Docker build (validate, no push)
