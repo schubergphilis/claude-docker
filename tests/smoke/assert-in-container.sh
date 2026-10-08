@@ -573,7 +573,7 @@ check_settings() {
     pass "settings-content: settings.json carries expected sentinel '$sentinel'"
   else
     # Size only: settings.json may hold tokens, and this lands in the CI log.
-    fail "settings-content: '$sentinel' not found in $settings ($(wc -c < "$settings" 2>/dev/null || echo '<unreadable>') bytes)"
+    fail "settings-content: '$sentinel' not found in $settings ($(wc -c 2>/dev/null < "$settings" || echo '<unreadable>') bytes)"
   fi
 
   # The reason settings are copied instead of bind-mounted: Claude Code saves
