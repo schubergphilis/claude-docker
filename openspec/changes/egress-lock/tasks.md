@@ -30,20 +30,22 @@
 
 ## 6. Windows validation (manual, real host, before archive)
 
-Run on a Windows 11 host with rootless podman (`podman machine`, WSL2 backend), from PowerShell 7 through `claude-docker.ps1`, against an image built from this branch. Record the commit, podman version, network backend and squid version.
+Run on a Windows 11 host with rootless podman (`podman machine`, WSL2 backend), from PowerShell 7 through `claude-docker.ps1`, against an image built from this branch: commit `2516547`, podman 6.0.2 (client and machine), network backend netavark, squid `7.2-2ubuntu2.2`. All sessions used `--ephemeral`, `ANTHROPIC_BASE_URL=https://example.com` and a fake token. The evidence (session `.log` / `.meta` files, `results-*.txt`, transcript) is kept by the tester.
 
-- [ ] 6.1 Image builds with `podman build --format docker`; squid version recorded.
-- [ ] 6.2 Startup refusals: `--egress-lock` without `--api`, no `ANTHROPIC_BASE_URL`, a provider endpoint, an invalid hostname. Each exits 1 and leaves no `claude-egress-*` network.
-- [ ] 6.3 Plain cell: `assert-in-container.sh` with `EXPECT_EGRESS=1` reports `RESULT: PASS` (UID 1000), including `egress-bypass` and `egress-dns` on podman's network stack.
-- [ ] 6.4 Host-side: the saved `.log` has the `CONNECT example.org:443` tunnel and the denies; `.meta` has 8 keys and `endpoint=example.com`; no `claude-egress-*` / `claude-gh-*` container or network remains.
-- [ ] 6.5 `--gh` cell (fake token): `RESULT: PASS` including `egress-gh`; nothing left behind.
-- [ ] 6.6 Manual probes: proxy env; metadata by name and plain HTTP to a non-80 port refused; IPv6 and `host.containers.internal` have no route; cache-manager response recorded.
-- [ ] 6.7 Known issues reproduced: `https://Api.Anthropic.com` starts and provider `CONNECT` is allowed; `https://example.com:8443` starts and the gateway `CONNECT` is refused.
+- [x] 6.1 Image builds with `podman build --format docker`; squid version recorded. (verified: squid `7.2-2ubuntu2.2`, the package version affected by CVE-2026-61642)
+- [x] 6.2 Startup refusals: `--egress-lock` without `--api`, no `ANTHROPIC_BASE_URL`, a provider endpoint, an invalid hostname. Each exits 1 and leaves no `claude-egress-*` network. (verified: all four exit 1 with the expected message; `podman network ls` lists none)
+- [x] 6.3 Plain cell: `assert-in-container.sh` with `EXPECT_EGRESS=1` reports `RESULT: PASS` (UID 1000), including `egress-bypass` and `egress-dns` on podman's network stack. (verified: 22 passed, 0 failed, exit 0. The entrypoint prints `find: '/root/.claude': No such file or directory` under `--ephemeral`; it comes from the unchanged entrypoint, not this change)
+- [x] 6.4 Host-side: the saved `.log` has the `CONNECT example.org:443` tunnel and the denies; `.meta` has 8 keys and `endpoint=example.com`; no `claude-egress-*` / `claude-gh-*` container or network remains. (verified: `TCP_TUNNEL/200 … CONNECT example.org:443` plus five `TCP_DENIED/403` lines, `.meta` complete. Nothing from the session remained; an unrelated `claude-gh-proxy-*` from an earlier session, running for 5 hours, was correctly left alone by the prune)
+- [x] 6.5 `--gh` cell (fake token): `RESULT: PASS` including `egress-gh`; nothing left behind. (verified: 23 passed, 0 failed; `egress-gh` got HTTP 401 from GitHub through squid and the gh sidecar)
+- [x] 6.6 Manual probes: proxy env; metadata by name and plain HTTP to a non-80 port refused; IPv6 and `host.containers.internal` have no route; cache-manager response recorded. (verified: four proxy vars, `no_proxy` loopback only; `metadata.google.internal` and `http://example.com:8080/` → 403; proxy-unaware `example.org` fails DNS (rc 6), IPv6 and `host.containers.internal` fail to connect (rc 7), `getent hosts` rc 2. A refused `CONNECT` reports `http_code` 000, `http_connect` 403. Cache manager not reachable: `/squid-internal-mgr/info` sent directly to squid and through it by its `visible_hostname` both got 403 with squid's error page, not manager output. The by-name request was refused by the port rule, so the protection comes from that rule, not a manager deny (7.1))
+- [x] 6.7 Known issues reproduced: `https://Api.Anthropic.com` starts and provider `CONNECT` is allowed; `https://example.com:8443` starts and the gateway `CONNECT` is refused. (verified: with `Api.Anthropic.com`, `CONNECT api.anthropic.com` → 200, so model traffic reaches the provider under the lock (7.2). With `:8443`, the gateway `CONNECT` → 403, and the summary reads `egress proxy blocked: example.com` without the port (7.3, 7.6))
 
 ## 7. Review findings (before archive)
 
-- [ ] 7.1 Decide the proxy (design.md Open Question 1); if squid stays, add `http_access deny manager`.
+- [ ] 7.1 Decide the proxy (design.md Open Question 1). If squid stays, add `http_access deny manager` as hardening: today the manager is only unreachable because the port rule refuses 3128 (6.6).
 - [ ] 7.2 Lowercase the endpoint host before the provider check; add `https://Api.Anthropic.com` to the refused cases.
 - [ ] 7.3 Handle the endpoint port (refuse non-443 at startup, or allow it for the endpoint only); fix `test_gateway_passes`.
 - [ ] 7.4 Decide on enforcing the endpoint vs narrowing the claim (Open Question 2), and align the README row, `--help` text and `docs/auth.md` intro.
-- [ ] 7.5 `--gh` smoke probe asserts `http_connect` = 200 and uses an endpoint that proves token injection.
+- [ ] 7.5 `--gh` smoke probe uses an endpoint that proves token injection (`/zen` answers without one). Its status check is sound: a refused `CONNECT` reports `http_code` 000 (6.6), so the accepted 401/403 can only come from GitHub.
+- [ ] 7.6 End-of-session summary keeps `host:port` for non-443 denies: a refused `CONNECT example.com:8443` is printed as `example.com`, which reads as the gateway being blocked (6.7).
+- [ ] 7.7 `smoke/egress.sh` checks for leftovers per session, not every `claude-egress-*` / `claude-gh-*` on the machine: another session's live sidecar fails it (seen in 6.4).
