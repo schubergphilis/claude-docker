@@ -38,7 +38,7 @@ The internal network, the outbound network and the proxy sidecar SHALL be named 
 
 ### Requirement: Model traffic reaches only the configured endpoint
 
-Under `--egress-lock`, `run.sh` SHALL exit 1 before creating any container resource when `ANTHROPIC_BASE_URL` is unset or empty, when its host is not a hostname or IPv4 address of at most 253 characters made of letters, digits, `-` and `.`, or when its host is `anthropic.com`, `claude.ai` or `claude.com` or a subdomain of one. The proxy SHALL allow the `ANTHROPIC_BASE_URL` host, then deny `.anthropic.com`, `.claude.ai` and `.claude.com`, then allow every other destination that the metadata, loopback and port rules permit. HTTPS SHALL be proxied by `CONNECT` without TLS interception.
+Under `--egress-lock`, `run.sh` SHALL exit 1 before creating any container resource when `ANTHROPIC_BASE_URL` is unset or empty, when its host is not a hostname or IPv4 address of at most 253 characters made of letters, digits, `-` and `.`, when its port is not a number from 1 to 65535, or when its host, compared case-insensitively, is `anthropic.com`, `claude.ai` or `claude.com` or a subdomain of one. The endpoint's port is the one in `ANTHROPIC_BASE_URL`, or the scheme's default (80 for `http`, 443 otherwise). The proxy SHALL allow the `ANTHROPIC_BASE_URL` host on the endpoint's port, and on 80/443, then deny `.anthropic.com`, `.claude.ai` and `.claude.com`, then allow every other destination that the metadata, loopback and port rules permit. HTTPS SHALL be proxied by `CONNECT` without TLS interception.
 
 #### Scenario: No endpoint
 
@@ -50,6 +50,24 @@ Under `--egress-lock`, `run.sh` SHALL exit 1 before creating any container resou
 - **GIVEN** `ANTHROPIC_BASE_URL=https://api.anthropic.com`
 - **WHEN** the user runs `claude-docker --api --egress-lock ~/repo`
 - **THEN** `run.sh` exits 1, and no container starts
+
+#### Scenario: Endpoint is a provider host in another case
+
+- **GIVEN** `ANTHROPIC_BASE_URL=https://Api.Anthropic.com`
+- **WHEN** the user runs `claude-docker --api --egress-lock ~/repo`
+- **THEN** `run.sh` exits 1, and no container starts
+
+#### Scenario: Endpoint on a non-default port
+
+- **GIVEN** an `--egress-lock` session with `ANTHROPIC_BASE_URL=https://gw.example.eu:8443`
+- **WHEN** the agent requests `https://gw.example.eu:8443/` and `https://example.org:8443/` through the proxy
+- **THEN** the proxy allows the `CONNECT gw.example.eu:8443` and answers `CONNECT example.org:8443` with 403
+
+#### Scenario: Invalid endpoint port
+
+- **GIVEN** `ANTHROPIC_BASE_URL=https://gw.example.eu:65536`
+- **WHEN** the user runs `claude-docker --api --egress-lock ~/repo`
+- **THEN** `run.sh` exits 1 with `is not a port number`
 
 #### Scenario: Endpoint smuggles squid config
 
@@ -94,7 +112,7 @@ A client inside the agent container that ignores proxy settings SHALL NOT reach 
 
 ### Requirement: Metadata and loopback destinations are denied by resolved address
 
-The proxy SHALL deny destinations in `169.254.0.0/16`, `fe80::/10`, `127.0.0.0/8`, `0.0.0.0/8` and `::1`, and the hostnames `metadata.google.internal` and `metadata.azure.internal`, above every allow rule. These checks SHALL apply to the address the proxy resolves for a hostname, not just to IP-literal requests. Private ranges SHALL be reachable. The proxy SHALL permit only ports 80 and 443, and `CONNECT` only to 443.
+The proxy SHALL deny destinations in `169.254.0.0/16`, `fe80::/10`, `127.0.0.0/8`, `0.0.0.0/8` and `::1`, and the hostnames `metadata.google.internal` and `metadata.azure.internal`, above every allow rule. These checks SHALL apply to the address the proxy resolves for a hostname, not just to IP-literal requests. Private ranges SHALL be reachable. The proxy SHALL permit only ports 80 and 443, and `CONNECT` only to 443, except that the `ANTHROPIC_BASE_URL` host is also reachable on the endpoint's port; that exception SHALL come after the metadata, link-local and loopback denies.
 
 #### Scenario: Cloud metadata
 
@@ -108,6 +126,7 @@ The proxy SHALL deny destinations in `169.254.0.0/16`, `fe80::/10`, `127.0.0.0/8
 
 #### Scenario: Non-443 CONNECT
 
+- **GIVEN** `ANTHROPIC_BASE_URL=https://example.com`
 - **WHEN** a request for `https://example.com:8443/` is sent through the proxy
 - **THEN** the proxy answers 403
 

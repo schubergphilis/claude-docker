@@ -43,8 +43,8 @@ Run on a Windows 11 host with rootless podman (`podman machine`, WSL2 backend), 
 ## 7. Review findings (before archive)
 
 - [ ] 7.1 Decide the proxy (design.md Open Question 1). If squid stays, add `http_access deny manager` as hardening: today the manager is only unreachable because the port rule refuses 3128 (6.6).
-- [ ] 7.2 Lowercase the endpoint host before the provider check; add `https://Api.Anthropic.com` to the refused cases.
-- [ ] 7.3 Handle the endpoint port (refuse non-443 at startup, or allow it for the endpoint only); fix `test_gateway_passes`.
+- [x] 7.2 Lowercase the endpoint host before the provider check; add `https://Api.Anthropic.com` to the refused cases. (`validate_opts` lowercases the validated host, so the squid config and `.meta` get it lowercased too; unit and bats cases added, and both fail without the fix)
+- [x] 7.3 Handle the endpoint port (refuse non-443 at startup, or allow it for the endpoint only); fix `test_gateway_passes`. (allowed for the endpoint only: `validate_opts` parses and validates the port, defaulting by scheme, and squid allows the endpoint on that port below the address denies. `test_gateway_passes` was already right under this choice; unit, bats and rule-order tests added. Still to check end to end: a smoke cell with a non-443 endpoint)
 - [ ] 7.4 Decide on enforcing the endpoint vs narrowing the claim (Open Question 2), and align the README row, `--help` text and `docs/auth.md` intro.
 - [ ] 7.5 `--gh` smoke probe uses an endpoint that proves token injection (`/zen` answers without one). Its status check is sound: a refused `CONNECT` reports `http_code` 000 (6.6), so the accepted 401/403 can only come from GitHub.
 - [ ] 7.6 End-of-session summary keeps `host:port` for non-443 denies: a refused `CONNECT example.com:8443` is printed as `example.com`, which reads as the gateway being blocked (6.7).
