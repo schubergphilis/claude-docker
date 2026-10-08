@@ -1,9 +1,4 @@
-# api-egress-policy Specification
-
-## Purpose
-Make the model traffic of every `--api` session provable: the agent container has no route off the host, so a per-session forward proxy sees every connection. The proxy lets model traffic reach only the `ANTHROPIC_BASE_URL` endpoint, refuses the model providers' own hosts, and leaves other hosts open. Its log is saved on the host, and `--report` turns the saved logs into an audit PDF. Sessions without `--api` are unaffected.
-
-## Requirements
+## ADDED Requirements
 
 ### Requirement: Composes with the --gh auth-proxy sidecar
 
