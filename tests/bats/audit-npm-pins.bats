@@ -95,3 +95,16 @@ $(row b 1.0.0 npm b)"
   [ "$status" -ne 0 ]
   [ -z "$(ls -A "$TMPDIR")" ]
 }
+
+@test "a signal mid-install still removes the scratch dir" {
+  TOOLS=$(row tool 1.2.3 npm @scope/tool)
+  local pidf="$BATS_TEST_TMPDIR/main.pid"
+  # Kill main's shell and this subshell, as a cancelled CI job would.
+  npm() {
+    [ "$1" = install ] || return 0
+    kill -TERM "$(cat "$pidf")" "$BASHPID"
+  }
+  ( echo "$BASHPID" > "$pidf"; main ) &
+  wait $! || true
+  [ -z "$(ls -A "$TMPDIR")" ]
+}
