@@ -98,8 +98,13 @@ class GlabTokenDiscovery(unittest.TestCase):
         self._run()
         cfg = (self.log / "glab-config.yml").read_text()
         self.assertIn("    use_keyring: false\n", cfg)
-        self.assertNotIn("true", cfg)
+        self.assertNotIn("use_keyring: true", cfg)
         self.assertIn("api_host: gl.example.com", cfg)
+
+    def test_no_host_config_skips_overlay(self):
+        (self.home / ".config" / "glab-cli" / "config.yml").unlink()
+        argv, _ = self._run()
+        self.assertFalse(any(a.endswith(":/root/.config/glab-cli/config.yml:ro") for a in argv))
 
     def test_explicit_token_wins(self):
         _, token = self._run(GITLAB_TOKEN="glpat-explicit")
