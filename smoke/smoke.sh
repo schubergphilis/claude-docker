@@ -222,7 +222,8 @@ setup_fake_api() {
     || die "openssl could not generate the --api smoke CA"
   chmod 0644 "${FAKE_HOME}/api-ca.crt"
   RUN_FLAGS+=("--api")
-  OPTIN_ENV+=("ANTHROPIC_BASE_URL=https://llm.smoke.invalid" "CLAUDE_DOCKER_API_CA=${FAKE_HOME}/api-ca.crt")
+  # run.sh refuses --api without a gateway token.
+  OPTIN_ENV+=("ANTHROPIC_BASE_URL=https://llm.smoke.invalid" "ANTHROPIC_AUTH_TOKEN=fake-api-token" "CLAUDE_DOCKER_API_CA=${FAKE_HOME}/api-ca.crt")
 }
 
 # --az mounts no host file; the PAT is the whole credential, so it carries the
