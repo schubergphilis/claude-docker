@@ -242,4 +242,4 @@ claude-docker: egress log saved to ~/.local/state/claude-docker/egress/20260927T
 - The port in `ANTHROPIC_BASE_URL` isn't checked, but the proxy allows `CONNECT` only to 443. A gateway on another port (`https://gw.example.eu:8443`) passes startup, then every model call gets a 403.
 - The log can be incomplete. squid comes from the Ubuntu archive, which can lag upstream security fixes: the packaged version is affected by CVE-2026-61642 (request smuggling via `Transfer-Encoding`), and a smuggled request doesn't appear in the access log. It doesn't get past the provider deny.
 - DNS closure relies on Docker ≥ 26, which stopped forwarding external queries from internal networks. Older engines leave a DNS side channel.
-- Podman is untested.
+- Podman isn't covered by CI. It was validated by hand on Windows 11 with rootless podman 6.0.2 (netavark), where the internal network, DNS closure and teardown behave as on Docker.

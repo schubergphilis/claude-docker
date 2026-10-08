@@ -126,7 +126,10 @@ archive into the agent image, and the sidecar runs `$IMAGE` with
 
 The costs were raised in review:
 
-- squid ships in every user's image, though only `--egress-lock` uses it.
+- squid ships in every user's image, though only `--egress-lock` uses it. It
+  also adds a setuid-root binary, `/usr/lib/squid/pinger`, to the agent
+  container. That's inert under `no-new-privileges`, but it's there for every
+  user.
 - Running squid and Caddy means two proxy daemons to maintain.
 - Ubuntu rates nearly every squid CVE "Medium", so the HIGH/CRITICAL Trivy
   gate doesn't flag them. One example is CVE-2026-61642, request smuggling via
@@ -206,8 +209,13 @@ It never falls back to open egress.
 - **Case.** The startup provider check is case-sensitive and `dstdomain` is
   not, so `https://Api.Anthropic.com` starts, and rule 5 then allows provider
   traffic.
-- **squid's cache manager** is reachable on the proxy port. There is no
-  `http_access deny manager` (CVE-2024-23638's workaround).
+- **squid's cache manager** isn't reachable from the agent, but only because
+  the port rule refuses 3128 (tasks.md 6.6). There is no explicit
+  `http_access deny manager` (CVE-2024-23638's workaround), so a change to
+  the port rules would expose it.
+- **The end-of-session summary drops the port.** A refused `CONNECT
+  gateway:8443` is printed as `gateway`, which reads as the endpoint being
+  blocked. The log itself keeps `host:port`.
 - **Log completeness** depends on squid (CVE-2026-61642, D5), and on `run.sh`
   reaching its EXIT trap. A SIGKILLed `run.sh` loses that session's log.
 - **A `CONNECT` to a provider's raw IP** isn't matched by the name deny.
@@ -215,15 +223,16 @@ It never falls back to open egress.
 - **A gateway set only in `settings.docker.json`** is invisible to `run.sh`,
   which refuses to start. Users have to export it.
 - **Node's built-in `fetch`** ignores proxy variables and fails closed.
-- **Docker < 26** leaves a DNS side channel. **Podman** isn't in CI and is
-  validated manually (tasks.md §6).
+- **Docker < 26** leaves a DNS side channel. **Podman** isn't in CI. It was
+  validated manually on Windows 11 with podman 6.0.2 / netavark (tasks.md §6):
+  the internal network, DNS closure and teardown behave as on Docker.
 
 ## Open Questions
 
 1. **Proxy choice (D5).** Keep squid in the agent image, move it to a
    digest-pinned image pulled only under `--egress-lock`, or replace it with
    Caddy + `forwardproxy` for both sidecars. If squid stays: add `http_access
-   deny manager`, and decide how its CVEs are tracked given the Trivy gate's
+   deny manager` as hardening, and decide how its CVEs are tracked given the Trivy gate's
    blind spot.
 2. **Enforce the endpoint, or narrow the claim.** Either keep "not Anthropic
    directly" and say so everywhere, or stop a project from overriding the
