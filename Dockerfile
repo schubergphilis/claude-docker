@@ -88,8 +88,8 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # upgrades them past the base image's 3.5.5-1ubuntu3.3 (CVE-2026-84782, fixed
 # in 3.5.5-1ubuntu3.6, which no ubuntu:26.04 tag carries yet) — drop them at
 # the next base-image bump that ships the fix.
-# squid is not for the agent: run.sh --api runs this same image as its
-# egress-lock forward-proxy sidecar (--entrypoint /usr/sbin/squid), so there is no
+# squid is not for the agent: run.sh --egress-lock runs this same image as its
+# forward-proxy sidecar (--entrypoint /usr/sbin/squid), so there is no
 # second image to pull or pin. It comes from the Ubuntu archive, so it moves
 # only within this base release; a major upgrade arrives with a FROM bump.
 RUN apt-get update && apt-get install -y --no-install-recommends \

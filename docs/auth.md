@@ -89,7 +89,7 @@ Token alternative: instead of (or in addition to) the credentials file, export `
 > - **`pip.conf`** likewise carries any global pip settings you've set, not only `index-url`.
 > - **`~/.netrc` is deliberately NOT mounted** — as a machine-keyed store of logins for arbitrary unrelated hosts it's the broadest offender, so `--registry` never forwards it. Put registry auth in `~/.npmrc` / `pip.conf` / the index URL / `UV_INDEX_*_PASSWORD` instead.
 >
-> The forwarded _env vars_ are tightly scoped (named individually), so the over-share is specific to the npmrc/pip.conf file mounts. To minimise exposure, prefer the env-var channel or keep registry-only config files, and remember the container has full network egress unless you pass `--api` (see [Threat model](security.md#threat-model)).
+> The forwarded _env vars_ are tightly scoped (named individually), so the over-share is specific to the npmrc/pip.conf file mounts. To minimise exposure, prefer the env-var channel or keep registry-only config files, and remember the container has full network egress, even under `--egress-lock` (which restricts model traffic only and logs the rest; see [Threat model](security.md#threat-model)).
 
 `--registry` makes the in-container package managers resolve against a private feed (AWS CodeArtifact, Artifactory, Nexus, GitLab/Azure, …) the same way your pipelines do — without inventing any claude-docker-specific config. It surfaces the package managers' **own native config** from the host, read-only:
 
@@ -238,5 +238,8 @@ claude-docker: egress log saved to ~/.local/state/claude-docker/egress/20260927T
 - An `ANTHROPIC_BASE_URL` set only in `settings.docker.json` isn't visible to `run.sh`, which then refuses to start. Export it on the host instead.
 - A `CONNECT` to a provider's raw IP address isn't matched by the host deny. Claude Code never does that, and it would show up in the log.
 - A `run.sh` killed with `SIGKILL` never runs its `EXIT` trap, so that session's log is lost.
+- A project can move the model traffic. Claude Code takes `ANTHROPIC_BASE_URL` from a workspace's `.claude/settings.json` over the environment, and `run.sh` only checks the exported value. The proxy allows any host that isn't a provider's, and without TLS interception the log shows the connection but not that it carried prompts. So the lock guarantees that model traffic doesn't go to Anthropic directly, not that it goes only to your gateway.
+- The port in `ANTHROPIC_BASE_URL` isn't checked, but the proxy allows `CONNECT` only to 443. A gateway on another port (`https://gw.example.eu:8443`) passes startup, then every model call gets a 403.
+- The log can be incomplete. squid comes from the Ubuntu archive, which can lag upstream security fixes: the packaged version is affected by CVE-2026-61642 (request smuggling via `Transfer-Encoding`), and a smuggled request doesn't appear in the access log. It doesn't get past the provider deny.
 - DNS closure relies on Docker ≥ 26, which stopped forwarding external queries from internal networks. Older engines leave a DNS side channel.
 - Podman is untested.

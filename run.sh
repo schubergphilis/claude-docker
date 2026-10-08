@@ -529,9 +529,9 @@ uploads.github.com {
 EOF
 }
 
-# Emit the --egress-lock squid config to stdout (see api-egress-policy
-# design.md). A template, unlike the gh Caddyfile: squid has no env
-# substitution for ACL values. Its only variable input is egress_api_host,
+# Emit the --egress-lock squid config to stdout (see
+# openspec/specs/api-egress-policy). A template, unlike the gh Caddyfile: squid
+# has no env substitution for ACL values. Its only variable input is egress_api_host,
 # which has already passed the hostname validator in validate_opts, so no
 # whitespace, quote, or newline can reach this file.
 # Rule order is the security property:
@@ -541,8 +541,8 @@ EOF
 #  - `-n` stops a reverse lookup, so a PTR record can't turn an IP-literal
 #    request into an allowed name.
 # ponytail: a CONNECT to a provider's raw IP isn't matched by the dstdomain
-# deny. Claude Code never does that, and it would still show up in the log
-# and the report; add the providers' published ranges if that's not enough.
+# deny. Claude Code never does that, and it would still show up in the log;
+# add the providers' published ranges if that's not enough.
 gen_egress_squid_conf() {
   cat <<'EOF'
 http_port 3128
@@ -1187,8 +1187,8 @@ egress_listening() { "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting
 
 start_egress_sidecar() {
   local egress_wait egress_ip egress_url
-  # --egress-lock proxy sidecar: squid from the agent image itself, so
-  # there is no extra image to pull or pin (see api-egress-policy design.md).
+  # --egress-lock proxy sidecar: squid from the agent image itself, so there
+  # is no extra image to pull or pin (see openspec/specs/api-egress-policy).
   # The lifecycle mirrors the gh sidecar above: `run -d` without --rm so a crash
   # leaves logs to diagnose, exited-during-startup detection, and a fail-closed
   # abort on every path. The agent container is never started without the proxy.
