@@ -31,7 +31,7 @@ The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinn
 
 ## CI smoke tests
 
-The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)). It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.
+The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)), which drives the real `run.sh` with fixture credentials under a fake `$HOME`. It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.
 
 Run a cell locally against a built image:
 
@@ -39,7 +39,9 @@ Run a cell locally against a built image:
 IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
-The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since `smoke.sh` never invokes `run.sh` and CI has no real GitHub credentials to test against.
+Each cell starts from `env -i` plus an allowlist, so your own `AWS_*`/`GH_TOKEN`/`CLAUDE_DOCKER_*` never reach it. A cell removes its `smoke-test-*` volumes on exit; a run killed with `SIGKILL` can't, so clean up with `docker volume ls -q --filter name=smoke-test- | xargs -r docker volume rm`.
+
+The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against.
 
 ### Manual fallback checklist (macOS)
 
