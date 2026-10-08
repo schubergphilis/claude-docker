@@ -10,6 +10,7 @@ setup() {
   PROC_MOUNTS="${BATS_TEST_TMPDIR}/mounts"
   API_CA="${BATS_TEST_TMPDIR}/api.crt"
   CA_BUNDLE="${BATS_TEST_TMPDIR}/bundle.crt"
+  SEED_SETTINGS="${BATS_TEST_TMPDIR}/seed.json"
   mkdir -p "$ROOT_HOME"
   unset EXPECT_OPTINS EXPECT_EPHEMERAL AWS_PROFILE GITLAB_TOKEN TF_TOKEN_app_terraform_io \
     AZURE_DEVOPS_EXT_PAT ANTHROPIC_BASE_URL EXPECT_SETTINGS EXPECT_SETTINGS_SENTINEL
@@ -145,6 +146,7 @@ status_fixture() {
 
 @test "check_security: dropped posture passes" {
   status_fixture "CapAmb:	0000000000000000"
+  find() { :; }  # skip the setuid walk over the runner's whole filesystem
   EXPECT_UID=1000 run check_security
   [[ "$output" != *"FAIL: Cap"* ]] && [[ "$output" != *"FAIL: NoNewPrivs"* ]]
   [[ "$output" == *"PASS: CapAmb=0"* ]]
@@ -153,7 +155,7 @@ status_fixture() {
 
 @test "check_security: a missing Cap field fails instead of aborting" {
   status_fixture
-  EXPECT_UID=1000 run bash -c 'set -euo pipefail; source "$1"; PROC_STATUS=$2; check_security; echo done' _ \
+  EXPECT_UID=1000 run bash -c 'set -euo pipefail; source "$1"; PROC_STATUS=$2; find() { :; }; check_security; echo done' _ \
     "${BATS_TEST_DIRNAME}/../../smoke/assert-in-container.sh" "$PROC_STATUS"
   [[ "$output" == *"FAIL: CapAmb=0: expected '0000000000000000', got ''"* ]]
   [[ "$output" == *done* ]]
@@ -176,7 +178,7 @@ write_mounts() {
 }
 
 @test "check_mask_set: aws narrows its mask to the cli cache" {
-  EXPECT_OPTINS=aws,glab
+  export EXPECT_OPTINS=aws,glab
   write_mounts /root/.config/gh /root/.terraform.d /root/.azure /root/.aws/cli/cache
   run check_mask_set
   [[ "$output" == "PASS: mask-set:"* ]]
@@ -189,7 +191,7 @@ write_mounts() {
 }
 
 @test "check_mask_set: an extra mask fails" {
-  EXPECT_EPHEMERAL=1
+  export EXPECT_EPHEMERAL=1
   write_mounts /root/.aws
   run check_mask_set
   [[ "$output" == "FAIL: mask-set:"* ]]
@@ -201,6 +203,56 @@ write_mounts() {
   write_mounts /rootxaws
   run check_mask_set
   [[ "$output" == "PASS: mask-set:"* ]]
+}
+
+# --- check_aws_state_masking -------------------------------------------------
+
+@test "check_aws_state_masking: ephemeral with no cache passes" {
+  EXPECT_EPHEMERAL=1 run check_aws_state_masking
+  [[ "$output" == "PASS: ephemeral-aws:"* ]]
+}
+
+@test "check_aws_state_masking: ephemeral with a populated cache fails" {
+  mkdir -p "${ROOT_HOME}/.aws/cli/cache"
+  touch "${ROOT_HOME}/.aws/cli/cache/sts.json"
+  EXPECT_EPHEMERAL=1 run check_aws_state_masking
+  [[ "$output" == "FAIL: ephemeral-aws:"* ]]
+}
+
+@test "check_aws_state_masking: not granted, empty .aws mask passes" {
+  mkdir -p "${ROOT_HOME}/.aws"
+  run check_aws_state_masking
+  [[ "$output" == "PASS: masked-aws-dir:"* ]]
+  [[ "$output" != *FAIL* ]]
+}
+
+@test "check_aws_state_masking: not granted, populated .aws fails" {
+  mkdir -p "${ROOT_HOME}/.aws"
+  touch "${ROOT_HOME}/.aws/credentials"
+  run check_aws_state_masking
+  [[ "$output" == "FAIL: masked-aws-dir: ${ROOT_HOME}/.aws unexpectedly populated (1 entries)" ]]
+}
+
+@test "check_aws_state_masking: a missing mask path fails" {
+  run check_aws_state_masking
+  [[ "$output" == "FAIL: masked-aws-dir: ${ROOT_HOME}/.aws does not exist"* ]]
+}
+
+@test "check_aws_state_masking: --aws with an empty, writable cache and config passes" {
+  mkdir -p "${ROOT_HOME}/.aws/cli/cache"
+  touch "${ROOT_HOME}/.aws/config"
+  EXPECT_OPTINS=aws run check_aws_state_masking
+  [[ "$output" == *"PASS: aws-cache-masked:"* ]]
+  [[ "$output" == *"PASS: aws-cache-masked-scope:"* ]]
+  [[ "$output" == *"PASS: aws-cache-writable:"* ]]
+  [[ "$output" != *FAIL* ]]
+  [ ! -e "${ROOT_HOME}/.aws/cli/cache/__smoke_write_test" ]
+}
+
+@test "check_aws_state_masking: --aws with the config hidden fails the scope check" {
+  mkdir -p "${ROOT_HOME}/.aws/cli/cache"
+  EXPECT_OPTINS=aws run check_aws_state_masking
+  [[ "$output" == *"FAIL: aws-cache-masked-scope:"* ]]
 }
 
 # --- check_api ---------------------------------------------------------------
@@ -242,6 +294,40 @@ write_mounts() {
   EXPECT_SETTINGS=1 EXPECT_SETTINGS_SENTINEL=-v run check_settings
   [[ "$output" == *"PASS: settings-content"* ]]
   [[ "$output" == *"PASS: settings-rename"* ]]
+}
+
+@test "check_settings: no seed on fresh volumes passes when nothing was seeded" {
+  EXPECT_SETTINGS=0 run check_settings
+  [ "$output" = "PASS: settings-absent: no settings file without a seed" ]
+}
+
+@test "check_settings: no seed but a settings file fails" {
+  mkdir -p "${ROOT_HOME}/.claude"
+  echo '{}' > "${ROOT_HOME}/.claude/settings.json"
+  EXPECT_SETTINGS=0 run check_settings
+  [[ "$output" == "FAIL: settings-absent:"* ]]
+}
+
+@test "check_settings: keep passes on a persisted file with no seed" {
+  mkdir -p "${ROOT_HOME}/.claude"
+  echo '{"env":{"S":"V2"}}' > "${ROOT_HOME}/.claude/settings.json"
+  EXPECT_SETTINGS=keep EXPECT_SETTINGS_SENTINEL=V2 run check_settings
+  [[ "$output" == *"PASS: settings-keep: no seed mounted this run"* ]]
+  [[ "$output" == *"PASS: settings-content:"* ]]
+  [[ "$output" != *FAIL* ]]
+}
+
+@test "check_settings: keep fails when a seed is mounted" {
+  mkdir -p "${ROOT_HOME}/.claude"
+  echo '{"env":{"S":"V2"}}' > "${ROOT_HOME}/.claude/settings.json"
+  echo '{}' > "$SEED_SETTINGS"
+  EXPECT_SETTINGS=keep EXPECT_SETTINGS_SENTINEL=V2 run check_settings
+  [[ "$output" == *"FAIL: settings-keep: seed present at ${SEED_SETTINGS}"* ]]
+}
+
+@test "check_settings: keep fails when the persisted file is gone" {
+  EXPECT_SETTINGS=keep EXPECT_SETTINGS_SENTINEL=V2 run check_settings
+  [[ "$output" == *"FAIL: settings-present:"* ]]
 }
 
 # --- main --------------------------------------------------------------------
