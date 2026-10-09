@@ -2,8 +2,8 @@
 # The action hardcodes severity-cutoff=high, fail-build=true and
 # only-fixed=false, and the scan runs before the push — so without these rules
 # nothing can ever publish. Rules are scoped by package type or location rather
-# than by CVE so they do not go stale. deb findings, and npm findings outside
-# npm's own bundle, stay enforced.
+# than by CVE so they do not go stale. deb and npm findings stay enforced; npm
+# itself is pinned (pins/npm.env), so its bundle moves with that pin.
 ignore:
   # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries,
   # which only an upstream rebuild moves. Scoped to /usr/bin so it does NOT
@@ -19,14 +19,6 @@ ignore:
       name: python
       type: binary
     reason: AWS CLI v2's vendored interpreter; moves with pins/awscli.env.
-
-  # npm's own bundled tree, which arrives with the nodejs deb and is not
-  # resolved by anything under pins/. Scoped by location so the globals
-  # installed beside it keep their dependencies enforced. No released Node
-  # clears these: 24.20.0 still ships ip-address@10.2.0 and tar@7.5.19.
-  - package:
-      location: "**/node_modules/npm/**"
-    reason: npm's bundled deps ship with the nodejs deb; only Node moves them.
 
   # az's cryptography, held at 48.x by azure-cli-core's exact msal==1.36.0 pin
   # (msal <1.39 caps cryptography <49); only a core release moves it. Scoped to

@@ -214,7 +214,7 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 #     (.arch=="amd64" or .arch=="arm64")) | "  " + .arch + " " + .sha256)'
 # Confirm a bump the way these two hashes were produced: download both tarballs
 # and sha256sum them locally rather than trusting the JSON's advertised digest.
-# Placed before the npm layer on purpose — the tarball is ~64 MB and Go moves far
+# Placed before the npm layers on purpose — the tarball is ~64 MB and Go moves far
 # less often than the claude-code pin, so a weekly claude-code bump does not
 # re-download it.
 ARG GO_VERSION=1.26.9
@@ -242,7 +242,7 @@ RUN ARCH=$(dpkg --print-architecture); \
 # wrapper forces telemetry off (not relying on bypassing azure-cli's __main__),
 # points requests at the system store instead of certifi so a --az private CA
 # is trusted, and maps AZURE_DEVOPS_ORG_URL onto the extension's default org.
-# Before npm: az moves monthly, claude-code near-daily.
+# Before the npm layers: az moves monthly, claude-code near-daily.
 COPY pins/az.env pins/azure-devops.env pins/az-requirements.txt /tmp/
 # SC2016: the single-quoted $… lines are the az wrapper's own text, written
 # literally into /usr/local/bin/az and expanded when az runs, not at build time.

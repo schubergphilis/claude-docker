@@ -90,12 +90,6 @@ Resolved pins SHALL be written to one version-controlled fragment file per tool 
 - **WHEN** the refresh script resolves `pnpm`
 - **THEN** `pins/pnpm.env` contains the version assignment and no URL or sha256
 
-#### Scenario: npm itself is pinned by its own fragment
-
-- **WHEN** the image is built
-- **THEN** the npm that replaces the one bundled with `nodejs` is installed at the version sourced from `pins/npm.env`
-- **AND** the Dockerfile carries no literal npm version
-
 #### Scenario: binary tool fragment carries version, per-arch URL, and per-arch hashes
 
 - **WHEN** the refresh script resolves `glab`
@@ -116,6 +110,12 @@ The Dockerfile SHALL obtain every automated tool's version (and, for binary tool
 - **THEN** it contains no literal version, download URL, or sha256 value for any automated tool
 - **AND** each automated tool's version/URL/sha originates from a sourced fragment
 
+#### Scenario: npm itself is installed from its own fragment
+
+- **WHEN** the image is built
+- **THEN** the npm that replaces the one bundled with `nodejs` is installed at the version sourced from `pins/npm.env`, in its own layer before the npm-backed CLIs
+- **AND** the Dockerfile carries no literal npm version
+
 #### Scenario: build downloads from the fragment's pinned URL
 
 - **GIVEN** a `pins/uv.env` recording a per-architecture download URL and its sha256
@@ -133,7 +133,13 @@ The Dockerfile SHALL obtain every automated tool's version (and, for binary tool
 
 - **GIVEN** a build cache populated from a prior build
 - **WHEN** only `pins/tfenv.env` changes and the image is rebuilt
-- **THEN** the npm install layer is served from cache and not re-run
+- **THEN** the npm and npm-backed CLI install layers are served from cache and not re-run
+
+#### Scenario: an npm bump spares the apt layer
+
+- **GIVEN** a build cache populated from a prior build
+- **WHEN** only `pins/npm.env` changes and the image is rebuilt
+- **THEN** the apt layer that installs `nodejs` is served from cache and not re-run
 
 ### Requirement: Operator report
 
