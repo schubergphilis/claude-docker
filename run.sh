@@ -1283,7 +1283,7 @@ CADDY
 egress_listening() { "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; }
 
 start_egress_sidecar() {
-  local egress_wait egress_ip egress_url
+  local egress_wait egress_ip egress_url started
   # --egress-lock proxy sidecar: squid from its own image (ensure_egress_image;
   # see openspec/specs/api-egress-policy).
   # The lifecycle mirrors the gh sidecar above: `run -d` without --rm so a crash
@@ -1305,10 +1305,12 @@ start_egress_sidecar() {
     gen_egress_managed_settings >"$stage/egress-managed-settings.json" || exit 1
     egress_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo unknown)
     egress_proxy_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$EGRESS_IMAGE" 2>/dev/null || echo unknown)
-    egress_started=$(date -u +%Y%m%dT%H%M%SZ)
+    started=$(date -u +%Y%m%dT%H%M%SZ)
 
     # Runs as squid's own unprivileged user with no capabilities: port 3128
-    # needs none, and the proxy holds no secret.
+    # needs none, and the proxy holds no secret. egress_started, which makes
+    # the EXIT trap save a log, is set only once the container exists: a proxy
+    # that never started has no log to save.
     if ! "$RUNTIME" run -d \
         --name "$EGRESS_SIDECAR" \
         --network "$EGRESS_OUT_NETWORK" \
@@ -1318,8 +1320,12 @@ start_egress_sidecar() {
         ${EGRESS_SIDECAR_ARGS[@]+"${EGRESS_SIDECAR_ARGS[@]}"} \
         -v "$(hostpath "$stage/egress-squid.conf"):/etc/squid/squid.conf:ro" \
         --entrypoint /usr/sbin/squid \
-        "$EGRESS_IMAGE" -N >/dev/null \
-       || ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$EGRESS_SIDECAR" >/dev/null; then
+        "$EGRESS_IMAGE" -N >/dev/null; then
+      echo "claude-docker: failed to start the --egress-lock proxy ($EGRESS_IMAGE) — aborting (the agent container was never started)" >&2
+      exit 1
+    fi
+    egress_started="$started"
+    if ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$EGRESS_SIDECAR" >/dev/null; then
       echo "claude-docker: failed to start the --egress-lock proxy ($EGRESS_IMAGE) — aborting (the agent container was never started)" >&2
       exit 1
     fi

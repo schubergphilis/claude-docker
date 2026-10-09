@@ -842,6 +842,25 @@ USER squid" ]
   run ! grep -q "^docker network connect" "$CALLS"
 }
 
+@test "start_egress_sidecar: no log is saved for a proxy that never started" {
+  egress_setup
+  STUB_FAIL="run"
+  run_script_fn 'WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=gw.eu ANTHROPIC_BASE_URL=https://gw.eu stage=$HOME/st; mkdir -p "$stage"
+    EGRESS_NETWORK=n EGRESS_OUT_NETWORK=o EGRESS_SIDECAR=p; trap egress_save_log EXIT; start_egress_sidecar'
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"egress log saved"* ]]
+  [ ! -e "$EGRESS_LOG_DIR" ]
+}
+
+@test "start_egress_sidecar: a proxy that started but couldn't join the network still has its log saved" {
+  egress_setup
+  STUB_FAIL="network:connect"
+  run_script_fn 'WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=gw.eu ANTHROPIC_BASE_URL=https://gw.eu stage=$HOME/st; mkdir -p "$stage"
+    EGRESS_NETWORK=n EGRESS_OUT_NETWORK=o EGRESS_SIDECAR=p; trap egress_save_log EXIT; start_egress_sidecar'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"egress log saved"* ]]
+}
+
 @test "start_egress_sidecar: failing to join the internal network aborts" {
   egress_setup
   STUB_FAIL="network:connect"
