@@ -35,6 +35,16 @@ CVE-2026-56864 exp:2026-11-04
 # against a fix that needs 0.40.0. Each entry carries its own reason because
 # suppression is per-ID and the two are only incidentally related.
 CVE-2026-56865 exp:2026-11-04
+# gh 2.102.0 (apt, floats to the latest release) is built with Go 1.27.1; the
+# net/http fix needs Go 1.26.9 or 1.27.2, both tagged 2026-10-08, after that
+# release. The Go toolchain pin carries the fix, so gh is the only carrier left
+# and this hides nothing a bump here can clear. The expiry is about one gh
+# release cycle out: at expiry, check that the image's gh is built with
+# Go >= 1.27.2 and drop this.
+CVE-2026-78667 exp:2026-10-23
+# Same gh binary and Go 1.27.1 gap: crypto/tls ECH extensions, same fix
+# versions. Its own entry because suppression is per-ID.
+CVE-2026-97031 exp:2026-10-23
 # npm@11.19.1 (Dockerfile) vendors brace-expansion 5.0.9; the fix needs 5.0.10.
 # No npm release bundles it yet (11.20.0 and 12.1.0 still ship 5.0.9). Only
 # npm's own tree carries it. At expiry, bump the npm pin if a release has it.
