@@ -14,7 +14,7 @@ setup() {
   CALLS="$BATS_TEST_TMPDIR/calls"
   : >"$CALLS"
   unset GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN GITLAB_HOST CLAUDE_DOCKER_RUNTIME \
-    CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA \
+    CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA CLAUDE_DOCKER_ADD_HOSTS \
     CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
   RUNTIME=docker
   # Knobs for the docker stub: STUB_FAIL names subcommands that fail,
@@ -167,6 +167,25 @@ run_script_fn() {
   run validate_opts
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "validate_opts: CLAUDE_DOCKER_ADD_HOSTS splits IPv4 and IPv6 entries" {
+  CLAUDE_DOCKER_ADD_HOSTS="gitlab.example.com:10.1.2.3,v6.example.com:fd00::1"
+  validate_opts
+  [ "$(lines_of "${ADD_HOSTS[@]}")" = $'gitlab.example.com:10.1.2.3\nv6.example.com:fd00::1' ]
+}
+
+@test "validate_opts: a CLAUDE_DOCKER_ADD_HOSTS entry without an ip is fatal" {
+  CLAUDE_DOCKER_ADD_HOSTS="ok.example.com:10.0.0.1,gitlab.example.com"
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"entry 'gitlab.example.com' is not host:ip"* ]]
+}
+
+@test "validate_opts: a CLAUDE_DOCKER_ADD_HOSTS entry with a space is fatal" {
+  CLAUDE_DOCKER_ADD_HOSTS="a.example.com:10.0.0.1, b.example.com:10.0.0.2"
+  run validate_opts
+  [ "$status" -eq 1 ]
 }
 
 # --- select_runtime ---
@@ -481,6 +500,13 @@ sidecar_setup() {
   run ! grep -rq gho_secret "$stage"
 }
 
+@test "start_gh_sidecar: passes CLAUDE_DOCKER_ADD_HOSTS to the sidecar" {
+  sidecar_setup
+  ADD_HOSTS=(github.com:140.82.121.4)
+  start_gh_sidecar 2>/dev/null
+  grep -q "^docker run -d .*--add-host github.com:140.82.121.4" "$CALLS"
+}
+
 @test "start_gh_sidecar: no policy stages an empty one" {
   sidecar_setup
   start_gh_sidecar 2>/dev/null
@@ -532,6 +558,28 @@ sidecar_setup() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"could not determine the gh-auth-proxy sidecar's network address"* ]]
   [[ "$output" != *"is active"* ]]
+}
+
+# --- build_host_args ---
+
+@test "build_host_args: adds each entry to the agent container" {
+  ADD_HOSTS=(gitlab.example.com:10.1.2.3 github.com:140.82.121.4)
+  build_host_args
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = $'--add-host\ngitlab.example.com:10.1.2.3\n--add-host\ngithub.com:140.82.121.4' ]
+}
+
+@test "build_host_args: under --gh the sidecar's hosts are skipped with a warning" {
+  ADD_HOSTS=(GitHub.com:140.82.121.4 gitlab.example.com:10.1.2.3)
+  GH_SIDECAR_ACTIVE=1
+  run build_host_args
+  [[ "$output" == *"entry 'GitHub.com:140.82.121.4' skipped"* ]]
+  build_host_args 2>/dev/null
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = $'--add-host\ngitlab.example.com:10.1.2.3' ]
+}
+
+@test "build_host_args: nothing set adds nothing" {
+  build_host_args
+  [ "${#MOUNT_ARGS[@]}" -eq 0 ]
 }
 
 # --- stage_host_config ---

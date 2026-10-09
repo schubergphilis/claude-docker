@@ -79,6 +79,16 @@ Use this when you passed a repo and a _sibling_ worktree as separate workspace a
 - The overlay only applies to workspaces whose `.git` is a real directory (the main repo). If you mount only a worktree without its main repo, no overlay is created for it. Mount the main repo alongside if you need bidirectional worktree work.
 - Relative paths assume the worktree's location relative to the repo's `.git/` is the same in both environments. Nested layouts (e.g. `<repo>/.claude/worktrees/<name>`) always satisfy this; moving a worktree to a totally different parent dir breaks both relative and absolute setups.
 
+## Networks without DNS
+
+The container uses the host's DNS server but not the host's `/etc/hosts`, so a forge reachable on the host only through an `/etc/hosts` entry doesn't resolve inside it, and `git push` over HTTPS, `gh`, `glab` and `az` fail. Set `CLAUDE_DOCKER_ADD_HOSTS` to the same entries, comma-separated:
+
+```bash
+export CLAUDE_DOCKER_ADD_HOSTS=gitlab.example.com:10.1.2.3,devops.example.com:10.1.2.4
+```
+
+Each entry is passed to the runtime as `--add-host`, and so lands in the container's `/etc/hosts`; the `--gh` auth-proxy sidecar gets them too. Under `--gh`, entries for `github.com`, `api.github.com` and `uploads.github.com` are skipped for the agent container with a warning, since those must resolve to the sidecar. An entry that isn't `host:ip` stops `claude-docker` before any container starts.
+
 ## Pasting images
 
 `Cmd-V` to paste a clipboard image doesn't work inside the container — Claude Code reads the macOS clipboard via OS APIs that a Linux container can't reach. Workaround: save the image into any workspace you mounted (e.g. `Cmd-Shift-4` to Desktop, then move it into `~/repo`) and reference it from Claude with `@screenshot.png`.
