@@ -83,7 +83,7 @@ For every binary-download tool (uv, glab, tfenv, aws-cli), the refresh tooling S
 
 ### Requirement: Pins stored as per-tool lockfile fragments
 
-Resolved pins SHALL be written to one version-controlled fragment file per tool (e.g. `pins/<tool>.env`) containing sourceable shell assignments. npm-backed tools (claude-code, openspec, pnpm) SHALL record a version only, relying on npm's signed integrity, and so SHALL PyPI-backed tools (`az`, i.e. `azure-cli-core`) in their fragment, whose soak date is the release's first PyPI upload; alongside `pins/az.env` the script SHALL write `pins/az-requirements.txt`, `azure-cli-core` and every transitive dependency hash-locked with `uv pip compile --universal --generate-hashes`; binary-download tools SHALL additionally record, per published architecture, the resolved download URL paired with the sha256 of the bytes at that URL (a single URL+sha for an arch-independent artifact such as tfenv or the `azure-devops` extension wheel). Fragment files SHALL be committed to version control, not fetched at build time.
+Resolved pins SHALL be written to one version-controlled fragment file per tool (e.g. `pins/<tool>.env`) containing sourceable shell assignments. npm-backed tools (npm itself, claude-code, openspec, pnpm) SHALL record a version only, relying on npm's signed integrity, and so SHALL PyPI-backed tools (`az`, i.e. `azure-cli-core`) in their fragment, whose soak date is the release's first PyPI upload; alongside `pins/az.env` the script SHALL write `pins/az-requirements.txt`, `azure-cli-core` and every transitive dependency hash-locked with `uv pip compile --universal --generate-hashes`; binary-download tools SHALL additionally record, per published architecture, the resolved download URL paired with the sha256 of the bytes at that URL (a single URL+sha for an arch-independent artifact such as tfenv or the `azure-devops` extension wheel). Fragment files SHALL be committed to version control, not fetched at build time.
 
 #### Scenario: npm tool fragment carries version only
 
@@ -110,6 +110,12 @@ The Dockerfile SHALL obtain every automated tool's version (and, for binary tool
 - **THEN** it contains no literal version, download URL, or sha256 value for any automated tool
 - **AND** each automated tool's version/URL/sha originates from a sourced fragment
 
+#### Scenario: npm itself is installed from its own fragment
+
+- **WHEN** the image is built
+- **THEN** the npm that replaces the one bundled with `nodejs` is installed at the version sourced from `pins/npm.env`, in its own layer before the npm-backed CLIs
+- **AND** the Dockerfile carries no literal npm version
+
 #### Scenario: build downloads from the fragment's pinned URL
 
 - **GIVEN** a `pins/uv.env` recording a per-architecture download URL and its sha256
@@ -127,7 +133,13 @@ The Dockerfile SHALL obtain every automated tool's version (and, for binary tool
 
 - **GIVEN** a build cache populated from a prior build
 - **WHEN** only `pins/tfenv.env` changes and the image is rebuilt
-- **THEN** the npm install layer is served from cache and not re-run
+- **THEN** the npm and npm-backed CLI install layers are served from cache and not re-run
+
+#### Scenario: an npm bump spares the apt layer
+
+- **GIVEN** a build cache populated from a prior build
+- **WHEN** only `pins/npm.env` changes and the image is rebuilt
+- **THEN** the apt layer that installs `nodejs` is served from cache and not re-run
 
 ### Requirement: Operator report
 

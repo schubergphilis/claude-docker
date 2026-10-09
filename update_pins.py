@@ -108,6 +108,11 @@ def soak_days_for(tool: Tool, override: int | None) -> int:
 # one capture group. No tool reports its version the same way as another, hence
 # a rule per tool rather than one shared template.
 TOOLS = [
+    # npm itself, upgraded past the one NodeSource bundles with nodejs: npm
+    # vendors its dependencies (undici, brace-expansion, tar, …), so a CVE in
+    # one is only cleared by a newer npm release (see .trivyignore and #51).
+    Tool("npm", "npm", "npm",
+         "npm --version", r"^([^ ]+)$"),
     # The ` (Claude Code)` suffix is part of the assertion: a stub launcher that
     # answered with a bare version would otherwise pass. The 1-day soak is a
     # maintainer decision: Claude Code ships near-daily and most of its users
@@ -469,6 +474,8 @@ def fragment_lines(name: str, v: str) -> list[str]:
     the registry-advertised dist.integrity; CI runs `npm audit signatures`).
     Binary tools emit the resolved download URL next to its sha256 so the build
     fetches and verifies from one committed source of truth (_arch_url_sha_lines)."""
+    if name == "npm":
+        return [f"NPM_VERSION={v}"]
     if name == "claude-code":
         return [f"CLAUDE_CODE_VERSION={v}"]
     if name == "openspec":

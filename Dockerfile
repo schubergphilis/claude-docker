@@ -80,10 +80,8 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # NodeSource ships Node 24 LTS pinned to upstream releases — Ubuntu's archive
 # `nodejs` tracks an older minor and isn't LTS-pinned. `nodistro` is
 # NodeSource's distro-independent codename (works on any Debian/Ubuntu).
-# npm is force-upgraded past whatever NodeSource bundles: its own vendored
-# tar/brace-expansion/ip-address trail their upstream fixes by one release
-# each until NodeSource's nodejs package catches up — drop the extra
-# install once it does.
+# The npm NodeSource bundles is replaced by a pinned one further down (see the
+# npm layer before the npm-backed CLIs).
 # openssl, libssl3t64 and openssl-provider-legacy are named explicitly so apt
 # upgrades them past the base image's 3.5.5-1ubuntu3.3 (CVE-2026-84782, fixed
 # in 3.5.5-1ubuntu3.6, which no ubuntu:26.04 tag carries yet) — drop them at
@@ -110,7 +108,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       less \
       openssh-client \
       unzip \
- && npm install -g --ignore-scripts npm@11.19.1 \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
 
@@ -217,7 +214,7 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 #     (.arch=="amd64" or .arch=="arm64")) | "  " + .arch + " " + .sha256)'
 # Confirm a bump the way these two hashes were produced: download both tarballs
 # and sha256sum them locally rather than trusting the JSON's advertised digest.
-# Placed before the npm layer on purpose — the tarball is ~64 MB and Go moves far
+# Placed before the npm layers on purpose — the tarball is ~64 MB and Go moves far
 # less often than the claude-code pin, so a weekly claude-code bump does not
 # re-download it.
 ARG GO_VERSION=1.26.9
@@ -245,7 +242,7 @@ RUN ARCH=$(dpkg --print-architecture); \
 # wrapper forces telemetry off (not relying on bypassing azure-cli's __main__),
 # points requests at the system store instead of certifi so a --az private CA
 # is trusted, and maps AZURE_DEVOPS_ORG_URL onto the extension's default org.
-# Before npm: az moves monthly, claude-code near-daily.
+# Before the npm layers: az moves monthly, claude-code near-daily.
 COPY pins/az.env pins/azure-devops.env pins/az-requirements.txt /tmp/
 # SC2016: the single-quoted $… lines are the az wrapper's own text, written
 # literally into /usr/local/bin/az and expanded when az runs, not at build time.
@@ -270,6 +267,16 @@ RUN . /tmp/az.env && . /tmp/azure-devops.env \
  && chmod 0755 /usr/local/bin/az \
  && AZURE_CONFIG_DIR=/tmp/azcfg az devops -h > /dev/null \
  && rm -rf "$whl" /tmp/azcfg /tmp/az.env /tmp/azure-devops.env /tmp/az-requirements.txt
+
+# npm itself, replacing the one NodeSource bundles with nodejs. npm vendors its
+# dependencies (undici, brace-expansion, tar, …), so their CVEs are cleared only
+# by a newer npm release; pinning it in pins/npm.env lets the weekly refresh bump
+# it with the same soak, signature audit and version check as the CLIs below.
+# Its own layer, ahead of theirs, so an npm bump doesn't rerun the apt layer.
+COPY pins/npm.env /tmp/npm.env
+RUN . /tmp/npm.env \
+ && npm install -g --ignore-scripts "npm@${NPM_VERSION}" \
+ && rm /tmp/npm.env
 
 # npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
 # run `npm audit signatures <pkg>@<ver>` when bumping.
