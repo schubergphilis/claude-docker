@@ -259,15 +259,14 @@ file, and the guarantee is what the feature is for.
   needs Docker Hub and Alpine's mirrors and takes longer. Hosts without that
   access set `CLAUDE_DOCKER_EGRESS_PROXY_IMAGE`. A built image is reused until
   removed, so a newer Alpine squid needs a manual `image rm` or a pin bump.
-- **Podman builds** of the proxy image are untested; the Windows/podman
-  validation in tasks.md §6 predates it (7.8).
 - **A `CONNECT` to a provider's raw IP** isn't matched by the name deny.
   Claude Code doesn't do that, and the log would show it.
 - **A gateway set only in `settings.docker.json`** is invisible to `run.sh`,
   which refuses to start. Users have to export it.
 - **Node's built-in `fetch`** ignores proxy variables and fails closed.
 - **Docker < 26** leaves a DNS side channel. **Podman** isn't in CI. It was
-  validated manually on Windows 11 with podman 6.0.2 / netavark (tasks.md §6):
+  validated manually on Windows 11 with podman 6.0.2 / netavark (tasks.md §6,
+  and 7.8 for the proxy image's first-use build and the managed settings):
   the internal network, DNS closure and teardown behave as on Docker.
 
 ## Open Questions
