@@ -41,7 +41,7 @@ IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,t
 
 Each cell starts from `env -i` plus an allowlist, so your own `AWS_*`/`GH_TOKEN`/`CLAUDE_DOCKER_*` never reach it. A cell removes its `smoke-test-*` volumes on exit; a run killed with `SIGKILL` can't, so clean up with `docker volume ls -q --filter name=smoke-test- | xargs -r docker volume rm`.
 
-The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against.
+The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against. Without a docker daemon it prints SKIP and exits 0; set `GH_PROXY_IT_REQUIRE_DOCKER=1` to make that a failure instead.
 
 ### Manual fallback checklist (macOS)
 
