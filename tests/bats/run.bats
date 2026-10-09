@@ -181,6 +181,28 @@ http_access allow all" ]
   [[ "$output" == *"points at one ('api.anthropic.com')"* ]]
 }
 
+@test "validate_opts: --egress-lock refuses a URL that would need JSON escaping" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  local url
+  for url in 'https://gw.eu/"x' 'https://gw.eu/a\b' "https://gw.eu/a'b" $'https://gw.eu/a\tb'; do
+    ANTHROPIC_BASE_URL="$url"
+    run validate_opts
+    [ "$status" -eq 1 ] || { echo "accepted: $url"; return 1; }
+    [[ "$output" == *"has characters a URL may not contain"* ]]
+  done
+  ANTHROPIC_BASE_URL='https://u:p@gw.eu:8443/v1?a=1&b=%20'
+  validate_opts
+}
+
+@test "gen_egress_managed_settings: pins the endpoint and switches the other backends off" {
+  ANTHROPIC_BASE_URL='https://u:p@gw.eu:8443/v1?a=1&b=%20'
+  run gen_egress_managed_settings
+  [ "$status" -eq 0 ]
+  # Exactly these keys, as Claude Code reads them: valid JSON, env strings.
+  [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')" = \
+    '{"env": {"ANTHROPIC_BASE_URL": "https://u:p@gw.eu:8443/v1?a=1&b=%20", "CLAUDE_CODE_USE_BEDROCK": "0", "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_VERTEX": "0"}}' ]
+}
+
 @test "validate_opts: missing CLAUDE_DOCKER_AZ_CA is fatal" {
   WITH_AZ=1 CLAUDE_DOCKER_AZ_CA="$BATS_TEST_TMPDIR/nope.pem"
   run validate_opts
@@ -713,6 +735,7 @@ sidecar_setup() {
 
 egress_setup() {
   WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=llm.example.eu
+  ANTHROPIC_BASE_URL=https://llm.example.eu/v1
   stage="$BATS_TEST_TMPDIR/stage"
   mkdir -p "$stage"
   EGRESS_NETWORK=claude-egress-x EGRESS_OUT_NETWORK=claude-egress-out-x
@@ -735,7 +758,12 @@ egress_setup() {
   grep -q "^docker run -d --name claude-egress-proxy-x --network claude-egress-out-x --user proxy --cap-drop ALL --security-opt no-new-privileges .*--entrypoint /usr/sbin/squid claude-code:local -N$" "$CALLS"
   grep -qx "docker network connect claude-egress-x claude-egress-proxy-x" "$CALLS"
   grep -qx "acl egress_model_endpoint dstdomain -n llm.example.eu" "$stage/egress-squid.conf"
-  [ "$(lines_of "${MOUNT_ARGS[@]}")" = $'--network\nclaude-egress-x' ]
+  # The internal network, and Claude Code's managed settings, read-only.
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "--network
+claude-egress-x
+-v
+$stage/egress-managed-settings.json:/etc/claude-code/managed-settings.json:ro" ]
+  grep -q '"ANTHROPIC_BASE_URL": "https://llm.example.eu/v1"' "$stage/egress-managed-settings.json"
   local env
   env=$(lines_of "${ENV_ARGS[@]}")
   # Whole lines: a no_proxy that also lists e.g. github.com would let that
@@ -804,7 +832,7 @@ egress_setup() {
 @test "start_egress_sidecar: a failing inspect reaches the address error" {
   STUB_FAIL="inspect" STUB_LOGS="Accepting HTTP Socket connections"
   # Under set -e, like the gh sidecar case above.
-  run_script_fn 'WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=gw.eu stage=$HOME/st; mkdir -p "$stage"
+  run_script_fn 'WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=gw.eu ANTHROPIC_BASE_URL=https://gw.eu stage=$HOME/st; mkdir -p "$stage"
     EGRESS_NETWORK=n EGRESS_OUT_NETWORK=o EGRESS_SIDECAR=p; start_egress_sidecar'
   [ "$status" -eq 1 ]
   [[ "$output" == *"could not determine the --egress-lock proxy's address"* ]]

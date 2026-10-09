@@ -179,6 +179,13 @@ jobs:
           IMAGE=claude-docker:ci bash smoke/egress.sh --gh
           IMAGE=claude-docker:ci bash smoke/egress.sh --endpoint-port
 
+      - name: Managed settings precedence (Claude Code in the image)
+        # --egress-lock pins Claude Code's endpoint with managed settings. This
+        # proves, against the image's pinned claude-code, that they beat every
+        # project override (settings.json, settings.local.json, --settings) and
+        # the Bedrock/Vertex/Foundry backends. --network none; loopback only.
+        run: IMAGE=claude-docker:ci bash tests/managed-settings-precedence.sh
+
       # Known-CVE scanning of the image, in two passes over the same artifact.
       # Like the steps above, these must live in docker-build: Trivy resolves an
       # unqualified reference against the local daemon first, and this is the

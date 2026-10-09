@@ -102,7 +102,9 @@ Wrapper flags:
                       (HTTPS via CONNECT, no TLS interception) that refuses
                       *.anthropic.com / *.claude.ai / *.claude.com and logs
                       every connection. Other hosts stay reachable. The log
-                      is saved on the host when the session ends.
+                      is saved on the host when the session ends. Claude
+                      Code's managed settings pin the endpoint, so a project's
+                      .claude/settings.json can't move it.
   --iterm           Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -337,6 +339,15 @@ validate_opts() {
         exit 1 ;;
       esac
     done
+    # The whole URL is written into the container's managed settings (JSON):
+    # RFC 3986 characters only (no IPv6 brackets: the host check above
+    # refuses those already), so no quote, backslash or control character
+    # needs escaping. In a variable: a quoted regex would match literally.
+    p='^[A-Za-z0-9._~:/?#@!$&()*+,;=%-]+$'
+    if ! [[ $ANTHROPIC_BASE_URL =~ $p ]]; then
+      printf 'claude-docker: ANTHROPIC_BASE_URL %q has characters a URL may not contain\n' "$ANTHROPIC_BASE_URL" >&2
+      exit 1
+    fi
   fi
 }
 
@@ -508,6 +519,23 @@ http_access allow egress_model_endpoint
 http_access deny egress_model_providers
 http_access allow all
 EOF
+}
+
+# Emit the --egress-lock managed settings for Claude Code to stdout. Managed
+# settings beat the environment, the project's .claude/settings.json and
+# settings.local.json, and --settings, so a workspace can't move Claude Code's
+# model traffic off the endpoint. The URL alone isn't enough: a project that
+# switches on Bedrock, Vertex or Foundry sends the traffic to that backend's
+# own base URL, so all three are pinned off. Mounted read-only; the agent
+# can't replace it, and /etc/claude-code is root's. ANTHROPIC_BASE_URL has
+# passed validate_opts' URL character check, so it needs no JSON escaping.
+gen_egress_managed_settings() {
+  printf '{\n  "env": {\n'
+  printf '    "ANTHROPIC_BASE_URL": "%s",\n' "$ANTHROPIC_BASE_URL"
+  printf '    "CLAUDE_CODE_USE_BEDROCK": "0",\n'
+  printf '    "CLAUDE_CODE_USE_VERTEX": "0",\n'
+  printf '    "CLAUDE_CODE_USE_FOUNDRY": "0"\n'
+  printf '  }\n}\n'
 }
 
 # Save the proxy's access log, the session's evidence, to the host before the
@@ -1225,6 +1253,7 @@ start_egress_sidecar() {
       )
     fi
     gen_egress_squid_conf >"$stage/egress-squid.conf" || exit 1
+    gen_egress_managed_settings >"$stage/egress-managed-settings.json" || exit 1
     egress_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo unknown)
     egress_started=$(date -u +%Y%m%dT%H%M%SZ)
 
@@ -1268,7 +1297,8 @@ start_egress_sidecar() {
     # proxy. GitHub deliberately does NOT bypass it under --gh: no_proxy=github.com
     # would also match codeload.github.com, which has no direct route.
     egress_url="http://$egress_ip:3128"
-    MOUNT_ARGS+=("--network" "$EGRESS_NETWORK")
+    MOUNT_ARGS+=("--network" "$EGRESS_NETWORK"
+      "-v" "$(hostpath "$stage/egress-managed-settings.json"):/etc/claude-code/managed-settings.json:ro")
     ENV_ARGS+=(
       "-e" "http_proxy=$egress_url" "-e" "https_proxy=$egress_url"
       "-e" "HTTP_PROXY=$egress_url" "-e" "HTTPS_PROXY=$egress_url"

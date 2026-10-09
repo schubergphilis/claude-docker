@@ -74,7 +74,7 @@ endpoint_host=example.com endpoint_url=https://example.com
 if [ -n "$ENDPOINT_PORT" ]; then
   endpoint_host=github.com endpoint_url="https://github.com:$ENDPOINT_PORT"
 fi
-entry="EXPECT_EGRESS=1 EXPECT_EGRESS_GH=$WITH_GH EXPECT_EGRESS_ENDPOINT_PORT=$ENDPOINT_PORT EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
+entry="EXPECT_EGRESS=1 EXPECT_EGRESS_GH=$WITH_GH EXPECT_EGRESS_ENDPOINT_PORT=$ENDPOINT_PORT EXPECT_EGRESS_ENDPOINT_URL=$endpoint_url EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
 flags=(--api --egress-lock --ephemeral)
 envs=("${api_env[@]}"
       ANTHROPIC_BASE_URL="$endpoint_url"

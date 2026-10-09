@@ -627,6 +627,25 @@ check_egress() {
     "$(egress_code http_connect https://api.anthropic.com/)" "403"
   assert_eq "egress-provider: CONNECT claude.ai refused by proxy" \
     "$(egress_code http_connect https://claude.ai/)" "403"
+  # Claude Code's managed settings pin the endpoint over any project setting
+  # (tests/managed-settings-precedence.sh proves the precedence). Here: they
+  # are present, name this session's endpoint and switch the other backends
+  # off, and the agent can neither change them nor add a file beside them.
+  local ms=/etc/claude-code/managed-settings.json ms_json
+  ms_json=$(jq -c '.env' "$ms" 2>/dev/null) || ms_json=""
+  assert_eq "egress-managed: managed settings pin the endpoint, other backends off" "$ms_json" \
+    "{\"ANTHROPIC_BASE_URL\":\"${EXPECT_EGRESS_ENDPOINT_URL:-}\",\"CLAUDE_CODE_USE_BEDROCK\":\"0\",\"CLAUDE_CODE_USE_VERTEX\":\"0\",\"CLAUDE_CODE_USE_FOUNDRY\":\"0\"}"
+  if ( : >>"$ms" ) 2>/dev/null; then
+    fail "egress-managed-ro: the agent can write $ms"
+  else
+    pass "egress-managed-ro: $ms is read-only to the agent"
+  fi
+  if ( : >/etc/claude-code/extra.json ) 2>/dev/null; then
+    fail "egress-managed-dir: the agent can add files to /etc/claude-code"
+  else
+    pass "egress-managed-dir: /etc/claude-code is not writable by the agent"
+  fi
+
   if [ "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" = "1" ]; then
     pass "egress-telemetry: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
   else

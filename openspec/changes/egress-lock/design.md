@@ -206,14 +206,38 @@ Each of these aborts before the agent container starts:
 
 It never falls back to open egress.
 
+### D10. Managed settings pin Claude Code's endpoint
+
+Claude Code takes `ANTHROPIC_BASE_URL` from a project's `.claude/settings.json`
+over the process environment (found in review), so a workspace could move the
+model traffic to any host that isn't a provider's. The startup check sees only
+the environment. Under the lock, `run.sh` therefore writes Claude Code managed
+settings and mounts them read-only at `/etc/claude-code/managed-settings.json`.
+Managed settings take precedence over every other source. `/etc/claude-code`
+is root's, so the agent can't add a file next to them either.
+
+Pinning the URL alone isn't enough. A project that sets
+`CLAUDE_CODE_USE_BEDROCK`, `_VERTEX` or `_FOUNDRY` and that backend's base URL
+sends the traffic there, so all three are pinned to `0`. Tested against Claude
+Code 2.1.289 with two loopback logging servers: a project override via
+`settings.json`, `settings.local.json`, `--settings`, Bedrock, Vertex and
+Foundry each reached the managed endpoint and never the override, while
+without managed settings the `settings.json` override won.
+`tests/managed-settings-precedence.sh` repeats that in CI against the image.
+
+The whole URL goes into JSON, so `validate_opts` accepts only RFC 3986
+characters in it and nothing needs escaping.
+
+*Rejected:* narrowing the claim to "not Anthropic directly". The fix is one
+file, and the guarantee is what the feature is for.
+
 ## Risks / Trade-offs
 
-- **"Not Anthropic directly", not "only the gateway".** Claude Code takes
-  `ANTHROPIC_BASE_URL` from a workspace's `.claude/settings.json` over the
-  process environment, and the startup check only sees the environment. A
-  project can therefore send model traffic to any non-provider host. The proxy
-  can't tell model traffic from other traffic without TLS interception.
-  Documented as a limitation; see Open Questions.
+- **The endpoint pin is Claude Code's** (D10). Other programs in the session
+  reach every non-provider host by design, and the proxy can't tell model
+  traffic from other traffic without TLS interception. A model backend added
+  in a later Claude Code would need pinning off too; the CI precedence test is
+  where that shows when the `claude-code` pin moves.
 - **squid's cache manager** isn't reachable from the agent, but only because
   the port rule refuses 3128 (tasks.md 6.6). There is no explicit
   `http_access deny manager` (CVE-2024-23638's workaround), so a change to
@@ -236,8 +260,4 @@ It never falls back to open egress.
    Caddy + `forwardproxy` for both sidecars. If squid stays: add `http_access
    deny manager` as hardening, and decide how its CVEs are tracked given the Trivy gate's
    blind spot.
-2. **Enforce the endpoint, or narrow the claim.** Either keep "not Anthropic
-   directly" and say so everywhere, or stop a project from overriding the
-   endpoint. One candidate, untested: put `ANTHROPIC_BASE_URL` in Claude Code's
-   managed settings in the container (`/etc/claude-code/managed-settings.json`),
-   which take precedence over project settings.
+2. ~~**Enforce the endpoint, or narrow the claim.**~~ Enforced: D10.
