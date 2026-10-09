@@ -22,38 +22,10 @@
 #                   persisted settings.json is left as-is.
 #   --image=TAG     Docker image to run (default: claude-code:local)
 #   IMAGE=TAG       env var override for --image (checked if --image absent)
+#   HOST_UID=N      env var default for --uid (checked if --uid absent)
+#   HOST_GID=N      env var default for --gid (checked if --gid absent)
 #
 # Exit codes: 0 = cell passed, non-zero = cell failed.
-set -euo pipefail
-
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
-HOST_UID_ARG="${HOST_UID:-$(id -u)}"
-OPTINS=""
-VOLSTATE="cold"
-RO="0"
-EPHEMERAL="0"
-SETTINGS="1"
-IMAGE="${IMAGE:-claude-code:local}"
-
-# ---------------------------------------------------------------------------
-# Argument parsing
-# ---------------------------------------------------------------------------
-HOST_GID_ARG="${HOST_GID:-$(id -g)}"
-for arg in "$@"; do
-  case "$arg" in
-    --uid=*)       HOST_UID_ARG="${arg#--uid=}" ;;
-    --gid=*)       HOST_GID_ARG="${arg#--gid=}" ;;
-    --optins=*)    OPTINS="${arg#--optins=}" ;;
-    --volstate=*)  VOLSTATE="${arg#--volstate=}" ;;
-    --ro=*)        RO="${arg#--ro=}" ;;
-    --ephemeral=*) EPHEMERAL="${arg#--ephemeral=}" ;;
-    --settings=*)  SETTINGS="${arg#--settings=}" ;;
-    --image=*)     IMAGE="${arg#--image=}" ;;
-    *) echo "smoke.sh: unknown argument '$arg'" >&2; exit 1 ;;
-  esac
-done
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -64,61 +36,102 @@ log() { echo "[smoke] $*"; }
 die() { echo "[smoke] FAIL: $*" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
+# Argument parsing
+# ---------------------------------------------------------------------------
+# Values are checked, not just captured: a typo such as --ro=yes or
+# --volstate=wram would otherwise run a weaker cell and still report PASS.
+parse_args() {
+  local arg
+  HOST_UID_ARG="${HOST_UID:-$(id -u)}"
+  HOST_GID_ARG="${HOST_GID:-$(id -g)}"
+  OPTINS=""
+  VOLSTATE="cold"
+  RO="0"
+  EPHEMERAL="0"
+  SETTINGS="1"
+  IMAGE="${IMAGE:-claude-code:local}"
+  for arg in "$@"; do
+    case "$arg" in
+      --uid=*)       HOST_UID_ARG="${arg#--uid=}" ;;
+      --gid=*)       HOST_GID_ARG="${arg#--gid=}" ;;
+      --optins=*)    OPTINS="${arg#--optins=}" ;;
+      --volstate=*)  VOLSTATE="${arg#--volstate=}" ;;
+      --ro=*)        RO="${arg#--ro=}" ;;
+      --ephemeral=*) EPHEMERAL="${arg#--ephemeral=}" ;;
+      --settings=*)  SETTINGS="${arg#--settings=}" ;;
+      --image=*)     IMAGE="${arg#--image=}" ;;
+      *) die "unknown argument '$arg'" ;;
+    esac
+  done
+  [[ "$HOST_UID_ARG" =~ ^[0-9]+$ ]] || die "--uid must be numeric, got '$HOST_UID_ARG'"
+  [[ "$HOST_GID_ARG" =~ ^[0-9]+$ ]] || die "--gid must be numeric, got '$HOST_GID_ARG'"
+  case "$VOLSTATE" in cold|warm) ;; *) die "--volstate must be cold or warm, got '$VOLSTATE'" ;; esac
+  case "$RO" in 0|1) ;; *) die "--ro must be 0 or 1, got '$RO'" ;; esac
+  case "$EPHEMERAL" in 0|1) ;; *) die "--ephemeral must be 0 or 1, got '$EPHEMERAL'" ;; esac
+  case "$SETTINGS" in 0|1) ;; *) die "--settings must be 0 or 1, got '$SETTINGS'" ;; esac
+}
+
+# ---------------------------------------------------------------------------
 # Temp workspace + cleanup
 # ---------------------------------------------------------------------------
+
+cleanup() {
+  if [ -n "${VOL_NAME:-}" ]; then
+    docker volume rm "${VOL_NAME}-root" >/dev/null 2>&1 || true
+    docker volume rm "${VOL_NAME}-home" >/dev/null 2>&1 || true
+  fi
+  if [ -n "${TMPROOT:-}" ]; then
+    rm -rf "${TMPROOT}"
+  fi
+}
+
 # Staged under $HOME, not the mktemp default: everything under TMPROOT is
 # bind-mounted into containers, and macOS docker VMs don't share the default
 # location (Colima shares only $HOME; /var/folders is invisible to it), so
 # sources there arrive as empty dirs in-container. macOS mktemp ignores even
 # an explicit TMPDIR override for no-template invocations, hence the explicit
 # template. Same rationale as run.sh's stage_root.
-smoke_stage_root="${HOME}/.cache/claude-docker"
-mkdir -p "${smoke_stage_root}"
-TMPROOT=$(mktemp -d "${smoke_stage_root}/smoke.XXXXXX")
-# run.sh mounts each workspace at /workspaces/<basename>, so the dir is named
-# "smoke" to land at the path assert-in-container.sh expects.
-WORKSPACE_HOST="${TMPROOT}/smoke"
-# run.sh reads host credentials and Claude config from $HOME; point it at a
-# fake home so a cell only ever sees the fixtures below, never the real ones.
-FAKE_HOME="${TMPROOT}/home"
-SHIM_DIR="${TMPROOT}/bin"
-mkdir -p "${WORKSPACE_HOST}" "${FAKE_HOME}/.claude" "${SHIM_DIR}"
-# Make the workspace world-writable so a container running as a synthetic
-# HOST_UID (e.g. 501) that differs from the CI runner's UID can write into it —
-# in production the workspace is the user's own repo, owned by HOST_UID and
-# writable. Without this, the runner-owned (0755) dir blocks the non-runner UID
-# cells. Files the container creates are owned by HOST_UID; the host-side
-# ownership assertion below only runs when HOST_UID matches the runner so it
-# can read that ownership back.
-chmod 0777 "${WORKSPACE_HOST}"
-
-# Per-cell named volumes, substituted for run.sh's claude-code-root/-home by
-# the docker shim below. Empty for --ephemeral (run.sh mounts none).
-VOL_NAME=""
-[ "${EPHEMERAL}" = "0" ] && VOL_NAME="smoke-test-$$"
-CONTAINER_STDERR="${TMPROOT}/container_stderr.txt"
-
-cleanup() {
-  if [ -n "${VOL_NAME}" ]; then
-    docker volume rm "${VOL_NAME}-root" >/dev/null 2>&1 || true
-    docker volume rm "${VOL_NAME}-home" >/dev/null 2>&1 || true
+setup_workspace() {
+  local smoke_stage_root="${HOME}/.cache/claude-docker" script_dir assert_script
+  mkdir -p "${smoke_stage_root}" || die "cannot create ${smoke_stage_root}"
+  TMPROOT=$(mktemp -d "${smoke_stage_root}/smoke.XXXXXX") || die "mktemp failed"
+  # Per-cell named volumes, substituted for run.sh's claude-code-root/-home by
+  # the docker shim. Empty for --ephemeral (run.sh mounts none).
+  VOL_NAME=""
+  if [ "${EPHEMERAL}" = "0" ]; then
+    VOL_NAME="smoke-test-$$"
   fi
-  rm -rf "${TMPROOT}"
-}
-trap cleanup EXIT
+  # Right after mktemp, so a failing mkdir or cp below can't leak the dir.
+  trap cleanup EXIT
+  # run.sh mounts each workspace at /workspaces/<basename>, so the dir is named
+  # "smoke" to land at the path assert-in-container.sh expects.
+  WORKSPACE_HOST="${TMPROOT}/smoke"
+  # run.sh reads host credentials and Claude config from $HOME; point it at a
+  # fake home so a cell only ever sees the fixtures below, never the real ones.
+  FAKE_HOME="${TMPROOT}/home"
+  SHIM_DIR="${TMPROOT}/bin"
+  CONTAINER_STDERR="${TMPROOT}/container_stderr.txt"
+  mkdir -p "${WORKSPACE_HOST}" "${FAKE_HOME}/.claude" "${SHIM_DIR}" || die "cannot create the temp workspace"
+  # Make the workspace world-writable so a container running as a synthetic
+  # HOST_UID (e.g. 501) that differs from the CI runner's UID can write into it —
+  # in production the workspace is the user's own repo, owned by HOST_UID and
+  # writable. Without this, the runner-owned (0755) dir blocks the non-runner UID
+  # cells. Files the container creates are owned by HOST_UID; the host-side
+  # ownership assertion reads that ownership back.
+  chmod 0777 "${WORKSPACE_HOST}" || die "cannot chmod ${WORKSPACE_HOST}"
 
-# ---------------------------------------------------------------------------
-# Copy assert-in-container.sh into the workspace so the entrypoint can exec it.
-# ---------------------------------------------------------------------------
-# Resolve this script's dir portably — `realpath` is GNU coreutils and is not
-# on stock macOS (where the Phase 2b job runs smoke.sh on the host directly).
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ASSERT_SCRIPT="${SCRIPT_DIR}/assert-in-container.sh"
-RUN_SH="$(cd "${SCRIPT_DIR}/.." && pwd)/run.sh"
-[ -f "${ASSERT_SCRIPT}" ] || die "assert-in-container.sh not found at: ${ASSERT_SCRIPT}"
-[ -f "${RUN_SH}" ] || die "run.sh not found at: ${RUN_SH}"
-cp "${ASSERT_SCRIPT}" "${WORKSPACE_HOST}/assert-in-container.sh"
-chmod +x "${WORKSPACE_HOST}/assert-in-container.sh"
+  # Copy assert-in-container.sh into the workspace so the entrypoint can exec
+  # it. Resolve this script's dir portably — `realpath` is GNU coreutils and
+  # is not on stock macOS (where the Phase 2b job runs smoke.sh on the host
+  # directly).
+  script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+  assert_script="${script_dir}/assert-in-container.sh"
+  RUN_SH="$(cd "${script_dir}/.." && pwd)/run.sh"
+  [ -f "${assert_script}" ] || die "assert-in-container.sh not found at: ${assert_script}"
+  [ -f "${RUN_SH}" ] || die "run.sh not found at: ${RUN_SH}"
+  cp "${assert_script}" "${WORKSPACE_HOST}/assert-in-container.sh" || die "cannot copy ${assert_script}"
+  chmod +x "${WORKSPACE_HOST}/assert-in-container.sh"
+}
 
 # ---------------------------------------------------------------------------
 # docker shim. The cell drives the real run.sh, so every security flag, mount
@@ -133,8 +146,9 @@ chmod +x "${WORKSPACE_HOST}/assert-in-container.sh"
 # longer carries those args, so a rename in run.sh cannot silently point a cell
 # at the real volumes.
 # ---------------------------------------------------------------------------
-SMOKE_REAL_DOCKER=$(command -v docker) || die "docker not found on PATH"
-cat > "${SHIM_DIR}/docker" <<'SHIM'
+write_docker_shim() {
+  SMOKE_REAL_DOCKER=$(command -v docker) || die "docker not found on PATH"
+  cat > "${SHIM_DIR}/docker" <<'SHIM'
 #!/usr/bin/env bash
 [ "${1:-}" = "run" ] || exec "$SMOKE_REAL_DOCKER" "$@"
 agent=0
@@ -161,32 +175,35 @@ if [ "$ids" != 2 ] || [ "$vols" != "$want_vols" ]; then
 fi
 exec "$SMOKE_REAL_DOCKER" "${args[@]}"
 SHIM
-chmod +x "${SHIM_DIR}/docker"
-DOCKER_ENV=("DOCKER_CONFIG=${DOCKER_CONFIG:-${HOME}/.docker}")
-[ -n "${DOCKER_HOST:-}" ] && DOCKER_ENV+=("DOCKER_HOST=${DOCKER_HOST}")
-[ -n "${DOCKER_CONTEXT:-}" ] && DOCKER_ENV+=("DOCKER_CONTEXT=${DOCKER_CONTEXT}")
+  chmod +x "${SHIM_DIR}/docker"
+  DOCKER_ENV=("DOCKER_CONFIG=${DOCKER_CONFIG:-${HOME}/.docker}")
+  if [ -n "${DOCKER_HOST:-}" ]; then
+    DOCKER_ENV+=("DOCKER_HOST=${DOCKER_HOST}")
+  fi
+  if [ -n "${DOCKER_CONTEXT:-}" ]; then
+    DOCKER_ENV+=("DOCKER_CONTEXT=${DOCKER_CONTEXT}")
+  fi
+}
 
 # ---------------------------------------------------------------------------
 # run.sh flags + fixtures
 # ---------------------------------------------------------------------------
-RUN_FLAGS=()
-[ "${RO}" = "1" ] && RUN_FLAGS+=("--ro")
-[ "${EPHEMERAL}" = "1" ] && RUN_FLAGS+=("--ephemeral")
-OPTIN_ENV=()
 
 # Settings fixture — the host-side settings.docker.json run.sh forwards to the
 # seed path; the entrypoint copies it to /root/.claude/settings.json.
 # The sentinel proves the seeded copy came from OUR fixture; the in-container
 # check also renames a tmp file over the copy — the regression that motivated
 # the seed-copy design (rename() over a single-file bind mount → EBUSY).
-# The fixture and these two are mutable across warm-cell passes (see the warm
-# branch below), so run_container reads the current values.
-SETTINGS_FIXTURE="${FAKE_HOME}/.claude/settings.docker.json"
-SETTINGS_SENTINEL="SMOKE-SENTINEL-SETTINGS"
-EXPECT_SETTINGS_MODE="${SETTINGS}"
-if [ "${SETTINGS}" = "1" ]; then
-  printf '{"env":{"SMOKE_SENTINEL":"%s"}}\n' "${SETTINGS_SENTINEL}" > "${SETTINGS_FIXTURE}"
-fi
+# The fixture and these two are mutable across warm-cell passes (see
+# run_cell), so run_container reads the current values.
+setup_settings() {
+  SETTINGS_FIXTURE="${FAKE_HOME}/.claude/settings.docker.json"
+  SETTINGS_SENTINEL="SMOKE-SENTINEL-SETTINGS"
+  EXPECT_SETTINGS_MODE="${SETTINGS}"
+  if [ "${SETTINGS}" = "1" ]; then
+    printf '{"env":{"SMOKE_SENTINEL":"%s"}}\n' "${SETTINGS_SENTINEL}" > "${SETTINGS_FIXTURE}"
+  fi
+}
 
 # Fake credentials at the host paths run.sh reads, under the fake $HOME.
 # Each fake cred embeds the literal SMOKE-SENTINEL string. The in-container
@@ -233,11 +250,19 @@ setup_fake_az() {
   OPTIN_ENV+=("AZURE_DEVOPS_EXT_PAT=SMOKE-SENTINEL-AZ")
 }
 
-if [ -n "${OPTINS}" ]; then
-  old_ifs="$IFS"
-  IFS=','
-  # shellcheck disable=SC2086  # word-split on IFS is intentional for CSV parsing
-  for optin in ${OPTINS}; do
+# Turn --ro/--ephemeral and each opt-in into run.sh flags, env and fixtures.
+parse_optins() {
+  local optin optins=()
+  RUN_FLAGS=()
+  OPTIN_ENV=()
+  if [ "${RO}" = "1" ]; then
+    RUN_FLAGS+=("--ro")
+  fi
+  if [ "${EPHEMERAL}" = "1" ]; then
+    RUN_FLAGS+=("--ephemeral")
+  fi
+  IFS=, read -ra optins <<< "${OPTINS}"
+  for optin in "${optins[@]+"${optins[@]}"}"; do
     case "$optin" in
       aws)  setup_fake_aws  ;;
       glab) setup_fake_glab ;;
@@ -247,8 +272,7 @@ if [ -n "${OPTINS}" ]; then
       *)    die "unknown opt-in: '$optin'" ;;
     esac
   done
-  IFS="$old_ifs"
-fi
+}
 
 # ---------------------------------------------------------------------------
 # Single-run helper
@@ -287,11 +311,11 @@ run_container() {
 # Execute
 # ---------------------------------------------------------------------------
 
-CELL_DESC="uid=${HOST_UID_ARG} gid=${HOST_GID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL} settings=${SETTINGS}"
-log "Cell: ${CELL_DESC}"
-log "Image: ${IMAGE}"
-
-if [ "${VOLSTATE}" = "warm" ]; then
+run_cell() {
+  if [ "${VOLSTATE}" != "warm" ]; then
+    run_container
+    return
+  fi
   # First run: cold — populates the named volume.
   log "Warm cell: running cold pass first..."
   run_container
@@ -317,56 +341,74 @@ if [ "${VOLSTATE}" = "warm" ]; then
     log "Warm cell: warm pass done; running no-seed pass (persisted settings kept)..."
     run_container
   fi
-else
-  run_container
-fi
+}
 
 # ---------------------------------------------------------------------------
 # Host-side assertions
 # ---------------------------------------------------------------------------
 
-PROBE_FILE="${WORKSPACE_HOST}/smoke-probe.txt"
+assert_host() {
+  local probe_file="${WORKSPACE_HOST}/smoke-probe.txt" probe_owner
 
-# 1 & 2. Probe file checks — skipped when RO=1 (workspace is :ro, container
-#         cannot write to it; the RO cell tests entrypoint EROFS robustness only).
-if [ "${RO}" = "0" ]; then
-  # 1. The container wrote the probe file and it is non-empty.
-  if [ ! -f "${PROBE_FILE}" ]; then
-    die "host-side: probe file not created by container: ${PROBE_FILE}"
-  fi
-  if [ ! -s "${PROBE_FILE}" ]; then
-    die "host-side: probe file is empty: ${PROBE_FILE}"
-  fi
-  log "host-side PASS: probe file exists and non-empty"
+  # 1 & 2. Probe file checks — skipped when RO=1 (workspace is :ro, container
+  #         cannot write to it; the RO cell tests entrypoint EROFS robustness only).
+  if [ "${RO}" = "0" ]; then
+    # 1. The container wrote the probe file and it is non-empty.
+    if [ ! -f "${probe_file}" ]; then
+      die "host-side: probe file not created by container: ${probe_file}"
+    fi
+    if [ ! -s "${probe_file}" ]; then
+      die "host-side: probe file is empty: ${probe_file}"
+    fi
+    log "host-side PASS: probe file exists and non-empty"
 
-  # 2. Probe file owned by HOST_UID on the host. Bind mounts pass UIDs through
-  #    numerically, so a file the container wrote as HOST_UID is owned by that
-  #    same UID on the host — `stat` reads it back regardless of the runner's own
-  #    UID (so this covers the uid=501 cell too). Skipped only for HOST_UID=0,
-  #    where the file is root-owned and ownership round-trip is not the point.
-  if [ "${HOST_UID_ARG}" != "0" ]; then
-    PROBE_OWNER=$(stat -c '%u' "${PROBE_FILE}" 2>/dev/null || stat -f '%u' "${PROBE_FILE}" 2>/dev/null)
-    if [ "${PROBE_OWNER}" = "${HOST_UID_ARG}" ]; then
-      log "host-side PASS: probe file owned by ${HOST_UID_ARG}"
-    else
-      die "host-side: probe file owned by ${PROBE_OWNER}, expected ${HOST_UID_ARG}"
+    # 2. Probe file owned by HOST_UID on the host. Bind mounts pass UIDs through
+    #    numerically, so a file the container wrote as HOST_UID is owned by that
+    #    same UID on the host — `stat` reads it back regardless of the runner's own
+    #    UID (so this covers the uid=501 cell too). Skipped only for HOST_UID=0,
+    #    where the file is root-owned and ownership round-trip is not the point.
+    if [ "${HOST_UID_ARG}" != "0" ]; then
+      probe_owner=$(stat -c '%u' "${probe_file}" 2>/dev/null || stat -f '%u' "${probe_file}" 2>/dev/null) \
+        || die "host-side: cannot stat probe file: ${probe_file}"
+      if [ "${probe_owner}" = "${HOST_UID_ARG}" ]; then
+        log "host-side PASS: probe file owned by ${HOST_UID_ARG}"
+      else
+        die "host-side: probe file owned by ${probe_owner}, expected ${HOST_UID_ARG}"
+      fi
     fi
   fi
-fi
 
-# 3. Robustness: no spurious 'entrypoint: WARN' on stderr — asserted for EVERY
-#    cell, not just RO. The entrypoint only chowns /root + /root/.claude
-#    (entrypoint.sh chown_volumes), so the :ro *workspace* mount never trips the chown→EROFS
-#    filter; the mounts that DO sit under /root are the credential opt-in mounts
-#    (--aws/--glab/--tfe/--az), so the opt-in cells are what actually pin the
-#    WARN-suppression filter (entrypoint.sh chown_volumes). Checking every cell ensures a
-#    triggering condition is covered. NOTE: CONTAINER_STDERR is overwritten per
-#    run_container(), so for a warm cell this reflects only the last pass —
-#    acceptable here since the passes differ only in the settings seed mount
-#    at /run, which the chown walk (the WARN source) never touches.
-if grep -q 'entrypoint: WARN' "${CONTAINER_STDERR}" 2>/dev/null; then
-  die "host-side: unexpected 'entrypoint: WARN' on container stderr"
-fi
-log "host-side PASS: no spurious entrypoint WARN on stderr"
+  # 3. Robustness: no spurious 'entrypoint: WARN' on stderr — asserted for EVERY
+  #    cell, not just RO. The entrypoint only chowns /root + /root/.claude
+  #    (entrypoint.sh chown_volumes), so the :ro *workspace* mount never trips the chown→EROFS
+  #    filter; the mounts that DO sit under /root are the credential opt-in mounts
+  #    (--aws/--glab/--tfe/--az), so the opt-in cells are what actually pin the
+  #    WARN-suppression filter (entrypoint.sh chown_volumes). Checking every cell ensures a
+  #    triggering condition is covered. NOTE: CONTAINER_STDERR is overwritten per
+  #    run_container(), so for a warm cell this reflects only the last pass —
+  #    acceptable here since the passes differ only in the settings seed mount
+  #    at /run, which the chown walk (the WARN source) never touches.
+  if grep -q 'entrypoint: WARN' "${CONTAINER_STDERR}" 2>/dev/null; then
+    die "host-side: unexpected 'entrypoint: WARN' on container stderr"
+  fi
+  log "host-side PASS: no spurious entrypoint WARN on stderr"
+}
 
-log "Cell PASS: ${CELL_DESC}"
+main() {
+  set -euo pipefail
+  parse_args "$@"
+  setup_workspace
+  write_docker_shim
+  setup_settings
+  parse_optins
+  CELL_DESC="uid=${HOST_UID_ARG} gid=${HOST_GID_ARG} optins='${OPTINS}' volstate=${VOLSTATE} ro=${RO} ephemeral=${EPHEMERAL} settings=${SETTINGS}"
+  log "Cell: ${CELL_DESC}"
+  log "Image: ${IMAGE}"
+  run_cell
+  assert_host
+  log "Cell PASS: ${CELL_DESC}"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
