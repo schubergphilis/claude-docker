@@ -24,6 +24,12 @@
 # If the gate goes red on an ID listed below, suspect a lapsed expiry first. Trivy
 # stops suppressing silently on that date and reports the finding as if it were
 # new, with nothing pointing back at this file.
+#
+# A deb finding whose fixed version is already in the Ubuntu archive points at
+# the cached apt layer instead: the CI build and the weekly scan reuse it from
+# the gha cache, so they keep reporting what a fresh build would not. The
+# published image is built without that cache. Changing the apt RUN in the
+# Dockerfile rebuilds the layer and clears it; don't add an entry here for it.
 
 # gh vendors golang.org/x/mod v0.39.0 and the fix needs 0.40.0, which shipped
 # 2026-08-13, three weeks before gh 2.99.0 — upstream skipped it once already.
