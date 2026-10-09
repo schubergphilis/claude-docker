@@ -87,6 +87,28 @@ Under `--egress-lock`, `run.sh` SHALL exit 1 before creating any container resou
 - **WHEN** the agent requests `https://example.com/`, `https://example.org/` and `https://api.anthropic.com/` through the proxy
 - **THEN** the first two succeed and the proxy answers `CONNECT api.anthropic.com` with 403
 
+### Requirement: Claude Code's endpoint can't be moved by the workspace
+
+Under `--egress-lock`, `run.sh` SHALL refuse an `ANTHROPIC_BASE_URL` with any character outside RFC 3986's unreserved, reserved (except `[` and `]`) and `%`. It SHALL mount Claude Code managed settings read-only at `/etc/claude-code/managed-settings.json` whose `env` sets `ANTHROPIC_BASE_URL` to the session's endpoint and `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_FOUNDRY` to `0`. Sessions without `--egress-lock` SHALL NOT get this file.
+
+#### Scenario: A project setting doesn't move the model traffic
+
+- **GIVEN** an `--egress-lock` session whose workspace `.claude/settings.json` sets `ANTHROPIC_BASE_URL` to another host, or switches on Bedrock, Vertex or Foundry with a base URL of its own
+- **WHEN** Claude Code sends a model request
+- **THEN** the request goes to the session's endpoint, not to the project's host
+
+#### Scenario: The agent can't change the managed settings
+
+- **GIVEN** an `--egress-lock` session
+- **WHEN** the agent tries to write `/etc/claude-code/managed-settings.json` or create a file in `/etc/claude-code`
+- **THEN** both fail
+
+#### Scenario: A URL that needs escaping is refused
+
+- **GIVEN** `ANTHROPIC_BASE_URL` contains a `"`, a backslash, a quote or whitespace
+- **WHEN** the user runs `claude-docker --api --egress-lock ~/repo`
+- **THEN** `run.sh` exits 1, and no container starts
+
 ### Requirement: The session's egress log is saved on the host
 
 When an `--egress-lock` session whose proxy was started exits, the EXIT trap SHALL, before removing the proxy, write the proxy's access log to `<state>/claude-docker/egress/<start>-<id>.log` and a `<start>-<id>.meta` file of `key=value` lines (`start`, `end`, `user`, `host`, `workspace`, `image`, `image_id`, `endpoint`), where `<state>` is `$XDG_STATE_HOME` or `~/.local/state`. That directory SHALL NOT be mounted into any container. `run.sh` SHALL NOT rotate or delete saved logs.
