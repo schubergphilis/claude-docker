@@ -213,6 +213,7 @@ class TestRedirectAuthStrip(unittest.TestCase):
 # what proves the shape still matches reality.
 SENTINEL = "9.8.7"
 VERSION_OUTPUT_SAMPLES = {
+    "npm": SENTINEL,
     "claude-code": f"{SENTINEL} (Claude Code)",
     "openspec": SENTINEL,
     "pnpm": SENTINEL,

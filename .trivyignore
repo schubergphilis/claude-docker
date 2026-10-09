@@ -45,18 +45,19 @@ CVE-2026-78667 exp:2026-10-23
 # Same gh binary and Go 1.27.1 gap: crypto/tls ECH extensions, same fix
 # versions. Its own entry because suppression is per-ID.
 CVE-2026-97031 exp:2026-10-23
-# npm@11.19.1 (Dockerfile) vendors brace-expansion 5.0.9; the fix needs 5.0.10.
-# No npm release bundles it yet (11.20.0 and 12.1.0 still ship 5.0.9). Only
-# npm's own tree carries it. At expiry, bump the npm pin if a release has it.
-# The expiry is earlier than the gh entries on purpose: nothing else watches
-# the npm pin (#51), and npm releases every 2-4 weeks, so this date is the
-# prompt to check the next release.
-CVE-2026-102276 exp:2026-10-21
+# npm (pins/npm.env) vendors brace-expansion 5.0.9; the fix needs 5.0.10,
+# released upstream 2026-09-14. No npm release bundles it yet: 11.21.0 and
+# 12.2.0 (2026-09-30) still ship 5.0.9. Only npm's own tree carries it. npm is
+# now an automated pin, so the weekly refresh bumps it once a release carrying
+# the fix has soaked (7 days). npm releases every 1-4 weeks, so 2026-11-04
+# allows two release cycles plus the soak. At expiry, check the bundled version
+# in the pinned npm and drop this if it's fixed.
+CVE-2026-102276 exp:2026-11-04
 # Same package and gap as above; the fix needs brace-expansion 5.0.11.
-CVE-2026-102278 exp:2026-10-21
-# npm@11.19.1 vendors undici 6.28.0; the fix needs 6.28.1. No npm release
-# bundles it yet. At expiry, bump the npm pin if a release has it.
-CVE-2026-19534 exp:2026-10-21
+CVE-2026-102278 exp:2026-11-04
+# npm vendors undici 6.28.0; the fix needs 6.28.1, released upstream
+# 2026-09-04 and not yet bundled by 11.21.0 or 12.2.0. Same expiry reasoning.
+CVE-2026-19534 exp:2026-11-04
 # Scope note: trivy ignores are per-CVE-ID and image-wide, unlike the path- and
 # version-scoped .grype.yaml rule for the same two CVEs. That is fine while
 # /opt/az holds the image's only cryptography 48.x copy (pins/az-requirements.txt);
