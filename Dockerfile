@@ -205,8 +205,12 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 # assumes are one tree).
 # MANUAL pin, like NODE_VERSION above and NOT a pins/ fragment: go.dev's release
 # JSON carries no publish dates, so update_pins.py cannot evaluate its soak
-# window for Go — it only reminds the operator to look. 1.26.6 was tagged
-# 2026-08-13, i.e. it had already cleared the 7-day soak when pinned here.
+# window for Go — it only reminds the operator to look. 1.26.9 was pinned on
+# 2026-10-09, one day after its 2026-10-08 tag, i.e. INSIDE the 7-day soak, on
+# purpose: it fixes two stdlib CVEs (CVE-2026-78667 net/http, CVE-2026-97031
+# crypto/tls) that fail the Trivy gate, and .trivyignore must not hide a
+# finding a bump can fix. Both hashes were checked against locally downloaded
+# tarballs. The next bump goes back to the normal soak.
 # Bump with (version + both hashes in one shot):
 #   curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r '.[] | select(.stable) |
 #     .version, (.files[] | select(.os=="linux" and .kind=="archive" and
@@ -216,9 +220,9 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 # Placed before the npm layer on purpose — the tarball is ~64 MB and Go moves far
 # less often than the claude-code pin, so a weekly claude-code bump does not
 # re-download it.
-ARG GO_VERSION=1.26.6
-ARG GO_SHA256_AMD64=708effb774be8237570d0add163225abbdfaf4fca28b2611df167beba4feef89
-ARG GO_SHA256_ARM64=d0507e9e9d7fe012aae570108cbd76c15de879e17130ab8cb90d4d7445cb1f2e
+ARG GO_VERSION=1.26.9
+ARG GO_SHA256_AMD64=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d
+ARG GO_SHA256_ARM64=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052
 RUN ARCH=$(dpkg --print-architecture); \
     case "$ARCH" in \
       amd64) SHA="${GO_SHA256_AMD64}" ;; \
