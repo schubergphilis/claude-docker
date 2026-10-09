@@ -61,14 +61,20 @@ ignore:
       name: undici
       version: 6.28.0
       location: "**/node_modules/npm/**"
-    reason: Bundled by npm; no npm release carries 6.28.1 yet. Moves with pins/npm.env.
+    reason: >-
+      Bundled by npm; no npm release carries 6.28.1 yet. Moves with
+      pins/npm.env.
   - package:
       name: brace-expansion
       version: 5.0.9
       location: "**/node_modules/npm/**"
-    reason: Bundled by npm; no npm release carries 5.0.10+ yet. Moves with pins/npm.env.
+    reason: >-
+      Bundled by npm; no npm release carries 5.0.10+ yet. Moves with
+      pins/npm.env.
   - package:
       name: http-cache-semantics
       version: 4.2.0
       location: "**/node_modules/npm/**"
-    reason: Bundled by npm; the advisory lists no patched version. Moves with pins/npm.env.
+    reason: >-
+      Bundled by npm; the advisory lists no patched version. Moves with
+      pins/npm.env.
