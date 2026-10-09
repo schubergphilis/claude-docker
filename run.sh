@@ -526,8 +526,11 @@ egress_save_log() {
   printf 'start=%s\nend=%s\nuser=%s\nhost=%s\nworkspace=%s\nimage=%s\nimage_id=%s\nendpoint=%s\n' \
     "$egress_started" "$(date -u +%Y%m%dT%H%M%SZ)" "$(id -un)" "$(uname -n)" \
     "${WORKSPACES[*]}" "$IMAGE" "$egress_image_id" "$egress_api_host" >"$base.meta"
+  # Keep a non-default port: "example.com" for a refused example.com:8443
+  # reads as "the endpoint is blocked".
   denied=$(awk '$4 ~ /^TCP_DENIED\// {print $7}' "$base.log" \
-    | sed -e 's#^[A-Za-z]*://##' -e 's#[/:].*##' | sort -u | tr '\n' ' ') || true
+    | sed -e 's#^[A-Za-z]*://##' -e 's#[/?].*##' -e 's#:443$##' -e 's#:80$##' \
+    | sort -u | tr '\n' ' ') || true
   [ -n "$denied" ] && echo "claude-docker: egress proxy blocked: ${denied}" >&2
   echo "claude-docker: egress log saved to $base.log" >&2
   return 0

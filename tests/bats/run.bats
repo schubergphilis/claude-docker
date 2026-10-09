@@ -545,13 +545,15 @@ http_access allow all" ]
   [ ! -e "$EGRESS_LOG_DIR" ]
 }
 
-@test "egress_save_log: writes the log and meta, and lists each denied host once" {
+@test "egress_save_log: writes the log and meta, and lists each denied host:port once" {
   egress_started=20260101T000000Z gh_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
   egress_api_host=llm.example.eu egress_image_id=sha256:img WORKSPACES=("$WS")
   STUB_LOGS="1.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -
 2.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html
 3.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html
-4.000 5 10.0.0.3 TCP_DENIED/403 3900 GET http://169.254.169.254/latest - HIER_NONE/- text/html"
+4.000 5 10.0.0.3 TCP_DENIED/403 3900 GET http://169.254.169.254/latest - HIER_NONE/- text/html
+5.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT example.com:8443 - HIER_NONE/- text/html
+6.000 5 10.0.0.3 TCP_DENIED/403 3900 GET http://plain.example:80/x - HIER_NONE/- text/html"
   run egress_save_log
   [ "$status" -eq 0 ]
   local base="$EGRESS_LOG_DIR/20260101T000000Z-abc"
@@ -560,7 +562,7 @@ http_access allow all" ]
   grep -qx "image_id=sha256:img" "$base.meta"
   grep -qx "workspace=$WS" "$base.meta"
   [ "$(grep -c '^[a-z_]*=' "$base.meta")" -eq 8 ]
-  [[ "$output" == *"egress proxy blocked: 169.254.169.254 api.anthropic.com "* ]]
+  [[ "$output" == *"egress proxy blocked: 169.254.169.254 api.anthropic.com example.com:8443 plain.example "* ]]
   [[ "$output" == *"egress log saved to $base.log"* ]]
 }
 

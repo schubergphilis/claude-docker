@@ -218,9 +218,6 @@ It never falls back to open egress.
   the port rule refuses 3128 (tasks.md 6.6). There is no explicit
   `http_access deny manager` (CVE-2024-23638's workaround), so a change to
   the port rules would expose it.
-- **The end-of-session summary drops the port.** A refused `CONNECT
-  gateway:8443` is printed as `gateway`, which reads as the endpoint being
-  blocked. The log itself keeps `host:port`.
 - **Log completeness** depends on squid (CVE-2026-61642, D5), and on `run.sh`
   reaching its EXIT trap. A SIGKILLed `run.sh` loses that session's log.
 - **A `CONNECT` to a provider's raw IP** isn't matched by the name deny.
