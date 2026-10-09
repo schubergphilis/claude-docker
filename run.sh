@@ -15,6 +15,16 @@ IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
 # routine automated bump. run.sh cannot read pins/, so the pin lives here.
 PROXY_IMAGE="${CLAUDE_DOCKER_PROXY_IMAGE:-caddy:2.11.4@sha256:844f60b64e4724a5aa8245e019dace0d3f199f7433ce6c57676cb30a920dbad9}"
 
+# --egress-lock proxy image: squid on Alpine, built on the host the first time
+# --egress-lock runs (ensure_egress_image), so the agent image carries no
+# squid. Alpine, not Ubuntu: its squid takes upstream security fixes sooner
+# (7.6, with CVE-2026-61642's fix, while Ubuntu's 7.2 had none). The base is
+# digest-pinned and, like PROXY_IMAGE, bumped by hand: squid's config
+# semantics are the policy. SQUID_MIN is a floor, not a pin, because Alpine
+# keeps only the newest build of a package in a branch.
+EGRESS_PROXY_BASE="alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
+EGRESS_PROXY_SQUID_MIN="7.6"
+
 # Keep this in sync with the flag-parsing case statement below — adding or
 # removing a wrapper flag means updating both the case branch and this heredoc
 # in the same diff.
@@ -132,6 +142,10 @@ Environment:
                            and works in scripts, CI, and non-interactive shells.
   CLAUDE_DOCKER_PROXY_IMAGE Override the digest-pinned Caddy image used by the
                            --gh auth-proxy sidecar.
+  CLAUDE_DOCKER_EGRESS_PROXY_IMAGE
+                           Use this squid image for --egress-lock instead of
+                           building one on first use (e.g. without network
+                           access to Alpine's mirrors). Runs as user squid.
   CLAUDE_DOCKER_GH_POLICY  Path to a Caddyfile snippet imported into the --gh
                            sidecar's api.github.com site block, to extend the
                            default request-filtering policy.
@@ -207,10 +221,12 @@ EGRESS_MODEL_PROVIDERS=".anthropic.com .claude.ai .claude.com"
 EGRESS_NETWORK=""
 EGRESS_OUT_NETWORK=""
 EGRESS_SIDECAR=""
+EGRESS_IMAGE=""
 egress_api_host=""
 egress_api_port=""
 egress_started=""
 egress_image_id=""
+egress_proxy_image_id=""
 
 parse_args() {
   local arg saw_sep=0
@@ -471,7 +487,9 @@ hostpath() {
 # and port validators in validate_opts, so no whitespace, quote, or newline can
 # reach this file.
 # Rule order is the security property:
-#  - metadata/link-local and loopback are refused first, above every allow.
+#  - the cache manager is refused first (CVE-2024-23638's workaround): the port
+#    rules below would refuse it too, but only by accident.
+#  - metadata/link-local and loopback are refused next, above every allow.
 #  - the model endpoint's own port is allowed for the endpoint only, above the
 #    80/443 port rules, so a gateway on e.g. :8443 or LiteLLM's :4000 works
 #    while every other host stays on 80/443.
@@ -509,6 +527,7 @@ EOF
   printf 'acl egress_model_providers dstdomain -n %s\n' "$EGRESS_MODEL_PROVIDERS"
   cat <<'EOF'
 
+http_access deny manager
 http_access deny egress_metadata_names
 http_access deny egress_linklocal
 http_access deny egress_loopback
@@ -538,6 +557,34 @@ gen_egress_managed_settings() {
   printf '  }\n}\n'
 }
 
+# Emit the --egress-lock proxy image's Containerfile to stdout. Its checksum
+# names the image, so a change here builds a new one instead of reusing a
+# stale tag. The squid package creates the unprivileged `squid` user.
+gen_egress_proxy_containerfile() {
+  printf 'FROM %s\n' "$EGRESS_PROXY_BASE"
+  printf "RUN apk add --no-cache 'squid>=%s' && squid -v | head -1\n" "$EGRESS_PROXY_SQUID_MIN"
+  printf 'USER squid\n'
+}
+
+# Set EGRESS_IMAGE, building it if the engine doesn't have it yet. Fail-closed
+# like the sidecar start: no image, no session.
+ensure_egress_image() {
+  if [ -n "${CLAUDE_DOCKER_EGRESS_PROXY_IMAGE:-}" ]; then
+    EGRESS_IMAGE="$CLAUDE_DOCKER_EGRESS_PROXY_IMAGE"
+    return 0
+  fi
+  EGRESS_IMAGE="claude-docker-egress-proxy:$(gen_egress_proxy_containerfile | cksum | cut -d' ' -f1)"
+  "$RUNTIME" image inspect "$EGRESS_IMAGE" >/dev/null 2>&1 && return 0
+  mkdir -p "$stage/egress-proxy" || exit 1
+  gen_egress_proxy_containerfile >"$stage/egress-proxy/Containerfile" || exit 1
+  echo "claude-docker: building the --egress-lock proxy image $EGRESS_IMAGE (squid on Alpine, first use only)" >&2
+  if ! "$RUNTIME" build -q -t "$EGRESS_IMAGE" -f "$(hostpath "$stage/egress-proxy/Containerfile")" \
+       "$(hostpath "$stage/egress-proxy")" >/dev/null; then
+    echo "claude-docker: failed to build the --egress-lock proxy image — aborting (the agent container was never started)" >&2
+    exit 1
+  fi
+}
+
 # Save the proxy's access log, the session's evidence, to the host before the
 # sidecar is removed, and summarise what it refused. Called from the EXIT
 # trap; it does nothing unless the sidecar was started (egress_started set).
@@ -551,9 +598,10 @@ egress_save_log() {
   local base="$EGRESS_LOG_DIR/$egress_started-$gh_sid" denied
   mkdir -p "$EGRESS_LOG_DIR" || return 0
   "$RUNTIME" logs "$EGRESS_SIDECAR" >"$base.log" 2>/dev/null || true
-  printf 'start=%s\nend=%s\nuser=%s\nhost=%s\nworkspace=%s\nimage=%s\nimage_id=%s\nendpoint=%s\n' \
+  printf 'start=%s\nend=%s\nuser=%s\nhost=%s\nworkspace=%s\nimage=%s\nimage_id=%s\nproxy_image=%s\nproxy_image_id=%s\nendpoint=%s\n' \
     "$egress_started" "$(date -u +%Y%m%dT%H%M%SZ)" "$(id -un)" "$(uname -n)" \
-    "${WORKSPACES[*]}" "$IMAGE" "$egress_image_id" "$egress_api_host" >"$base.meta"
+    "${WORKSPACES[*]}" "$IMAGE" "$egress_image_id" "$EGRESS_IMAGE" "$egress_proxy_image_id" \
+    "$egress_api_host" >"$base.meta"
   # Keep a non-default port: "example.com" for a refused example.com:8443
   # reads as "the endpoint is blocked".
   denied=$(awk '$4 ~ /^TCP_DENIED\// {print $7}' "$base.log" \
@@ -1236,8 +1284,8 @@ egress_listening() { "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting
 
 start_egress_sidecar() {
   local egress_wait egress_ip egress_url
-  # --egress-lock proxy sidecar: squid from the agent image itself, so there
-  # is no extra image to pull or pin (see openspec/specs/api-egress-policy).
+  # --egress-lock proxy sidecar: squid from its own image (ensure_egress_image;
+  # see openspec/specs/api-egress-policy).
   # The lifecycle mirrors the gh sidecar above: `run -d` without --rm so a crash
   # leaves logs to diagnose, exited-during-startup detection, and a fail-closed
   # abort on every path. The agent container is never started without the proxy.
@@ -1252,9 +1300,11 @@ start_egress_sidecar() {
         "--add-host" "uploads.github.com:$gh_proxy_ip"
       )
     fi
+    ensure_egress_image
     gen_egress_squid_conf >"$stage/egress-squid.conf" || exit 1
     gen_egress_managed_settings >"$stage/egress-managed-settings.json" || exit 1
     egress_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo unknown)
+    egress_proxy_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$EGRESS_IMAGE" 2>/dev/null || echo unknown)
     egress_started=$(date -u +%Y%m%dT%H%M%SZ)
 
     # Runs as squid's own unprivileged user with no capabilities: port 3128
@@ -1262,15 +1312,15 @@ start_egress_sidecar() {
     if ! "$RUNTIME" run -d \
         --name "$EGRESS_SIDECAR" \
         --network "$EGRESS_OUT_NETWORK" \
-        --user proxy \
+        --user squid \
         --cap-drop ALL \
         --security-opt no-new-privileges \
         ${EGRESS_SIDECAR_ARGS[@]+"${EGRESS_SIDECAR_ARGS[@]}"} \
         -v "$(hostpath "$stage/egress-squid.conf"):/etc/squid/squid.conf:ro" \
         --entrypoint /usr/sbin/squid \
-        "$IMAGE" -N >/dev/null \
+        "$EGRESS_IMAGE" -N >/dev/null \
        || ! "$RUNTIME" network connect "$EGRESS_NETWORK" "$EGRESS_SIDECAR" >/dev/null; then
-      echo "claude-docker: failed to start the --egress-lock proxy ($IMAGE) — aborting (the agent container was never started)" >&2
+      echo "claude-docker: failed to start the --egress-lock proxy ($EGRESS_IMAGE) — aborting (the agent container was never started)" >&2
       exit 1
     fi
 

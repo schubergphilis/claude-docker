@@ -21,7 +21,8 @@ This change replaces three earlier drafts of #101 (`api-egress-policy`, `api-egr
 - `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` in the agent container.
 - **Evidence.** At session end the EXIT trap saves the proxy's access log and a `.meta` file under `$XDG_STATE_HOME/claude-docker/egress/`, prints the denied hosts, and never rotates or deletes saved logs.
 - **`--gh` composes.** The gh sidecar joins the internal network, and squid resolves the three GitHub hosts to it.
-- **squid ships in the agent image** and runs as its own sidecar with `--entrypoint /usr/sbin/squid`, as `proxy`, with `--cap-drop ALL`.
+- **squid runs from its own image**, Alpine (digest-pinned) with squid ≥ 7.6, built on the host on first use, as `squid`, with `--cap-drop ALL`. The agent image carries no squid.
+- **Claude Code's endpoint is pinned** by read-only managed settings, so a workspace's `.claude/settings.json` can't move the model traffic.
 - Fail-closed lifecycle mirroring the `--gh` sidecar.
 
 ## Capabilities

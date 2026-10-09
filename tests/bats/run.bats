@@ -16,7 +16,7 @@ setup() {
   unset GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN GITLAB_HOST CLAUDE_DOCKER_RUNTIME \
     CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA \
     CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY \
-    ANTHROPIC_BASE_URL XDG_STATE_HOME
+    ANTHROPIC_BASE_URL XDG_STATE_HOME CLAUDE_DOCKER_EGRESS_PROXY_IMAGE
   # Computed when run.sh was sourced, before HOME moved above.
   EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress"
   RUNTIME=docker
@@ -162,7 +162,8 @@ run_script_fn() {
   [[ "$output" == *$'\nacl egress_model_port port 8443\n'* ]]
   local rules
   rules=$(grep '^http_access' <<<"$output")
-  [ "$rules" = "http_access deny egress_metadata_names
+  [ "$rules" = "http_access deny manager
+http_access deny egress_metadata_names
 http_access deny egress_linklocal
 http_access deny egress_loopback
 http_access allow egress_model_endpoint egress_model_port
@@ -570,6 +571,7 @@ http_access allow all" ]
 @test "egress_save_log: writes the log and meta, and lists each denied host:port once" {
   egress_started=20260101T000000Z gh_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
   egress_api_host=llm.example.eu egress_image_id=sha256:img WORKSPACES=("$WS")
+  EGRESS_IMAGE=claude-docker-egress-proxy:123 egress_proxy_image_id=sha256:proxy
   STUB_LOGS="1.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -
 2.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html
 3.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html
@@ -582,8 +584,10 @@ http_access allow all" ]
   [ "$(cat "$base.log")" = "$STUB_LOGS" ]
   grep -qx "endpoint=llm.example.eu" "$base.meta"
   grep -qx "image_id=sha256:img" "$base.meta"
+  grep -qx "proxy_image=claude-docker-egress-proxy:123" "$base.meta"
+  grep -qx "proxy_image_id=sha256:proxy" "$base.meta"
   grep -qx "workspace=$WS" "$base.meta"
-  [ "$(grep -c '^[a-z_]*=' "$base.meta")" -eq 8 ]
+  [ "$(grep -c '^[a-z_]*=' "$base.meta")" -eq 10 ]
   [[ "$output" == *"egress proxy blocked: 169.254.169.254 api.anthropic.com example.com:8443 plain.example "* ]]
   [[ "$output" == *"egress log saved to $base.log"* ]]
 }
@@ -753,9 +757,10 @@ egress_setup() {
 @test "start_egress_sidecar: wires the agent to the proxy on the internal network only" {
   egress_setup
   start_egress_sidecar 2>/dev/null
-  # squid from the agent image, unprivileged, on the outbound network, then
-  # attached to the internal one.
-  grep -q "^docker run -d --name claude-egress-proxy-x --network claude-egress-out-x --user proxy --cap-drop ALL --security-opt no-new-privileges .*--entrypoint /usr/sbin/squid claude-code:local -N$" "$CALLS"
+  # squid from its own image (cached here: inspect succeeds, so no build),
+  # unprivileged, on the outbound network, then attached to the internal one.
+  run ! grep -q "^docker build" "$CALLS"
+  grep -q "^docker run -d --name claude-egress-proxy-x --network claude-egress-out-x --user squid --cap-drop ALL --security-opt no-new-privileges .*--entrypoint /usr/sbin/squid claude-docker-egress-proxy:[0-9]* -N$" "$CALLS"
   grep -qx "docker network connect claude-egress-x claude-egress-proxy-x" "$CALLS"
   grep -qx "acl egress_model_endpoint dstdomain -n llm.example.eu" "$stage/egress-squid.conf"
   # The internal network, and Claude Code's managed settings, read-only.
@@ -775,6 +780,45 @@ $stage/egress-managed-settings.json:/etc/claude-code/managed-settings.json:ro" ]
   [[ "$env"$'\n' == *$'\n'"NO_PROXY=localhost,127.0.0.1,::1"$'\n'* ]]
   [[ "$env"$'\n' == *$'\n'"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"$'\n'* ]]
   [ -n "$egress_started" ]
+}
+
+@test "gen_egress_proxy_containerfile: pinned Alpine base, squid floor, unprivileged user" {
+  run gen_egress_proxy_containerfile
+  [ "$output" = "FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+RUN apk add --no-cache 'squid>=7.6' && squid -v | head -1
+USER squid" ]
+}
+
+@test "ensure_egress_image: builds a missing image, named by the Containerfile's checksum" {
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  STUB_FAIL="image:inspect"
+  ensure_egress_image 2>/dev/null
+  local sum
+  sum=$(gen_egress_proxy_containerfile | cksum | cut -d' ' -f1)
+  [ "$EGRESS_IMAGE" = "claude-docker-egress-proxy:$sum" ]
+  grep -qx "docker build -q -t claude-docker-egress-proxy:$sum -f $stage/egress-proxy/Containerfile $stage/egress-proxy" "$CALLS"
+  [ "$(cat "$stage/egress-proxy/Containerfile")" = "$(gen_egress_proxy_containerfile)" ]
+  # A different recipe is a different image, never a stale reuse.
+  EGRESS_PROXY_SQUID_MIN=9.9
+  [ "claude-docker-egress-proxy:$(gen_egress_proxy_containerfile | cksum | cut -d' ' -f1)" != "$EGRESS_IMAGE" ]
+}
+
+@test "ensure_egress_image: a cached image is reused, an override is used as is" {
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  ensure_egress_image
+  run ! grep -q "^docker build" "$CALLS"
+  CLAUDE_DOCKER_EGRESS_PROXY_IMAGE=registry.example/squid@sha256:abc
+  ensure_egress_image
+  [ "$EGRESS_IMAGE" = "registry.example/squid@sha256:abc" ]
+}
+
+@test "start_egress_sidecar: a failed proxy image build aborts before any container" {
+  egress_setup
+  STUB_FAIL="image:inspect build"
+  run start_egress_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed to build the --egress-lock proxy image"* ]]
+  run ! grep -q "^docker run" "$CALLS"
 }
 
 @test "start_egress_sidecar: with the gh sidecar, squid resolves GitHub to it" {

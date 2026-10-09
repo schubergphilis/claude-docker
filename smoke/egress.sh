@@ -103,6 +103,14 @@ logf=$(find "$TMPROOT/state/claude-docker/egress" -name "*.log" 2>/dev/null | he
 [ -n "$logf" ] && [ -f "${logf%.log}.meta" ] || die "no egress log/meta saved under $TMPROOT/state"
 grep -q "TCP_TUNNEL/200 .* CONNECT example.org:443" "$logf" || die "saved log lacks the example.org CONNECT"
 grep -q "^endpoint=$endpoint_host\$" "${logf%.log}.meta" || die "meta does not name the endpoint"
+# squid runs from its own image, built by run.sh, never from the agent image.
+proxy_image=$(sed -n 's/^proxy_image=//p' "${logf%.log}.meta")
+case "$proxy_image" in
+  claude-docker-egress-proxy:*) ;;
+  *) die "meta names proxy image '$proxy_image', not run.sh's claude-docker-egress-proxy" ;;
+esac
+! docker run --rm --entrypoint sh "$IMAGE" -c 'command -v squid' >/dev/null 2>&1 \
+  || die "the agent image still contains squid"
 if [ -n "$ENDPOINT_PORT" ]; then
   # The squid log is the evidence for the allow: a tunnel, not a deny.
   grep -q "TCP_TUNNEL/200 .* CONNECT github.com:$ENDPOINT_PORT " "$logf" \
