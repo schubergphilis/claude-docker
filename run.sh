@@ -77,6 +77,12 @@ Wrapper flags:
                       host ~/.azure file (no profile, no token caches). Covers
                       az devops / repos / boards / pipelines only.
                       Optional private CA via CLAUDE_DOCKER_AZ_CA.
+  --git-https         With --gh / --gh-direct / --glab / --az: use HTTPS +
+                      token instead of SSH. Rewrites git@<host>: and
+                      ssh://git@<host>/ remotes to https://<host>/, sets
+                      glab's git_protocol to https, and lets git
+                      authenticate with the forwarded token. Azure DevOps
+                      SSH remotes can't be rewritten (different path).
   --registry          Opt in to private package registries: surface host-
                       native uv/npm/pnpm/pip config so in-container installs
                       resolve against a private feed. Mounts ~/.npmrc,
@@ -162,6 +168,9 @@ WITH_TFE=0
 WITH_AZ=0
 WITH_REGISTRY=0
 WITH_API=0
+WITH_GIT_HTTPS=0
+# Flat key/value pairs, emitted as GIT_CONFIG_* env by build_git_config.
+GIT_CFG=()
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 MOUNT_ARGS=()
 # COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
@@ -204,6 +213,7 @@ parse_args() {
       --az)           WITH_AZ=1 ;;
       --registry)     WITH_REGISTRY=1 ;;
       --api)          WITH_API=1 ;;
+      --git-https)    WITH_GIT_HTTPS=1 ;;
       --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
       --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
       --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -347,7 +357,7 @@ detect_msys() {
     # Those same root-owned NTFS mounts trip git's ownership check ("detected
     # dubious ownership") in every workspace. GIT_CONFIG_* env is command-line
     # scope, which git honours for safe.directory; scoped to /workspaces only.
-    ENV_ARGS+=("-e" "GIT_CONFIG_COUNT=1" "-e" "GIT_CONFIG_KEY_0=safe.directory" "-e" "GIT_CONFIG_VALUE_0=/workspaces/*")
+    GIT_CFG+=(safe.directory "/workspaces/*")
   else
     HOST_UID=$(id -u)
     HOST_GID=$(id -g)
@@ -661,6 +671,44 @@ discover_tokens() {
       echo "claude-docker: --glab: glab not on host PATH, no GitLab token to forward; export GITLAB_TOKEN" >&2
     fi
   fi
+}
+
+# --git-https: the container has no SSH key or agent, only tokens, so point
+# git and glab at HTTPS and give git a credential helper per opted-in host.
+# GIT_CONFIG_* env is command-line scope: nothing lands in the persistent
+# ~/.gitconfig. Azure DevOps SSH URLs (v3/org/proj/repo) don't map onto the
+# HTTPS path (org/proj/_git/repo), so only its credential helper is set.
+build_git_config() {
+  local host i=0
+  if [ "$WITH_GIT_HTTPS" = "1" ]; then
+    if [ "$WITH_GH" = "1" ] || [ "$WITH_GH_DIRECT" = "1" ]; then
+      GIT_CFG+=(url.https://github.com/.insteadOf git@github.com: url.https://github.com/.insteadOf ssh://git@github.com/)
+      # Under --gh the sidecar injects auth; --gh-direct has GH_TOKEN in env.
+      [ "$WITH_GH_DIRECT" = "1" ] && GIT_CFG+=(credential.https://github.com.helper "!gh auth git-credential")
+    fi
+    if [ "$WITH_GLAB" = "1" ]; then
+      host=${GITLAB_HOST:-gitlab.com}
+      host=${host#*://}; host=${host%%/*}
+      GIT_CFG+=("url.https://$host/.insteadOf" "git@${host%%:*}:" "url.https://$host/.insteadOf" "ssh://git@${host%%:*}/"
+        "credential.https://$host.helper" "!glab auth git-credential")
+      ENV_ARGS+=("-e" "GLAB_GIT_PROTOCOL=https")
+    fi
+    if [ "$WITH_AZ" = "1" ]; then
+      host=${AZURE_DEVOPS_ORG_URL:-https://dev.azure.com}
+      host=${host#*://}; host=${host%%/*}
+      # \$ stays literal: the PAT is read from env when git runs the helper.
+      GIT_CFG+=("credential.https://$host.helper" "!f() { test \"\$1\" = get && echo username=pat && echo \"password=\$AZURE_DEVOPS_EXT_PAT\"; }; f")
+    fi
+    if [ "$WITH_GH" = "0" ] && [ "$WITH_GH_DIRECT" = "0" ] && [ "$WITH_GLAB" = "0" ] && [ "$WITH_AZ" = "0" ]; then
+      echo "claude-docker: --git-https without --gh, --gh-direct, --glab or --az has nothing to rewrite" >&2
+    fi
+  fi
+  while [ "$i" -lt "${#GIT_CFG[@]}" ]; do
+    ENV_ARGS+=("-e" "GIT_CONFIG_KEY_$((i / 2))=${GIT_CFG[i]}" "-e" "GIT_CONFIG_VALUE_$((i / 2))=${GIT_CFG[i + 1]}")
+    i=$((i + 2))
+  done
+  [ "$i" -gt 0 ] && ENV_ARGS+=("-e" "GIT_CONFIG_COUNT=$((i / 2))")
+  return 0
 }
 
 forward_git_identity() {
@@ -1232,6 +1280,7 @@ main() {
   build_cred_mounts
   build_env_args
   discover_tokens
+  build_git_config
   forward_git_identity
   build_flags_env
   create_stage
