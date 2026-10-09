@@ -8,19 +8,26 @@
 # sidecar, and this cell asserts on their teardown too. The in-container half
 # is assert-in-container.sh with EXPECT_EGRESS=1.
 #
-# Usage: IMAGE=<tag> bash smoke/egress.sh [--gh]
-#   --gh   also start the gh auth-proxy sidecar (fake token) and assert that
-#          GitHub traffic flows agent → squid → gh sidecar → GitHub, with the
-#          token injected (GitHub answers "Bad credentials", not anonymous).
+# Usage: IMAGE=<tag> bash smoke/egress.sh [--gh | --endpoint-port]
+#   --gh             also start the gh auth-proxy sidecar (fake token) and
+#                    assert that GitHub traffic flows agent → squid → gh
+#                    sidecar → GitHub, with the token injected (GitHub answers
+#                    "Bad credentials", not anonymous).
+#   --endpoint-port  use an endpoint on a port other than 80/443
+#                    (https://github.com:22, whose sshd reliably accepts the
+#                    tunnel) and assert squid allows that port for the endpoint
+#                    only.
 #
 # Linux-only (util-linux `script` supplies the PTY that run.sh's `-it` needs).
 set -euo pipefail
 
 IMAGE="${IMAGE:-claude-code:local}"
 WITH_GH=0
+ENDPOINT_PORT=""
 for arg in "$@"; do
   case "$arg" in
     --gh) WITH_GH=1 ;;
+    --endpoint-port) ENDPOINT_PORT=22 ;;
     *) echo "egress.sh: unknown argument '$arg'" >&2; exit 1 ;;
   esac
 done
@@ -63,10 +70,14 @@ http_access allow all" "is not a valid hostname"
 log "PASS: missing, provider and injected endpoints abort startup"
 
 # 2. The session.
-entry="EXPECT_EGRESS=1 EXPECT_EGRESS_GH=$WITH_GH EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
+endpoint_host=example.com endpoint_url=https://example.com
+if [ -n "$ENDPOINT_PORT" ]; then
+  endpoint_host=github.com endpoint_url="https://github.com:$ENDPOINT_PORT"
+fi
+entry="EXPECT_EGRESS=1 EXPECT_EGRESS_GH=$WITH_GH EXPECT_EGRESS_ENDPOINT_PORT=$ENDPOINT_PORT EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
 flags=(--api --egress-lock --ephemeral)
 envs=("${api_env[@]}"
-      ANTHROPIC_BASE_URL=https://example.com
+      ANTHROPIC_BASE_URL="$endpoint_url"
       CLAUDE_DOCKER_TEST_ENTRY="$entry")
 if [ "$WITH_GH" = "1" ]; then
   flags+=(--gh)
@@ -91,7 +102,16 @@ grep -q "egress proxy blocked:.*api.anthropic.com" "$transcript" \
 logf=$(find "$TMPROOT/state/claude-docker/egress" -name "*.log" 2>/dev/null | head -1)
 [ -n "$logf" ] && [ -f "${logf%.log}.meta" ] || die "no egress log/meta saved under $TMPROOT/state"
 grep -q "TCP_TUNNEL/200 .* CONNECT example.org:443" "$logf" || die "saved log lacks the example.org CONNECT"
-grep -q "^endpoint=example.com$" "${logf%.log}.meta" || die "meta does not name the endpoint"
+grep -q "^endpoint=$endpoint_host\$" "${logf%.log}.meta" || die "meta does not name the endpoint"
+if [ -n "$ENDPOINT_PORT" ]; then
+  # The squid log is the evidence for the allow: a tunnel, not a deny.
+  grep -q "TCP_TUNNEL/200 .* CONNECT github.com:$ENDPOINT_PORT " "$logf" \
+    || die "saved log lacks the allowed github.com:$ENDPOINT_PORT CONNECT"
+  ! grep -q "egress proxy blocked:.* github.com:$ENDPOINT_PORT " "$transcript" \
+    || die "end-of-session summary lists the endpoint's own port as blocked"
+  grep -q "egress proxy blocked:.* example.org:$ENDPOINT_PORT " "$transcript" \
+    || die "end-of-session summary does not list example.org:$ENDPOINT_PORT"
+fi
 log "PASS: startup banner, denied summary, saved log"
 
 # Only this session's resources: another session's live sidecar on the same

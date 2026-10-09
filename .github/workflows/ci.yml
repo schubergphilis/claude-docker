@@ -171,10 +171,13 @@ jobs:
         # as the build for the same reason as the step above.
         #   1. plain  — endpoint checks, provider denies, DNS, saved log, teardown
         #   2. --gh   — composition: GitHub traffic via squid → gh sidecar
+        #   3. --endpoint-port — an endpoint on a non-80/443 port is allowed,
+        #      for that endpoint only
         run: |
           set -euo pipefail
           IMAGE=claude-docker:ci bash smoke/egress.sh
           IMAGE=claude-docker:ci bash smoke/egress.sh --gh
+          IMAGE=claude-docker:ci bash smoke/egress.sh --endpoint-port
 
       # Known-CVE scanning of the image, in two passes over the same artifact.
       # Like the steps above, these must live in docker-build: Trivy resolves an

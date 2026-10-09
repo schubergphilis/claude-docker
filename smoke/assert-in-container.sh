@@ -607,8 +607,20 @@ check_egress() {
     fail "egress-env: https_proxy/HTTPS_PROXY missing or inconsistent"
   fi
 
-  assert_eq "egress-endpoint: the model endpoint (example.com) via proxy" \
-    "$(egress_code http_code https://example.com/)" "200"
+  if [ -n "${EXPECT_EGRESS_ENDPOINT_PORT:-}" ]; then
+    # The endpoint is github.com on an SSH port (smoke/egress.sh --endpoint-port):
+    # squid tunnels to it (http_connect 200; the TLS handshake with sshd then
+    # fails, which doesn't matter), while the same port on any other host stays
+    # refused. Both are squid's decision, so 403 means a rule refused it.
+    local ep_port="$EXPECT_EGRESS_ENDPOINT_PORT"
+    assert_eq "egress-endpoint-port: CONNECT to the endpoint's own port (github.com:$ep_port) allowed" \
+      "$(egress_code http_connect "https://github.com:$ep_port/")" "200"
+    assert_eq "egress-endpoint-port: the same port on another host (example.org:$ep_port) refused" \
+      "$(egress_code http_connect "https://example.org:$ep_port/")" "403"
+  else
+    assert_eq "egress-endpoint: the model endpoint (example.com) via proxy" \
+      "$(egress_code http_code https://example.com/)" "200"
+  fi
   assert_eq "egress-open: a non-model host (example.org) via proxy" \
     "$(egress_code http_code https://example.org/)" "200"
   assert_eq "egress-provider: CONNECT api.anthropic.com refused by proxy" \
