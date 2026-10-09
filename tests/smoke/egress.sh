@@ -93,10 +93,19 @@ grep -q "TCP_TUNNEL/200 .* CONNECT example.org:443" "$logf" || die "saved log la
 grep -q "^endpoint=example.com$" "${logf%.log}.meta" || die "meta does not name the endpoint"
 log "PASS: startup banner, denied summary, saved log"
 
-leftover=$(docker ps -aq --filter "name=^claude-egress-" --filter "name=^claude-gh-"; \
-           docker network ls -q --filter "name=^claude-egress-"; \
-           docker network ls -q --filter "name=^claude-gh-")
-[ -z "$leftover" ] || die "teardown left resources behind: $leftover"
-log "PASS: no claude-egress-* / claude-gh-* resources left"
+# Only this session's resources: another session's live sidecar on the same
+# host is not a leftover (tasks.md 6.4). The id comes from the startup banner.
+sid=$(grep -o "egress proxy 'claude-egress-proxy-[A-Za-z0-9]*'" "$transcript" \
+      | head -1 | sed -e "s#.*claude-egress-proxy-##" -e "s#'\$##") || true
+[ -n "$sid" ] || die "no session id in the startup banner"
+leftover=""
+for name in "claude-egress-proxy-$sid" "claude-gh-proxy-$sid"; do
+  [ -z "$(docker ps -aq --filter "name=^${name}\$")" ] || leftover+=" $name"
+done
+for name in "claude-egress-$sid" "claude-egress-out-$sid" "claude-gh-$sid"; do
+  [ -z "$(docker network ls -q --filter "name=^${name}\$")" ] || leftover+=" network:$name"
+done
+[ -z "$leftover" ] || die "teardown left resources behind:$leftover"
+log "PASS: no resources of session $sid left"
 
 log "Cell PASS: flags=${flags[*]}"
