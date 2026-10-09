@@ -3,9 +3,8 @@
 # Copyright 2026 Schuberg Philis
 #
 # gh-proxy-integration.sh — CI-runnable, credential-free integration harness for
-# the GitHub auth-proxy sidecar (openspec/changes/gh-auth-proxy-sidecar). Unlike
-# smoke/smoke.sh (which reconstructs `docker run` itself and never touches
-# run.sh), this harness drives `run.sh` end-to-end: the entire sidecar lifecycle
+# the GitHub auth-proxy sidecar (openspec/changes/gh-auth-proxy-sidecar). Like
+# smoke/smoke.sh, this harness drives `run.sh` end-to-end: the entire sidecar lifecycle
 # (network, sidecar, CA, Caddyfile, teardown) lives in run.sh, not in a
 # standalone docker invocation, so it has to be exercised through the real
 # entrypoint. A mock GitHub upstream (the same pinned Caddy image, running as a
