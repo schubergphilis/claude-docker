@@ -132,6 +132,10 @@ Environment:
   CLAUDE_DOCKER_AZ_CA      Path to a PEM CA certificate for an on-prem Azure
                            DevOps Server; installed into the container's trust
                            store, so trusted for all TLS. Ignored without --az.
+  CLAUDE_DOCKER_ADD_HOSTS  Static host entries for networks without DNS, as
+                           host:ip[,host:ip...], e.g.
+                           gitlab.example.com:10.1.2.3. Added to the
+                           container's /etc/hosts (and the --gh sidecar's).
 
 Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
@@ -183,6 +187,7 @@ GH_PROXY_NETWORK=""
 GH_PROXY_SIDECAR=""
 GH_HOST_TOKEN=""
 GH_SIDECAR_ACTIVE=0
+ADD_HOSTS=()
 
 parse_args() {
   local arg saw_sep=0
@@ -257,6 +262,18 @@ validate_opts() {
     echo "claude-docker: CLAUDE_DOCKER_GH_POLICY '$CLAUDE_DOCKER_GH_POLICY' is not a readable file" >&2
     exit 1
   fi
+
+  # Static host:ip entries for networks without DNS for the forges: the runtime
+  # regenerates /etc/hosts at start, so --add-host is the only way in. Checked
+  # here so a typo fails now, not as a resolution error mid-session.
+  local entry
+  IFS=, read -ra ADD_HOSTS <<<"${CLAUDE_DOCKER_ADD_HOSTS:-}"
+  for entry in ${ADD_HOSTS[@]+"${ADD_HOSTS[@]}"}; do
+    if ! [[ "$entry" =~ ^[A-Za-z0-9.-]+:[0-9A-Fa-f.:]+$ ]]; then
+      echo "claude-docker: CLAUDE_DOCKER_ADD_HOSTS entry '$entry' is not host:ip" >&2
+      exit 1
+    fi
+  done
 }
 
 select_runtime() {
@@ -745,7 +762,7 @@ create_stage() {
 }
 
 start_gh_sidecar() {
-  local gh_ca_ready gh_proxy_exited i gh_proxy_ip
+  local gh_ca_ready gh_proxy_exited i gh_proxy_ip entry
   # GitHub auth-proxy sidecar: active only when --gh found a host token
   # (GH_HOST_TOKEN, computed above during token discovery). --gh-direct and
   # the no-token fallback never reach this block — see gh-auth-proxy-sidecar.
@@ -896,6 +913,10 @@ CADDY
       -v "$(hostpath "$stage/gh-proxy/Caddyfile"):/etc/caddy/Caddyfile:ro"
       -v "$(hostpath "$stage/gh-proxy/policy.caddy"):/etc/caddy/policy.caddy:ro"
     )
+    # The sidecar dials GitHub itself, so it needs the static entries too.
+    for entry in ${ADD_HOSTS[@]+"${ADD_HOSTS[@]}"}; do
+      GH_SIDECAR_MOUNTS+=("--add-host" "$entry")
+    done
 
     # No published ports: the sidecar is reachable only from the agent
     # container, over the session-private network created above. Capabilities
@@ -991,6 +1012,22 @@ CADDY
     GH_SIDECAR_ACTIVE=1
     echo "claude-docker: gh-auth-proxy sidecar '$GH_PROXY_SIDECAR' is active — view the audit log with: $RUNTIME logs $GH_PROXY_SIDECAR" >&2
   fi
+}
+
+# CLAUDE_DOCKER_ADD_HOSTS entries for the agent container. Under --gh the
+# sidecar's three hosts are skipped: they must keep resolving to the sidecar.
+build_host_args() {
+  local entry
+  for entry in ${ADD_HOSTS[@]+"${ADD_HOSTS[@]}"}; do
+    if [ "$GH_SIDECAR_ACTIVE" = "1" ]; then
+      case "$(printf '%s' "${entry%%:*}" | tr '[:upper:]' '[:lower:]')" in
+        github.com|api.github.com|uploads.github.com)
+          echo "claude-docker: CLAUDE_DOCKER_ADD_HOSTS entry '$entry' skipped for the agent container: under --gh it resolves to the auth-proxy sidecar" >&2
+          continue ;;
+      esac
+    fi
+    MOUNT_ARGS+=("--add-host" "$entry")
+  done
 }
 
 stage_host_config() {
@@ -1236,6 +1273,7 @@ main() {
   build_flags_env
   create_stage
   start_gh_sidecar
+  build_host_args
   stage_host_config
   stage_git_overlays
   stage_glab_config
