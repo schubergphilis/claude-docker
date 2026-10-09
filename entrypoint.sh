@@ -6,10 +6,12 @@
 # so that files written through bind-mounts match host ownership. With
 # HOST_UID unset or 0, falls through to the legacy "run as root" behavior so
 # the image still works in environments that don't forward the host UID.
-set -euo pipefail
 
-HOST_UID="${HOST_UID:-0}"
-HOST_GID="${HOST_GID:-0}"
+# Fixed paths. Plain globals, not env, so the container environment can't
+# redirect them; the BATS suite reassigns them after sourcing.
+SEED_SETTINGS=/run/claude-docker/settings.json
+ROOT_HOME=/root
+CA_DIR=/usr/local/share/ca-certificates
 
 # Seed /root/.claude/settings.json from the host settings.docker.json that
 # run.sh forwards at the seed path. A copy, not a bind mount at the real path:
@@ -23,13 +25,14 @@ HOST_GID="${HOST_GID:-0}"
 # ownership (CAP_CHOWN) before writing; the chown walk below hands everything
 # back to HOST_UID. rm+cp instead of cp -f for the same reason: overwriting a
 # HOST_UID-owned 0600 file in place would be denied.
-if [ -f /run/claude-docker/settings.json ]; then
-mkdir -p /root/.claude
-chown root /root/.claude
-rm -f /root/.claude/settings.json
-cp /run/claude-docker/settings.json /root/.claude/settings.json
-chmod 600 /root/.claude/settings.json
-fi
+seed_settings() {
+  [ -f "$SEED_SETTINGS" ] || return 0
+  mkdir -p "$ROOT_HOME/.claude" || return
+  chown root "$ROOT_HOME/.claude" || return
+  rm -f "$ROOT_HOME/.claude/settings.json" || return
+  cp "$SEED_SETTINGS" "$ROOT_HOME/.claude/settings.json" || return
+  chmod 600 "$ROOT_HOME/.claude/settings.json"
+}
 
 # GitHub auth-proxy sidecar CA (run.sh --gh with a sidecar active): install
 # it into the system trust store so git (libcurl) and gh (Go) trust the
@@ -40,27 +43,29 @@ fi
 # doesn't block the session over a CA problem the user can't fix here.
 # The same step installs the --api private CA (CLAUDE_DOCKER_API_CA), which
 # Claude Code's native binary then trusts via the OS store.
-if ls /usr/local/share/ca-certificates/claude-docker-*.crt >/dev/null 2>&1; then
-update-ca-certificates >/dev/null 2>&1 \
-  || printf 'entrypoint: WARN update-ca-certificates failed for a claude-docker CA\n' >&2
-fi
-
-if [ "$HOST_UID" = 0 ]; then
-exec "$@"
-fi
+install_cas() {
+  compgen -G "$CA_DIR/claude-docker-*.crt" >/dev/null || return 0
+  update-ca-certificates >/dev/null 2>&1 \
+    || printf 'entrypoint: WARN update-ca-certificates failed for a claude-docker CA\n' >&2
+}
 
 # Synthesize a passwd entry so getpwuid / $HOME / shell expansions resolve
-# cleanly inside the container. -o (--non-unique) tolerates a HOST_UID that
-# happens to collide with a baked-in Ubuntu system user. HOME=/root is
-# deliberate — keeps the existing /root/.claude, /root/.aws, /root/.config
+# cleanly inside the container. Guarded on the `claude` name, not on
+# HOST_UID: a HOST_UID that collides with a baked-in Ubuntu system user
+# still needs a `claude` entry for `runuser -u claude`, and -o
+# (--non-unique) lets useradd create it with the duplicate UID. HOME=/root
+# is deliberate — keeps the existing /root/.claude, /root/.aws, /root/.config
 # mount paths intact instead of forcing a layout migration.
 # -K UID_MIN=1 overrides the login.defs floor per-call so macOS UIDs (≥501,
 # below Ubuntu's default 1000) don't trigger a warning.
-if ! getent passwd "$HOST_UID" >/dev/null 2>&1; then
-getent group "$HOST_GID" >/dev/null 2>&1 \
-    || groupadd -o -g "$HOST_GID" claude
-useradd -o -K UID_MIN=1 -u "$HOST_UID" -g "$HOST_GID" -d /root -s /bin/bash -M -N claude
-fi
+ensure_user() {
+  local uid=$1 gid=$2
+  getent passwd claude >/dev/null 2>&1 && return 0
+  getent group "$gid" >/dev/null 2>&1 \
+    || groupadd -o -g "$gid" claude \
+    || return
+  useradd -o -K UID_MIN=1 -u "$uid" -g "$gid" -d /root -s /bin/bash -M -N claude
+}
 
 # Chown the persistent /root volumes (claude-code-root, claude-code-home)
 # so the dropped-privilege user can write its own HOME. -xdev prunes the
@@ -75,17 +80,42 @@ fi
 # because /root and /root/.claude are separate volumes. Requires
 # CAP_CHOWN to chown to a different UID, and CAP_DAC_READ_SEARCH so
 # container root can traverse HOST_UID-owned, mode-0700 directories
-# under /root.
-chown_errs="$(find /root /root/.claude -xdev -print0 \
-  | xargs -0 --no-run-if-empty chown -h "$HOST_UID:$HOST_GID" 2>&1 >/dev/null || true)"
-chown_errs="$(grep -v 'Read-only file system' <<<"$chown_errs" || true)"
-[ -n "$chown_errs" ] && printf 'entrypoint: WARN chown: %s\n' "$chown_errs" >&2 || true
+# under /root. stderr is captured for the whole pipeline, so a failing
+# find warns too; LC_ALL=C pins the EROFS message the filter matches.
+chown_volumes() {
+  local uid=$1 gid=$2 chown_errs
+  chown_errs="$( { find "$ROOT_HOME" "$ROOT_HOME/.claude" -xdev -print0 \
+    | xargs -0 --no-run-if-empty chown -h "$uid:$gid"; } 2>&1 >/dev/null || true)"
+  chown_errs="$(grep -v 'Read-only file system' <<<"$chown_errs" || true)"
+  if [ -n "$chown_errs" ]; then
+    printf 'entrypoint: WARN chown: %s\n' "$chown_errs" >&2
+  fi
+}
 
-# runuser uses setresuid()/setresgid() — needs CAP_SETUID and CAP_SETGID
-# at this point (we're still UID 0). The kernel clears effective,
-# permitted, and ambient caps on the UID→non-zero transition; the bounding
-# set retains the setup caps but is inert under `no-new-privileges`. So
-# claude itself runs with no usable capabilities downstream — a stricter
-# posture than the previous "root + DAC_OVERRIDE for the entire session"
-# model where claude held DAC_OVERRIDE for its whole lifetime.
-exec runuser -u claude -- "$@"
+main() {
+  set -euo pipefail
+  local uid="${HOST_UID:-0}" gid="${HOST_GID:-0}"
+  # Explicit || return on every step: set -e is ignored when main runs in
+  # an ||/if context or under bats `run`, and a failed step must not
+  # fall through to the exec.
+  seed_settings || return
+  install_cas || return
+  if [ "$uid" = 0 ]; then
+    exec "$@"
+  fi
+  ensure_user "$uid" "$gid" || return
+  # Scoped to the walk: the session itself keeps the caller's locale.
+  LC_ALL=C chown_volumes "$uid" "$gid" || return
+  # runuser uses setresuid()/setresgid() — needs CAP_SETUID and CAP_SETGID
+  # at this point (we're still UID 0). The kernel clears effective,
+  # permitted, and ambient caps on the UID→non-zero transition; the bounding
+  # set retains the setup caps but is inert under `no-new-privileges`. So
+  # claude itself runs with no usable capabilities downstream — a stricter
+  # posture than the previous "root + DAC_OVERRIDE for the entire session"
+  # model where claude held DAC_OVERRIDE for its whole lifetime.
+  exec runuser -u claude -- "$@"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+  main "$@"
+fi
