@@ -119,43 +119,57 @@ The validators are also config-injection defence. The host and port are the
 only variables written into `squid.conf`, so no whitespace, quote or newline
 can reach it.
 
-### D5. squid, installed into the agent image (open: see Open Questions)
+### D5. squid in its own image, Alpine, built on first use
 
-Caddy, which the `--gh` sidecar uses, can't forward-proxy out of the box. Its
-forward proxy is a third-party plugin that isn't in the official image. squid's
-`CONNECT` keeps TLS end-to-end. As built, `squid` comes from the Ubuntu
-archive into the agent image, and the sidecar runs `$IMAGE` with
-`--entrypoint /usr/sbin/squid`, as `proxy`, with `--cap-drop ALL` and
-`no-new-privileges`. It listens on 3128 and holds no secret. Why:
+The proxy is squid, in an image of its own: `FROM alpine:<digest>`, `apk add
+'squid>=7.6'`, `USER squid`. `run.sh` writes that Containerfile and builds it
+the first time a host runs `--egress-lock`. The tag is the Containerfile's
+`cksum`, so a changed recipe builds a new image instead of reusing a stale
+one. `CLAUDE_DOCKER_EGRESS_PROXY_IMAGE` replaces it with an image the user
+supplies. The sidecar runs as `squid`, with `--cap-drop ALL` and
+`no-new-privileges`, listens on 3128 and holds no secret. The config refuses
+squid's cache manager first (`http_access deny manager`, CVE-2024-23638's
+workaround), rather than relying on the port rules to refuse it.
 
-- There's no extra pull. The image is already local.
-- The bytes come from the archive the base image already trusts, and Trivy
-  scans them with the image.
-- There's nothing for `pins/` to track. squid moves only within the Ubuntu
-  release, and a major upgrade arrives with a `FROM` bump.
-
-The costs were raised in review:
-
-- squid ships in every user's image, though only `--egress-lock` uses it. It
-  also adds a setuid-root binary, `/usr/lib/squid/pinger`, to the agent
-  container. That's inert under `no-new-privileges`, but it's there for every
-  user.
-- Running squid and Caddy means two proxy daemons to maintain.
-- Ubuntu rates nearly every squid CVE "Medium", so the HIGH/CRITICAL Trivy
-  gate doesn't flag them. One example is CVE-2026-61642, request smuggling via
-  `Transfer-Encoding`, which is fixed upstream but has no Ubuntu package yet. A
-  smuggled request doesn't appear in the access log, which undermines the
-  evidence (though not the provider deny).
-
-Alternatives:
+Review asked for squid out of the agent image (it shipped to every user, with
+a setuid `pinger`) and for the two-daemon question to be settled. The options:
 
 | Option | For | Against |
 |---|---|---|
-| squid in the agent image (as built) | no pull, archive-trusted, no pin | in every image, distro CVE lag, second daemon |
-| `ubuntu/squid`, digest-pinned, pulled only under `--egress-lock` (like `PROXY_IMAGE`) | only lock users carry it, pin is reviewed | same daemon and CVE lag, another pin to maintain |
-| Caddy + `forwardproxy` plugin, built with `xcaddy` and pinned | one daemon for `--gh` and the lock, one config | we build and maintain a Caddy image; plugin is third-party |
-| HAProxy | mature | no forward `CONNECT` |
-| tinyproxy | small | weaker security record |
+| squid in the agent image (first build) | no pull, archive-trusted | in every image; Ubuntu's 7.2 has no CVE-2026-61642 fix, and Ubuntu rates squid CVEs "Medium", below the Trivy gate |
+| `ubuntu/squid`, digest-pinned | only lock users carry it | same 7.2 without the fix; `latest` last rebuilt 2025-11 |
+| **Alpine + squid, built on first use** (chosen) | squid 7.6 with the fix; only lock users carry it; no registry to run | first lock session builds (needs Docker Hub and Alpine mirrors); a manual base pin |
+| Alpine + squid, published to GHCR | no build on users' hosts | a publish workflow, signing and a registry to maintain |
+| Caddy + `forwardproxy`, one daemon | one config language | see below |
+| HAProxy / tinyproxy | — | no forward `CONNECT` / weaker record |
+
+**Caddy + `forwardproxy` was spiked and rejected.** Built with xcaddy (Caddy
+2.11.7, plugin at its last commit) and probed locally:
+
+- The plugin's own `acl`/`ports` can't express the policy. Ports are global
+  and checked before the ACL, so "the endpoint on its own port" and
+  "`CONNECT` only to 443" need Caddy route matchers around it.
+- Its name ACL is case- and trailing-dot-sensitive: under `deny
+  *.anthropic.com`, `API.Anthropic.com` and `api.anthropic.com.` both
+  tunnelled. The provider deny would have to live in regexps.
+- A deny is a bare 403 in the access log, the same as a failed dial, and a
+  malformed request leaves no log line at all.
+- One daemon doesn't materialise: routing `CONNECT github.com` to its own
+  GitHub site through `/etc/hosts` also catches its `reverse_proxy` to the
+  real GitHub, so it would still be two containers.
+- The plugin calls itself experimental, its last code change was 2025-01,
+  and it has no release tags since 2019.
+
+squid expresses the policy natively and was already tested here. Alpine's
+squid 7.6 was run against the generated config (endpoint on 443 and on 22):
+every allow and deny matched what squid 7.2 does in CI, and the cache manager
+was refused.
+
+**CVE tracking.** CI scans the proxy image with the same advisory and gate
+Trivy passes as the agent image. The image is built once per host and then
+reused, so a user takes up a newer Alpine squid by removing the image (see
+`docs/auth.md`). A bump of `EGRESS_PROXY_BASE` or the squid floor changes the
+tag and rebuilds everywhere.
 
 ### D6. The log is the evidence
 
@@ -238,12 +252,15 @@ file, and the guarantee is what the feature is for.
   traffic from other traffic without TLS interception. A model backend added
   in a later Claude Code would need pinning off too; the CI precedence test is
   where that shows when the `claude-code` pin moves.
-- **squid's cache manager** isn't reachable from the agent, but only because
-  the port rule refuses 3128 (tasks.md 6.6). There is no explicit
-  `http_access deny manager` (CVE-2024-23638's workaround), so a change to
-  the port rules would expose it.
-- **Log completeness** depends on squid (CVE-2026-61642, D5), and on `run.sh`
+- **Log completeness** depends on squid (a smuggling bug like CVE-2026-61642
+  hides requests from the log; D5 requires the fixed 7.6), and on `run.sh`
   reaching its EXIT trap. A SIGKILLed `run.sh` loses that session's log.
+- **The first `--egress-lock` session builds the proxy image** (D5), so it
+  needs Docker Hub and Alpine's mirrors and takes longer. Hosts without that
+  access set `CLAUDE_DOCKER_EGRESS_PROXY_IMAGE`. A built image is reused until
+  removed, so a newer Alpine squid needs a manual `image rm` or a pin bump.
+- **Podman builds** of the proxy image are untested; the Windows/podman
+  validation in tasks.md §6 predates it (7.8).
 - **A `CONNECT` to a provider's raw IP** isn't matched by the name deny.
   Claude Code doesn't do that, and the log would show it.
 - **A gateway set only in `settings.docker.json`** is invisible to `run.sh`,
@@ -255,9 +272,5 @@ file, and the guarantee is what the feature is for.
 
 ## Open Questions
 
-1. **Proxy choice (D5).** Keep squid in the agent image, move it to a
-   digest-pinned image pulled only under `--egress-lock`, or replace it with
-   Caddy + `forwardproxy` for both sidecars. If squid stays: add `http_access
-   deny manager` as hardening, and decide how its CVEs are tracked given the Trivy gate's
-   blind spot.
+1. ~~**Proxy choice.**~~ squid in its own Alpine image: D5.
 2. ~~**Enforce the endpoint, or narrow the claim.**~~ Enforced: D10.

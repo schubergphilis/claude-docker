@@ -13,7 +13,7 @@ When `--egress-lock` is passed and the `--gh` sidecar is active, the gh sidecar 
 
 ### Requirement: Fail-closed lifecycle
 
-The internal network, the outbound network and the proxy sidecar SHALL be named per session (`claude-egress-<id>`, `claude-egress-out-<id>`, `claude-egress-proxy-<id>`) and removed by the EXIT trap, which SHALL be installed before any of them is created. Failure to create either network, to start the proxy, or to detect it accepting connections within 15 seconds, or the proxy exiting during startup, SHALL abort the session before the agent container starts. It SHALL never fall back to unfiltered egress. The startup prune SHALL remove stopped `claude-egress-proxy-*` containers and unused `claude-egress-*` networks.
+The internal network, the outbound network and the proxy sidecar SHALL be named per session (`claude-egress-<id>`, `claude-egress-out-<id>`, `claude-egress-proxy-<id>`) and removed by the EXIT trap, which SHALL be installed before any of them is created. Failure to build the proxy image, to create either network, to start the proxy, or to detect it accepting connections within 15 seconds, or the proxy exiting during startup, SHALL abort the session before the agent container starts. It SHALL never fall back to unfiltered egress. The startup prune SHALL remove stopped `claude-egress-proxy-*` containers and unused `claude-egress-*` networks.
 
 #### Scenario: Proxy fails to start
 
@@ -109,9 +109,25 @@ Under `--egress-lock`, `run.sh` SHALL refuse an `ANTHROPIC_BASE_URL` with any ch
 - **WHEN** the user runs `claude-docker --api --egress-lock ~/repo`
 - **THEN** `run.sh` exits 1, and no container starts
 
+### Requirement: The proxy runs from its own image
+
+The agent image SHALL NOT contain squid. The proxy sidecar SHALL run squid from an image built from `run.sh`'s Containerfile, `FROM` a digest-pinned Alpine base with squid at least 7.6, as the `squid` user, unless `CLAUDE_DOCKER_EGRESS_PROXY_IMAGE` names another image. The image tag SHALL be derived from the Containerfile's content, and `run.sh` SHALL build it only when the engine doesn't have it. The squid config SHALL refuse the cache manager before any other rule.
+
+#### Scenario: First use builds the image
+
+- **GIVEN** an engine without the proxy image
+- **WHEN** the user starts an `--egress-lock` session
+- **THEN** `run.sh` builds the image before starting the proxy, and a failed build aborts the session before any container starts
+
+#### Scenario: Later sessions reuse it
+
+- **GIVEN** the engine already has the image for the current Containerfile
+- **WHEN** the user starts an `--egress-lock` session
+- **THEN** `run.sh` doesn't build, and the session's `.meta` names the proxy image and its ID
+
 ### Requirement: The session's egress log is saved on the host
 
-When an `--egress-lock` session whose proxy was started exits, the EXIT trap SHALL, before removing the proxy, write the proxy's access log to `<state>/claude-docker/egress/<start>-<id>.log` and a `<start>-<id>.meta` file of `key=value` lines (`start`, `end`, `user`, `host`, `workspace`, `image`, `image_id`, `endpoint`), where `<state>` is `$XDG_STATE_HOME` or `~/.local/state`. That directory SHALL NOT be mounted into any container. `run.sh` SHALL NOT rotate or delete saved logs.
+When an `--egress-lock` session whose proxy was started exits, the EXIT trap SHALL, before removing the proxy, write the proxy's access log to `<state>/claude-docker/egress/<start>-<id>.log` and a `<start>-<id>.meta` file of `key=value` lines (`start`, `end`, `user`, `host`, `workspace`, `image`, `image_id`, `proxy_image`, `proxy_image_id`, `endpoint`), where `<state>` is `$XDG_STATE_HOME` or `~/.local/state`. That directory SHALL NOT be mounted into any container. `run.sh` SHALL NOT rotate or delete saved logs.
 
 #### Scenario: Log saved
 
