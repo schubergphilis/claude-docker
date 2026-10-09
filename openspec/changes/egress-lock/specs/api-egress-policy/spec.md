@@ -27,7 +27,7 @@ The internal network, the outbound network and the proxy sidecar SHALL be named 
 
 ### Requirement: Denied hosts are reported to the user
 
-`run.sh` SHALL print the proxy sidecar's name, the model endpoint and the log directory to stderr at startup. When the session ends, it SHALL print every distinct host the proxy denied during the session after `egress proxy blocked:`, and the path of the saved log.
+`run.sh` SHALL print the proxy sidecar's name, the model endpoint and the log directory to stderr at startup. When the session ends, it SHALL print every distinct host the proxy denied during the session after `egress proxy blocked:`, with its port unless that is 443 or 80, and the path of the saved log.
 
 #### Scenario: End-of-session summary
 
@@ -35,6 +35,12 @@ The internal network, the outbound network and the proxy sidecar SHALL be named 
 - **WHEN** the session exits
 - **THEN** stderr contains `egress proxy blocked:` followed by a list that includes `api.anthropic.com`
 - **AND** stderr names the saved log file
+
+#### Scenario: A denied non-default port is kept in the summary
+
+- **GIVEN** a session in which `CONNECT example.com:8443` was denied
+- **WHEN** the session exits
+- **THEN** the `egress proxy blocked:` list contains `example.com:8443`, not a bare `example.com`
 
 ### Requirement: Model traffic reaches only the configured endpoint
 
