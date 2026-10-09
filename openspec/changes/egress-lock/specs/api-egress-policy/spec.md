@@ -7,9 +7,9 @@ When `--egress-lock` is passed and the `--gh` sidecar is active, the gh sidecar 
 #### Scenario: GitHub API through both sidecars
 
 - **GIVEN** `--gh --api --egress-lock` with a host token
-- **WHEN** `curl --cacert <session CA> https://api.github.com/zen` runs in the agent container
+- **WHEN** `curl --cacert <session CA> https://api.github.com/user` runs in the agent container without an `Authorization` header
 - **THEN** TLS verifies against the gh sidecar's session CA
-- **AND** GitHub's response reaches the client, which proves the gh sidecar forwarded the request upstream
+- **AND** GitHub answers for the host token, not for an anonymous request, which proves the gh sidecar injected the credential and forwarded the request upstream
 
 ### Requirement: Fail-closed lifecycle
 

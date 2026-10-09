@@ -10,7 +10,8 @@
 #
 # Usage: IMAGE=<tag> bash smoke/egress.sh [--gh]
 #   --gh   also start the gh auth-proxy sidecar (fake token) and assert that
-#          GitHub traffic flows agent → squid → gh sidecar → GitHub.
+#          GitHub traffic flows agent → squid → gh sidecar → GitHub, with the
+#          token injected (GitHub answers "Bad credentials", not anonymous).
 #
 # Linux-only (util-linux `script` supplies the PTY that run.sh's `-it` needs).
 set -euo pipefail

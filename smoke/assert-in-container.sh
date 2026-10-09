@@ -645,16 +645,22 @@ check_egress() {
 
   if [ "${EXPECT_EGRESS_GH:-0}" = "1" ]; then
     # --cacert replaces the default bundle, so a completed handshake proves the
-    # gh sidecar terminated TLS (squid routed api.github.com to it), and any
-    # GitHub status (401 for the smoke's fake token) proves the sidecar reached
-    # GitHub. A 502 would be the sidecar failing upstream, 000 the chain broken.
-    local gh_code
-    gh_code=$(egress_code http_code https://api.github.com/zen \
-      --cacert /usr/local/share/ca-certificates/claude-docker-gh-proxy.crt)
-    case "$gh_code" in
-      200|401|403) pass "egress-gh: api.github.com via proxy → gh sidecar → GitHub (HTTP $gh_code)" ;;
-      *)           fail "egress-gh: api.github.com via proxy → gh sidecar failed (HTTP $gh_code)" ;;
-    esac
+    # gh sidecar terminated TLS (squid routed api.github.com to it). /user needs
+    # a token and this probe sends none, so GitHub's 401 message tells the two
+    # apart: "Bad credentials" means the sidecar injected smoke's fake token,
+    # "Requires authentication" means it did not. A 502 would be the sidecar
+    # failing upstream, 000 the chain broken.
+    local gh_out gh_code gh_body
+    gh_out=$(curl -s -m 20 -w '\n%{http_code}' \
+      --cacert /usr/local/share/ca-certificates/claude-docker-gh-proxy.crt \
+      https://api.github.com/user 2>/dev/null) || true
+    gh_code=${gh_out##*$'\n'}
+    gh_body=${gh_out%$'\n'*}
+    if [ "$gh_code" = "401" ] && [[ "$gh_body" == *'"Bad credentials"'* ]]; then
+      pass "egress-gh: api.github.com via proxy → gh sidecar → GitHub, token injected (401 Bad credentials)"
+    else
+      fail "egress-gh: api.github.com via proxy → gh sidecar did not inject the token (HTTP ${gh_code:-000}: $(printf '%s' "$gh_body" | tr -d '\n' | cut -c1-120))"
+    fi
   fi
 }
 
