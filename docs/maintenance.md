@@ -29,6 +29,8 @@ A weekly GitHub Actions run does the same thing unattended: [`pins-updater.yml`]
 
 The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinned manually too, but lives outside this whole mechanism: the digest is a default in `run.sh` (`CLAUDE_DOCKER_PROXY_IMAGE`), not a file under `pins/`, and `update_pins.py` never touches it. That's deliberate — a Caddy upgrade can change Caddyfile directive semantics, i.e. the security-critical config this feature generates, so bumping it means reading the changelog and validating the generated Caddyfile against the new version by hand, not taking an automated version bump on faith.
 
+The [API egress lock](auth.md#api-egress-lock)'s proxy image is the same kind of manual pin: `EGRESS_PROXY_BASE` (an Alpine digest) and `EGRESS_PROXY_SQUID_MIN` (a version floor) in `run.sh`. Users build it on first use, and its tag is the checksum of the Containerfile `run.sh` generates, so changing either value builds a new image. Bumping the base means checking the generated squid config against that Alpine release's squid; the `--egress-lock` CI cells do that against the real image.
+
 ## CI smoke tests
 
 The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)), which drives the real `run.sh` with fixture credentials under a fake `$HOME`. It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.
@@ -42,6 +44,19 @@ IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,t
 Each cell starts from `env -i` plus an allowlist, so your own `AWS_*`/`GH_TOKEN`/`CLAUDE_DOCKER_*` never reach it. A cell removes its `smoke-test-*` volumes on exit; a run killed with `SIGKILL` can't, so clean up with `docker volume ls -q --filter name=smoke-test- | xargs -r docker volume rm`.
 
 The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against.
+
+The [API egress lock](auth.md#api-egress-lock) has its own `run.sh`-driven cell, [`smoke/egress.sh`](../smoke/egress.sh) (`IMAGE=claude-code:local bash smoke/egress.sh [--gh | --endpoint-port]`), which runs in CI. It checks the following:
+
+- a missing, provider-host or config-smuggling `ANTHROPIC_BASE_URL` aborts startup;
+- the endpoint and other hosts are reachable, while `api.anthropic.com` is refused;
+- a proxy-unaware client has no route out;
+- metadata and loopback destinations are denied;
+- the session log and `.meta` are saved on the host;
+- `--gh` traffic reaches the auth proxy through squid, with the token injected;
+- an endpoint on a port other than 80/443 is allowed, for that endpoint only;
+- Claude Code's managed settings pin the endpoint and are read-only to the agent;
+- squid runs from its own image, and the agent image has none;
+- teardown leaves nothing behind.
 
 ### Manual fallback checklist (macOS)
 

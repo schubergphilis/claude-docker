@@ -96,6 +96,7 @@ claude-docker ~/repo -- --resume          # any claude flag after --
 | `--az`        | Azure DevOps (Services or on-prem Server): forward `AZURE_DEVOPS_EXT_PAT` (the PAT `az devops` / `repos` / `boards` / `pipelines` authenticate with) and `AZURE_DEVOPS_ORG_URL` (the default organization — the one place the hostname comes from, so a Server URL works as well as `dev.azure.com`). No host `~/.azure` file is mounted — not the profile (tenant/subscription IDs, account name), not the token caches (`msal_token_cache.json`, `accessTokens.json`) — and there is no `gh auth token`-style discovery: `az` has no command that prints a PAT, so it comes from your environment (keep it in 1Password and launch through `op run`, as in [`ANTHROPIC_AUTH_TOKEN` from 1Password](docs/auth.md#anthropic_auth_token-from-1password)). Without the flag, `/root/.azure/` is hidden by a tmpfs overlay. General Azure resource management (`az vm`, service principals, `ARM_*`) is out of scope: the image ships `azure-cli-core` + the `azure-devops` extension, not the full `azure-cli`. Optional private CA via `CLAUDE_DOCKER_AZ_CA` — see [Azure DevOps Server with a private CA](docs/auth.md#azure-devops-server-with-a-private-ca). |
 | `--registry`  | Surface host-native private package-registry config so in-container `uv` / `pnpm` / pip installs resolve against your private feed (CodeArtifact, Artifactory, Nexus, …) instead of public npm/PyPI. Read-only mounts of `~/.npmrc` / `uv.toml` / `pip.conf` plus `UV_INDEX_*` / `npm_config_registry` / `PIP_*` env when set. `~/.netrc` is intentionally **not** mounted (too broad). Runtime-only; the build is unaffected. **Whole-file mounts** — see [Private package registries](docs/auth.md#private-package-registries) for the full channel list and the scoping caution.               |
 | `--api`       | Forward `ANTHROPIC_BASE_URL` / `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` / `ANTHROPIC_CUSTOM_HEADERS` / `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `CLAUDE_CODE_MAX_CONTEXT_TOKENS` by name when set, so Claude Code talks to your LLM gateway (LiteLLM, enterprise proxy) instead of the in-container OAuth login. Optional private CA via `CLAUDE_DOCKER_API_CA`. Bedrock/Vertex are not covered yet. See [Custom model endpoint](docs/auth.md#custom-model-endpoint).                                                                                                  |
+| `--egress-lock` | With `--api`: **lock model traffic** to the `ANTHROPIC_BASE_URL` endpoint and log every connection the session makes; see [API egress lock](docs/auth.md#api-egress-lock). |
 
 Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` cannot be combined with each other.
 
@@ -106,7 +107,7 @@ Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` c
 | `--ephemeral` | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
 | `--ro`        | Mount every workspace read-only. Prevents the agent from modifying your code.                                               |
 
-`--ro` does **not** block credential flags or restrict network egress — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
+`--ro` does **not** block credential flags or restrict network egress (only `--egress-lock` does, see [API egress lock](docs/auth.md#api-egress-lock)) — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
 
 ```bash
 claude-docker --ephemeral --ro ~/untrusted-repo
@@ -120,7 +121,7 @@ Conversation history persists in the shared `claude-code-home` volume (skipped u
 
 ## Documentation
 
-- [Auth model](docs/auth.md) — AWS SSO, GitHub auth proxy, Terraform Cloud, private registries, custom model endpoint, Azure DevOps Server CA
+- [Auth model](docs/auth.md) — AWS SSO, GitHub auth proxy, Terraform Cloud, private registries, custom model endpoint, API egress lock, Azure DevOps Server CA
 - [Security](docs/security.md) — threat model, image vulnerability scanning
 - [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests
 - [Usage](docs/usage.md) — host config parity, worktrees, split panes, extending the image

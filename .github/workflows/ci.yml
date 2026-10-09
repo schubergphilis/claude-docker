@@ -161,6 +161,63 @@ jobs:
           #     dropped process lands in exactly that primary group).
           run_cell --uid=501 --gid=501 --volstate=cold --ephemeral=0
 
+      - name: API egress lock smoke (run.sh end-to-end)
+        # The --egress-lock lives entirely in run.sh (internal network, squid
+        # sidecar, proxy env, teardown). Unlike the cells above, these drive
+        # run.sh itself with the real docker, so the sidecars and their
+        # teardown are exercised as well. They prove that the endpoint and other hosts are
+        # reachable, a model provider is refused, and, the load-bearing
+        # part, that a proxy-unaware client has no route out at all. Same job
+        # as the build for the same reason as the step above.
+        #   1. plain  — endpoint checks, provider denies, DNS, saved log, teardown
+        #   2. --gh   — composition: GitHub traffic via squid → gh sidecar
+        #   3. --endpoint-port — an endpoint on a non-80/443 port is allowed,
+        #      for that endpoint only
+        run: |
+          set -euo pipefail
+          IMAGE=claude-docker:ci bash smoke/egress.sh
+          IMAGE=claude-docker:ci bash smoke/egress.sh --gh
+          IMAGE=claude-docker:ci bash smoke/egress.sh --endpoint-port
+
+      - name: Managed settings precedence (Claude Code in the image)
+        # --egress-lock pins Claude Code's endpoint with managed settings. This
+        # proves, against the image's pinned claude-code, that they beat every
+        # project override (settings.json, settings.local.json, --settings) and
+        # the Bedrock/Vertex/Foundry backends. --network none; loopback only.
+        run: IMAGE=claude-docker:ci bash tests/managed-settings-precedence.sh
+
+      - name: Tag the --egress-lock proxy image for scanning
+        # run.sh built it during the egress smoke above, named by its
+        # Containerfile's checksum. Exactly one must exist on this fresh runner.
+        run: |
+          set -euo pipefail
+          refs=$(docker images --format '{{.Repository}}:{{.Tag}}' claude-docker-egress-proxy)
+          [ "$(printf '%s\n' "$refs" | grep -c .)" = 1 ] || { echo "expected one egress proxy image, got: $refs"; exit 1; }
+          docker tag "$refs" claude-docker-egress-proxy:ci
+
+      # The proxy image gets the same two passes as the agent image below, so
+      # squid's CVEs gate like every other package's (openspec/changes/archive/2026-10-09-egress-lock/design.md D5).
+      - name: Vulnerability scan (egress proxy) — HIGH/CRITICAL, advisory (includes unfixed)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker-egress-proxy:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          exit-code: 0
+          trivyignores: .trivyignore
+
+      - name: Vulnerability scan (egress proxy) — HIGH/CRITICAL with a fix available (gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker-egress-proxy:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore
+
       # Known-CVE scanning of the image, in two passes over the same artifact.
       # Like the steps above, these must live in docker-build: Trivy resolves an
       # unqualified reference against the local daemon first, and this is the

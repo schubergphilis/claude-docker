@@ -89,7 +89,7 @@ Token alternative: instead of (or in addition to) the credentials file, export `
 > - **`pip.conf`** likewise carries any global pip settings you've set, not only `index-url`.
 > - **`~/.netrc` is deliberately NOT mounted** — as a machine-keyed store of logins for arbitrary unrelated hosts it's the broadest offender, so `--registry` never forwards it. Put registry auth in `~/.npmrc` / `pip.conf` / the index URL / `UV_INDEX_*_PASSWORD` instead.
 >
-> The forwarded _env vars_ are tightly scoped (named individually), so the over-share is specific to the npmrc/pip.conf file mounts. To minimise exposure, prefer the env-var channel or keep registry-only config files, and remember the container has full network egress (see [Threat model](security.md#threat-model)).
+> The forwarded _env vars_ are tightly scoped (named individually), so the over-share is specific to the npmrc/pip.conf file mounts. To minimise exposure, prefer the env-var channel or keep registry-only config files, and remember the container has full network egress, even under `--egress-lock` (which restricts model traffic only and logs the rest; see [Threat model](security.md#threat-model)).
 
 `--registry` makes the in-container package managers resolve against a private feed (AWS CodeArtifact, Artifactory, Nexus, GitLab/Azure, …) the same way your pipelines do — without inventing any claude-docker-specific config. It surfaces the package managers' **own native config** from the host, read-only:
 
@@ -136,7 +136,7 @@ claude-docker --api ~/repo
 
 Forwarded: `ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_API_KEY`, `ANTHROPIC_CUSTOM_HEADERS`, `ANTHROPIC_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_HAIKU_MODEL`, the deprecated `ANTHROPIC_SMALL_FAST_MODEL`, and two gateway knobs: `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS=1` stops the experimental `anthropic-beta` headers that gateways routing to non-Anthropic models often reject, and `CLAUDE_CODE_MAX_CONTEXT_TOKENS` tells Claude Code the real context window of a model name it doesn't recognise (e.g. `1000000`), so auto-compact doesn't hold the session to a conservative default.
 
-Privacy switches such as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` are not gateway config and not secrets, so `--api` doesn't forward them: put them in the `env` block of `settings.docker.json` (see [Host config parity](usage.md#host-config-parity)) to apply them to every session.
+`--egress-lock` sets `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` itself (see [API egress lock](#api-egress-lock)); plain `--api` doesn't. Other privacy switches such as `DISABLE_TELEMETRY` / `DISABLE_ERROR_REPORTING` are not gateway config and not secrets, so `--api` doesn't forward them: put them in the `env` block of `settings.docker.json` (see [Host config parity](usage.md#host-config-parity)) to apply them to every session.
 
 **A gateway token is required.** `--api` refuses to start unless `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_API_KEY` is set and non-empty. Without one, Claude Code falls back to the claude.ai OAuth login in the volume and sends _that_ token to the gateway as its bearer.
 
@@ -150,7 +150,7 @@ Privacy switches such as `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` / `DISABLE_T
 { "env": { "ANTHROPIC_BASE_URL": "https://litellm.internal", "ANTHROPIC_AUTH_TOKEN": "..." } }
 ```
 
-This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager (see [`ANTHROPIC_AUTH_TOKEN` from 1Password](#anthropic_auth_token-from-1password)). Same trap as above: an `env` block with `ANTHROPIC_BASE_URL` but no token sends the OAuth token to the gateway, and `--api`'s check doesn't cover this route, so always set the token alongside it.
+This puts the token **in plaintext in a host file**, copied into every session whether or not you want the gateway that run. Prefer `--api` with the token exported from your shell or a secret manager (see [`ANTHROPIC_AUTH_TOKEN` from 1Password](#anthropic_auth_token-from-1password)). Same trap as above: an `env` block with `ANTHROPIC_BASE_URL` but no token sends the OAuth token to the gateway, and `--api`'s check doesn't cover this route, so always set the token alongside it. This route also gets **no** [egress lock](#api-egress-lock): the session keeps full network egress.
 
 ### `ANTHROPIC_AUTH_TOKEN` from 1Password
 
@@ -195,3 +195,54 @@ claude-docker --az ~/repo
 ```
 
 Under `--az`, `CLAUDE_DOCKER_AZ_CA` (PEM) is mounted read-only and installed into the container's system trust store by the entrypoint, before privilege drop, so `az` **and** `git` / `curl` to the server trust it. The host path itself is not forwarded; inside the container the `az` wrapper points `REQUESTS_CA_BUNDLE` at the system bundle (Mozilla roots plus your CA). A set path that isn't a file is a startup error. Ignored without `--az`. A host `REQUESTS_CA_BUNDLE` is deliberately not used: it is often set for other reasons, and this CA is trusted for **every** TLS connection in the container (git, npm, uv, curl), not only the server. Prefer a PEM with just the server's CA over a full bundle.
+
+## API egress lock
+
+`--egress-lock` (with `--api`) locks Claude Code's **model traffic** to your `ANTHROPIC_BASE_URL` gateway and logs every connection the session makes, so you can show a customer that prompts only went to, say, an EU-hosted gateway. Everything else (git, npm, PyPI, the web) stays reachable: only model traffic is restricted, and there is no allowlist to maintain. It is a separate opt-in because most gateway users don't need it: plain `--api` sessions, and sessions without `--api`, are unchanged. `--egress-lock` without `--api` refuses to start.
+
+For a team, that is one env file and one command:
+
+```bash
+# team-eu.env (secrets as op:// references, see ANTHROPIC_AUTH_TOKEN from 1Password)
+ANTHROPIC_BASE_URL=https://llm-gateway.example.eu
+ANTHROPIC_AUTH_TOKEN=op://Team/llm-gateway/token
+```
+
+```bash
+op run --env-file team-eu.env --no-masking -- claude-docker --api --egress-lock ~/repo
+```
+
+**What is enforced.** The proxy allows the `ANTHROPIC_BASE_URL` host, on its own port as well as 80/443 (so a gateway on `:8443` or LiteLLM's `:4000` works), and refuses the model providers' own hosts: `*.anthropic.com`, `*.claude.ai`, `*.claude.com`. Every other host on ports 80/443 is allowed. `run.sh` refuses to start when `ANTHROPIC_BASE_URL` is unset (Claude Code would call `api.anthropic.com`), points at one of those hosts, or has a port that isn't a number from 1 to 65535. `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1` is set in the container, so Claude Code's telemetry, error reporting and updater don't try the blocked hosts.
+
+**The endpoint can't be moved by a project.** Claude Code would otherwise take `ANTHROPIC_BASE_URL` from a workspace's `.claude/settings.json` over the environment, and a project could switch on its Bedrock, Vertex or Foundry backend with a base URL of its own. Under the lock, `run.sh` mounts read-only Claude Code [managed settings](https://code.claude.com/docs/en/settings) at `/etc/claude-code/managed-settings.json`. They set `ANTHROPIC_BASE_URL` to your endpoint and switch those three backends off, and they take precedence over project settings, `settings.local.json` and `--settings`. CI checks that precedence against the image's Claude Code on every change (`tests/managed-settings-precedence.sh`).
+
+**How it works.** The agent container is attached only to a per-session network created with `--internal` (`claude-egress-<id>`). That network has no gateway, so a raw socket, a direct IP, or a DNS lookup has nowhere to go. The only way out is a per-session squid forward proxy (`claude-egress-proxy-<id>`) that sits on that network and on a normal one. That is what makes its log complete. The agent gets `http_proxy` / `https_proxy` (both spellings) pointing at it. HTTPS goes through `CONNECT`, so TLS stays end-to-end: the proxy sees hostnames, never request contents or tokens, and `CLAUDE_DOCKER_API_CA` works unchanged. The proxy is squid in its own small image: Alpine (digest-pinned) with its squid package, at least 7.6. `run.sh` builds it the first time you use `--egress-lock`, which needs access to Docker Hub and Alpine's package mirrors, and reuses it after that. The agent image doesn't contain squid. Set `CLAUDE_DOCKER_EGRESS_PROXY_IMAGE` to use an image you built or mirrored yourself. The proxy runs as the unprivileged `squid` user with no capabilities, and squid's cache manager is refused. The agent container's capability set is unchanged.
+
+**Always denied:** cloud metadata and link-local addresses (`169.254.0.0/16`, `fe80::/10`, `metadata.google.internal`, `metadata.azure.internal`), loopback, any port other than 80 and 443 (except the endpoint's own port, for the endpoint), and `CONNECT` to anything but 443. Private ranges are reachable, as without `--api`, so an on-prem git server or registry works.
+
+**Evidence.** When the session ends, `run.sh` saves the proxy's access log to `~/.local/state/claude-docker/egress/<start>-<id>.log` (`$XDG_STATE_HOME` if set), with a `.meta` file next to it: start and end time, user, host, workspaces, the agent image and the proxy image with their IDs, and the endpoint. The directory is never mounted into the container, and `run.sh` never rotates or deletes what is in it: the logs are the evidence, so pruning them is up to you. It prints what the proxy refused:
+
+```text
+claude-docker: egress proxy blocked: api.anthropic.com
+claude-docker: egress log saved to ~/.local/state/claude-docker/egress/20260927T100000Z-a1B2c3.log
+```
+
+**Reporting** is not part of claude-docker. Build it from the saved `.log` (squid's default access-log format: field 4 is the result, field 7 the host) and `.meta` files. The log covers what left the container. That the gateway itself serves EU-hosted models has to be shown by the gateway (its config, or its provider's region).
+
+**With `--gh`.** The auth-proxy sidecar joins the internal network too, and squid resolves `github.com` / `api.github.com` / `uploads.github.com` to it, so GitHub traffic goes agent → squid → auth proxy (token injected) → GitHub. Token handling is unchanged.
+
+**Lifecycle.** Startup is fail-closed. If a network can't be created, or the proxy won't start or isn't accepting connections within 15s, `run.sh` aborts before the agent container starts; it never falls back to open egress. Teardown uses the same `EXIT` trap as the gh sidecar, and saves the log first.
+
+**Limitations:**
+
+- SSH remotes (port 22) and every other non-HTTP protocol are blocked. Use HTTPS remotes.
+- Node's built-in `fetch` ignores proxy env vars, so scripts that use it fail closed. Claude Code, npm, pnpm, pip, uv, curl and Go honour them.
+- An `ANTHROPIC_BASE_URL` set only in `settings.docker.json` isn't visible to `run.sh`, which then refuses to start. Export it on the host instead.
+- A `CONNECT` to a provider's raw IP address isn't matched by the host deny. Claude Code never does that, and it would show up in the log.
+- A `run.sh` killed with `SIGKILL` never runs its `EXIT` trap, so that session's log is lost.
+- The endpoint pin is for Claude Code. Any other program in the session can reach every host that isn't a provider's, by design. Without TLS interception the log shows those connections, not what they carried.
+- The pin covers the model backends Claude Code has today: the Anthropic API, Bedrock, Vertex and Foundry. A backend added in a later Claude Code would have to be switched off too. The CI precedence test is where that shows up when the `claude-code` pin moves.
+- The log is only as complete as squid makes it. A request-smuggling bug, such as CVE-2026-61642 (fixed in squid 7.6, which the proxy image requires), can hide a request from the access log, though not get it past the provider deny. CI scans the proxy image for HIGH/CRITICAL CVEs like the agent image.
+- The proxy image is built once and then reused. To take up a newer Alpine squid after a security fix, remove it (`docker image rm` the `claude-docker-egress-proxy:*` tag) and the next `--egress-lock` session rebuilds it.
+- DNS closure relies on Docker ≥ 26, which stopped forwarding external queries from internal networks. Older engines leave a DNS side channel.
+- Podman isn't covered by CI. It was validated by hand on Windows 11 with rootless podman 6.0.2 (netavark), where the internal network, DNS closure and teardown behave as on Docker.
