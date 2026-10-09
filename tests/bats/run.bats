@@ -441,6 +441,32 @@ run_script_fn() {
   [ "$output" = https://gitlab.example.com/grp/repo.git ]
 }
 
+@test "build_git_config: --git-https rewrites Azure DevOps SSH remotes per project / collection" {
+  unset -f git
+  git init -q "$WS" && git -C "$WS" remote add origin git@ssh.dev.azure.com:v3/org/proj/repo
+  srv="$BATS_TEST_TMPDIR/srv"
+  git init -q "$srv" && git -C "$srv" remote add origin ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo
+  SEEN_PATHS=("$WS" "$srv")
+  WITH_GIT_HTTPS=1 WITH_AZ=1 AZURE_DEVOPS_ORG_URL=https://dev.azure.com/org
+  build_git_config
+  for a in "${ENV_ARGS[@]}"; do [ "$a" = -e ] || export "$a"; done
+  # Services: any repo of the remote's project, either SSH form.
+  [ "$(git ls-remote --get-url git@ssh.dev.azure.com:v3/org/proj/other)" = https://dev.azure.com/org/proj/_git/other ]
+  [ "$(git ls-remote --get-url ssh://git@ssh.dev.azure.com/v3/org/proj/other)" = https://dev.azure.com/org/proj/_git/other ]
+  # No PAT helper for the Server host, so its remote is left alone.
+  [ "$(git ls-remote --get-url ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo)" = ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo ]
+
+  GIT_CFG=() ENV_ARGS=()
+  unset "${!GIT_CONFIG_@}"
+  AZURE_DEVOPS_ORG_URL=https://ado.example.com/tfs/Coll/
+  build_git_config
+  for a in "${ENV_ARGS[@]}"; do [ "$a" = -e ] || export "$a"; done
+  # Server: any repo of the collection; other hosts and Services left alone.
+  [ "$(git ls-remote --get-url ssh://ado.example.com:22/tfs/Coll/Proj2/_git/r)" = https://ado.example.com/tfs/Coll/Proj2/_git/r ]
+  [ "$(git ls-remote --get-url ssh://other.example.com:22/tfs/Coll/Proj/_git/r)" = ssh://other.example.com:22/tfs/Coll/Proj/_git/r ]
+  [ "$(git ls-remote --get-url git@ssh.dev.azure.com:v3/org/proj/repo)" = git@ssh.dev.azure.com:v3/org/proj/repo ]
+}
+
 @test "build_git_config: --git-https alone warns" {
   WITH_GIT_HTTPS=1
   run build_git_config
