@@ -19,7 +19,7 @@
 
 - [x] 4.1 `.trivyignore`: the three npm-bundled CVEs expire 2026-11-04, with the reason
 - [x] 4.2 `docs/security.md` and `docs/auth.md`: npm in the lists of npm packages the build pins
-- [x] 4.3 `.grype.yaml`: drop the rule ignoring npm's bundled tree
+- [x] 4.3 `.grype.yaml`: replace the rule ignoring npm's bundled tree with version-scoped rules (undici, brace-expansion, http-cache-semantics); grype with `--fail-on high` passes on npm 11.19.1 and 12.2.0
 - [x] 4.4 Dockerfile comments name "the npm layers"
 
 ## 5. Verification

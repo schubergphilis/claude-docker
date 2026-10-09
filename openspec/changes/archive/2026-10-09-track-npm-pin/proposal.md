@@ -17,9 +17,13 @@ and nothing would prompt a bump before it lapses (#51).
   weekly updater bundles every bump into one PR, so its next run would carry npm 12
   alongside the routine bumps. npm 12 is meant to land as its own reviewed change
   first, so that run finds nothing to propose for npm.
-- `.grype.yaml` drops its rule ignoring everything under `node_modules/npm/`: its
-  premise (only a Node upgrade moves npm's bundle) no longer holds, and the
-  accepted npm CVEs are covered by the expiring `.trivyignore` entries.
+- `.grype.yaml` replaces its rule ignoring everything under `node_modules/npm/`
+  with version-scoped rules for the three packages grype reports at High in npm's
+  bundle (undici 6.28.0, brace-expansion 5.0.9, http-cache-semantics 4.2.0). The
+  blanket rule's premise (only a Node upgrade moves npm's bundle) no longer holds,
+  and the scoped rules stop matching once an npm bump moves those versions. grype
+  gates the publish workflow with `only-fixed=false`, so dropping the rule
+  outright would fail it.
 - The three npm-bundled CVE acceptances move from 2026-10-21 to 2026-11-04: npm
   11.21.0 and 12.2.0 still bundle the unfixed undici and brace-expansion.
 
