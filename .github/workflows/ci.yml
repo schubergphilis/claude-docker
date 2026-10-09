@@ -196,7 +196,7 @@ jobs:
           docker tag "$refs" claude-docker-egress-proxy:ci
 
       # The proxy image gets the same two passes as the agent image below, so
-      # squid's CVEs gate like every other package's (design.md D5).
+      # squid's CVEs gate like every other package's (openspec/changes/archive/2026-10-09-egress-lock/design.md D5).
       - name: Vulnerability scan (egress proxy) — HIGH/CRITICAL, advisory (includes unfixed)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

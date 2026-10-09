@@ -123,7 +123,8 @@ fi
 log "PASS: startup banner, denied summary, saved log"
 
 # Only this session's resources: another session's live sidecar on the same
-# host is not a leftover (tasks.md 6.4). The id comes from the startup banner.
+# host is not a leftover (openspec/changes/archive/2026-10-09-egress-lock/tasks.md 6.4).
+# The id comes from the startup banner.
 sid=$(grep -o "egress proxy 'claude-egress-proxy-[A-Za-z0-9]*'" "$transcript" \
       | head -1 | sed -e "s#.*claude-egress-proxy-##" -e "s#'\$##") || true
 [ -n "$sid" ] || die "no session id in the startup banner"
