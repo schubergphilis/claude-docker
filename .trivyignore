@@ -45,6 +45,10 @@ CVE-2026-78667 exp:2026-10-23
 # Same gh binary and Go 1.27.1 gap: crypto/tls ECH extensions, same fix
 # versions. Its own entry because suppression is per-ID.
 CVE-2026-97031 exp:2026-10-23
+# Same gh binary and Go 1.27.1 gap: HTTP/2 SETTINGS flood DoS in net/http and
+# golang.org/x/net (fixed in Go 1.27.2 / x/net 0.60.0). Trivy's DB picked it up
+# after 2026-10-09; gh 2.102.0 is still the latest release. Same expiry.
+CVE-2026-78669 exp:2026-10-23
 # npm (pins/npm.env) vendors brace-expansion 5.0.9; the fix needs 5.0.10,
 # released upstream 2026-09-14. No npm release bundles it yet: 11.21.0 and
 # 12.2.0 (2026-09-30) still ship 5.0.9. Only npm's own tree carries it. npm is
