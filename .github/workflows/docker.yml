@@ -95,8 +95,8 @@ jobs:
       # which on ubuntu-24.04 is linux/amd64. So dockle, dive and grype cover
       # amd64 while arm64 is built and published unscanned. Scanning both needs
       # the action run in a matrix with one platform per job, which conflicts
-      # with publishing a single manifest list from one job. See the README's
-      # GHCR section for the tradeoff as accepted.
+      # with publishing a single manifest list from one job. See
+      # docs/installation.md's GHCR section for the tradeoff as accepted.
       #
       # Scanner thresholds are fixed inside the action and steered from
       # .hadolint.yaml, .dockleignore and .grype.yaml. Tagging is

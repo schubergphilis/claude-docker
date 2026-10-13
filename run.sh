@@ -736,7 +736,8 @@ build_flags_env() {
   local old_ifs DOCKER_FLAGS_CSV
   # Surface active opt-ins in-container via CLAUDE_DOCKER_FLAGS so the statusline
   # wrapper (below) can tag the session with what was actually granted. Order
-  # mirrors the README table so the tag reads predictably.
+  # mirrors the Credential opt-in table in docs/auth.md so the tag reads
+  # predictably.
   # --yolo is omitted intentionally: Claude Code already shows the permission
   # mode in its UI, so duplicating it here would just be noise.
   DOCKER_FLAGS=()

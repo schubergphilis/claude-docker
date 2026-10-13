@@ -38,8 +38,8 @@ backports.
 Each release is published to GHCR as a prebuilt image, and building from this
 repository stays supported. Either way, upgrading means moving to the newer
 release: pull its tag, or check it out and rebuild — see
-[Install](README.md#install) and [Prebuilt image from
-GHCR](README.md#prebuilt-image-from-ghcr).
+[Quickstart](README.md#quickstart) and [Prebuilt image from
+GHCR](docs/installation.md#prebuilt-image-from-ghcr).
 
 ## Scope
 
