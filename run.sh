@@ -1667,7 +1667,7 @@ build_host_args() {
 egress_listening() { "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; }
 
 start_egress_sidecar() {
-  local egress_wait egress_ip egress_url started
+  local egress_wait egress_ip egress_url started EGRESS_SIDECAR_ARGS
   # --egress-lock proxy sidecar: squid from its own image (ensure_egress_image;
   # see openspec/specs/api-egress-policy).
   # The lifecycle mirrors the gh sidecar above: `run -d` without --rm so a crash
