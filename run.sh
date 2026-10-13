@@ -657,20 +657,24 @@ ensure_egress_image() {
 # Save the proxy's access log, the session's evidence, to the host before the
 # sidecar is removed, and summarise what it refused. Called from the EXIT
 # trap; it does nothing unless the sidecar was started (egress_started set).
-# The log dir is never mounted into the agent container. squid's default
-# format on stdout: field 4 is the result/status, field 7 the URL (host:port
-# for CONNECT).
+# The log dir is never mounted into the agent container. It and the files are
+# owner-only: the log lists every host the session contacted and the full URL
+# of plain-HTTP requests. squid's default format on stdout: field 4 is the
+# result/status, field 7 the URL (host:port for CONNECT).
 # ponytail: a SIGKILLed run.sh never runs the trap and loses the session log;
 # bind-mount squid's access_log to the host if that matters.
 egress_save_log() {
   [ -n "${egress_started:-}" ] || return 0
-  local base="$EGRESS_LOG_DIR/$egress_started-$proxy_sid" denied
-  mkdir -p "$EGRESS_LOG_DIR" || return 0
+  local base="$EGRESS_LOG_DIR/$egress_started-$proxy_sid" denied old_umask
+  mkdir -p "$EGRESS_LOG_DIR" && chmod 700 "$EGRESS_LOG_DIR" || return 0
+  old_umask=$(umask)
+  umask 077
   "$RUNTIME" logs "$EGRESS_SIDECAR" >"$base.log" 2>/dev/null || true
   printf 'start=%s\nend=%s\nuser=%s\nhost=%s\nworkspace=%s\nimage=%s\nimage_id=%s\nproxy_image=%s\nproxy_image_id=%s\nendpoint=%s\n' \
     "$egress_started" "$(date -u +%Y%m%dT%H%M%SZ)" "$(id -un)" "$(uname -n)" \
     "${WORKSPACES[*]}" "$IMAGE" "$egress_image_id" "$EGRESS_IMAGE" "$egress_proxy_image_id" \
     "$egress_api_host" >"$base.meta"
+  umask "$old_umask"
   # Keep a non-default port: "example.com" for a refused example.com:8443
   # reads as "the endpoint is blocked".
   denied=$(awk '$4 ~ /^TCP_DENIED\// {print $7}' "$base.log" \
