@@ -256,7 +256,7 @@ EGRESS_IMAGE=""
 egress_api_host=""
 egress_api_port=""
 egress_started=""
-egress_image_id=""
+agent_image_id=""
 egress_proxy_image_id=""
 
 parse_args() {
@@ -672,7 +672,7 @@ egress_save_log() {
   "$RUNTIME" logs "$EGRESS_SIDECAR" >"$base.log" 2>/dev/null || true
   printf 'start=%s\nend=%s\nuser=%s\nhost=%s\nworkspace=%s\nimage=%s\nimage_id=%s\nproxy_image=%s\nproxy_image_id=%s\nendpoint=%s\n' \
     "$egress_started" "$(date -u +%Y%m%dT%H%M%SZ)" "$(id -un)" "$(uname -n)" \
-    "${WORKSPACES[*]}" "$IMAGE" "$egress_image_id" "$EGRESS_IMAGE" "$egress_proxy_image_id" \
+    "${WORKSPACES[*]}" "$IMAGE" "$agent_image_id" "$EGRESS_IMAGE" "$egress_proxy_image_id" \
     "$egress_api_host" >"$base.meta"
   umask "$old_umask"
   # Keep a non-default port: "example.com" for a refused example.com:8443
@@ -1693,7 +1693,7 @@ start_egress_sidecar() {
     ensure_egress_image
     gen_egress_squid_conf >"$stage/egress-squid.conf" || exit 1
     gen_egress_managed_settings >"$stage/egress-managed-settings.json" || exit 1
-    egress_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo unknown)
+    agent_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$IMAGE" 2>/dev/null || echo unknown)
     egress_proxy_image_id=$("$RUNTIME" image inspect --format '{{.Id}}' "$EGRESS_IMAGE" 2>/dev/null || echo unknown)
     started=$(date -u +%Y%m%dT%H%M%SZ)
 

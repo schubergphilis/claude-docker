@@ -782,7 +782,7 @@ http_access allow all" ]
 
 @test "egress_save_log: writes the log and meta, and lists each denied host:port once" {
   egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
-  egress_api_host=llm.example.eu egress_image_id=sha256:img WORKSPACES=("$WS")
+  egress_api_host=llm.example.eu agent_image_id=sha256:img WORKSPACES=("$WS")
   EGRESS_IMAGE=claude-docker-egress-proxy:123 egress_proxy_image_id=sha256:proxy
   STUB_LOGS="1.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -
 2.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html
@@ -805,7 +805,7 @@ http_access allow all" ]
 }
 
 @test "egress_save_log: the log dir and files are owner-only, even if the dir already existed" {
-  egress_started=20260101T000000Z gh_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
   mkdir -p "$EGRESS_LOG_DIR"
   chmod 755 "$EGRESS_LOG_DIR"
   umask 022
