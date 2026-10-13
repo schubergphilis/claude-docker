@@ -474,7 +474,7 @@ run_script_fn() {
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_* ]]
 }
 
-@test "build_flags_env: tags the opt-ins in README order" {
+@test "build_flags_env: tags the opt-ins in opt-in table order" {
   WITH_AWS=1 WITH_GH=1 EPHEMERAL=1
   build_flags_env
   [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=aws,gh,ephemeral" ]
