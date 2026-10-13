@@ -804,6 +804,19 @@ http_access allow all" ]
   [[ "$output" == *"egress log saved to $base.log"* ]]
 }
 
+@test "egress_save_log: the log dir and files are owner-only, even if the dir already existed" {
+  egress_started=20260101T000000Z gh_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
+  mkdir -p "$EGRESS_LOG_DIR"
+  chmod 755 "$EGRESS_LOG_DIR"
+  umask 022
+  # Not `run`: the caller's umask must come back unchanged.
+  egress_save_log 2>/dev/null
+  [ "$(umask)" = 0022 ]
+  [ "$(stat -c %a "$EGRESS_LOG_DIR")" = 700 ]
+  [ "$(stat -c %a "$EGRESS_LOG_DIR/20260101T000000Z-abc.log")" = 600 ]
+  [ "$(stat -c %a "$EGRESS_LOG_DIR/20260101T000000Z-abc.meta")" = 600 ]
+}
+
 @test "egress_save_log: an unwritable log dir never fails the teardown" {
   egress_started=20260101T000000Z proxy_sid=abc
   : >"$HOME/.local"
