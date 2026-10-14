@@ -1752,6 +1752,9 @@ start_egress_sidecar() {
       # Telemetry, error reports and the updater: Anthropic hosts the proxy
       # refuses anyway. Off, so they don't fill the log with denied requests.
       "-e" "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+      # The official plugin marketplace's auto-install, which that switch
+      # doesn't cover: downloads.claude.ai on every start, then github.com.
+      "-e" "CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1"
       # Tells entrypoint.sh to approve ANTHROPIC_API_KEY up front, so Claude
       # Code's first-run connectivity check (api.anthropic.com) is skipped.
       "-e" "CLAUDE_DOCKER_EGRESS_LOCK=1"

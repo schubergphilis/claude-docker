@@ -696,6 +696,11 @@ check_egress() {
   else
     fail "egress-telemetry: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC not set"
   fi
+  if [ "${CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:-}" = "1" ]; then
+    pass "egress-marketplace: CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1"
+  else
+    fail "egress-marketplace: CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL not set"
+  fi
 
   # No route: a public IP, without the proxy.
   if curl -s -o /dev/null -m 10 --noproxy '*' http://1.1.1.1/ 2>/dev/null; then
