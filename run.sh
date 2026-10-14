@@ -1752,6 +1752,9 @@ start_egress_sidecar() {
       # Telemetry, error reports and the updater: Anthropic hosts the proxy
       # refuses anyway. Off, so they don't fill the log with denied requests.
       "-e" "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+      # Tells entrypoint.sh to approve ANTHROPIC_API_KEY up front, so Claude
+      # Code's first-run connectivity check (api.anthropic.com) is skipped.
+      "-e" "CLAUDE_DOCKER_EGRESS_LOCK=1"
     )
     echo "claude-docker: egress proxy '$EGRESS_SIDECAR' is active; model traffic goes only to $egress_api_host, every connection is logged to $EGRESS_LOG_DIR" >&2
   fi
