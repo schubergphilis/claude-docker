@@ -23,4 +23,3 @@ The help output SHALL include a one-line description for each of the following, 
 
 - **WHEN** user runs `claude-docker --help`
 - **THEN** every wrapper flag listed in the output is followed on the same or next line by a human-readable description of what it does (not just the flag name)
-

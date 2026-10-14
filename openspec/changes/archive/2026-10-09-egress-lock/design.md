@@ -135,7 +135,7 @@ Review asked for squid out of the agent image (it shipped to every user, with
 a setuid `pinger`) and for the two-daemon question to be settled. The options:
 
 | Option | For | Against |
-|---|---|---|
+| --- | --- | --- |
 | squid in the agent image (first build) | no pull, archive-trusted | in every image; Ubuntu's 7.2 has no CVE-2026-61642 fix, and Ubuntu rates squid CVEs "Medium", below the Trivy gate |
 | `ubuntu/squid`, digest-pinned | only lock users carry it | same 7.2 without the fix; `latest` last rebuilt 2025-11 |
 | **Alpine + squid, built on first use** (chosen) | squid 7.6 with the fix; only lock users carry it; no registry to run | first lock session builds (needs Docker Hub and Alpine mirrors); a manual base pin |
