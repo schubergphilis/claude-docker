@@ -1133,6 +1133,7 @@ $stage/egress-managed-settings.json:/etc/claude-code/managed-settings.json:ro" ]
   [[ "$env"$'\n' == *$'\n'"no_proxy=localhost,127.0.0.1,::1"$'\n'* ]]
   [[ "$env"$'\n' == *$'\n'"NO_PROXY=localhost,127.0.0.1,::1"$'\n'* ]]
   [[ "$env"$'\n' == *$'\n'"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"$'\n'* ]]
+  [[ "$env"$'\n' == *$'\n'"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1"$'\n'* ]]
   # entrypoint.sh pre-approves ANTHROPIC_API_KEY only under this flag.
   [[ "$env"$'\n' == *$'\n'"CLAUDE_DOCKER_EGRESS_LOCK=1"$'\n'* ]]
   [ -n "$egress_started" ]
