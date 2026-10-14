@@ -48,7 +48,11 @@ chmod +x "$WS/assert-in-container.sh"
 # The fake gateway is example.com: it answers HTTPS, and the session never
 # sends it a model request (CLAUDE_DOCKER_TEST_ENTRY replaces claude). The
 # session's log lands in $TMPROOT/state, not the runner's real state dir.
+# ANTHROPIC_API_KEY too: entrypoint.sh must pre-approve it in the --ephemeral
+# (so fresh) ~/.claude.json, or Claude Code's first-run connectivity check
+# against api.anthropic.com ends the session.
 api_env=(CLAUDE_DOCKER_IMAGE="$IMAGE" ANTHROPIC_AUTH_TOKEN=sk-fake-egress-smoke
+         ANTHROPIC_API_KEY=sk-fake-egress-smoke-api-key-0123456789
          XDG_STATE_HOME="$TMPROOT/state")
 
 # 1. Endpoints the lock refuses abort startup before any container resource

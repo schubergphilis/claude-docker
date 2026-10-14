@@ -49,6 +49,46 @@ install_cas() {
     || printf 'entrypoint: WARN update-ca-certificates failed for a claude-docker CA\n' >&2
 }
 
+# --egress-lock with ANTHROPIC_API_KEY: approve the key in ~/.claude.json the
+# way Claude Code's own "use this API key?" prompt does (its last 20
+# characters in customApiKeyResponses.approved). Until it is approved, Claude
+# Code treats claude.ai login as possible, and onboarding then starts with a
+# connectivity check against api.anthropic.com and platform.claude.com — hosts
+# the lock refuses, so the session exits before the prompt is reached. That
+# happens on every fresh claude-code-root volume and every --ephemeral run.
+# ANTHROPIC_AUTH_TOKEN needs no approval and skips the check by itself.
+# The key comes from the environment, not argv, so it never shows in ps. The
+# file is opened once and only used if that open didn't follow a symlink: a
+# concurrent session's agent shares the volume and could swap one in. Invalid
+# JSON is left alone. A new file replaces the old by rename; the chown walk
+# below hands it back to HOST_UID.
+approve_api_key() {
+  [ "${CLAUDE_DOCKER_EGRESS_LOCK:-}" = 1 ] && [ -n "${ANTHROPIC_API_KEY:-}" ] || return 0
+  local cfg="$ROOT_HOME/.claude.json" cfg_tmp
+  if [ -e "$cfg" ] || [ -L "$cfg" ]; then
+    if ! exec 3<"$cfg" || [ "$(readlink /proc/self/fd/3)" != "$cfg" ]; then
+      exec 3<&-
+      printf 'entrypoint: WARN %s is not a regular file; not approving ANTHROPIC_API_KEY\n' "$cfg" >&2
+      return 0
+    fi
+  else
+    exec 3<<<'{}'
+  fi
+  chown root "$ROOT_HOME" || return
+  cfg_tmp=$(mktemp "$cfg.XXXXXX") || return
+  if jq '(env.ANTHROPIC_API_KEY | gsub("^\\s+|\\s+$"; "") | .[-20:]) as $id
+         | .customApiKeyResponses.rejected //= []
+         | .customApiKeyResponses.approved //= []
+         | if (.customApiKeyResponses.approved | index([$id])) then .
+           else .customApiKeyResponses.approved += [$id] end' <&3 >"$cfg_tmp" 2>/dev/null; then
+    mv -f "$cfg_tmp" "$cfg" || return
+  else
+    rm -f "$cfg_tmp"
+    printf 'entrypoint: WARN %s is not valid JSON; not approving ANTHROPIC_API_KEY\n' "$cfg" >&2
+  fi
+  exec 3<&-
+}
+
 # Synthesize a passwd entry so getpwuid / $HOME / shell expansions resolve
 # cleanly inside the container. Guarded on the `claude` name, not on
 # HOST_UID: a HOST_UID that collides with a baked-in Ubuntu system user
@@ -109,6 +149,7 @@ main() {
   # fall through to the exec.
   seed_settings || return
   install_cas || return
+  approve_api_key || return
   if [ "$uid" = 0 ]; then
     exec "$@"
   fi

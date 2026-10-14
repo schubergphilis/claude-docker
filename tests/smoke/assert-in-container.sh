@@ -679,6 +679,18 @@ check_egress() {
     pass "egress-managed-dir: /etc/claude-code is not writable by the agent"
   fi
 
+  # entrypoint.sh approved the forwarded ANTHROPIC_API_KEY (its last 20
+  # characters, as Claude Code stores it), so a fresh ~/.claude.json doesn't
+  # send onboarding to api.anthropic.com for a connectivity check.
+  local key_id="${ANTHROPIC_API_KEY: -20}"
+  if [ -n "${ANTHROPIC_API_KEY:-}" ] \
+     && jq -e --arg id "$key_id" '.customApiKeyResponses.approved | index([$id])' \
+          /root/.claude.json >/dev/null 2>&1; then
+    pass "egress-api-key: ANTHROPIC_API_KEY approved in ~/.claude.json"
+  else
+    fail "egress-api-key: ANTHROPIC_API_KEY not approved in ~/.claude.json"
+  fi
+
   if [ "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" = "1" ]; then
     pass "egress-telemetry: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
   else
