@@ -17,6 +17,11 @@ jobs:
           # breaks on a heading rename in a file the author wasn't looking at.
           # Offline via lychee.toml, so only local paths and #fragments.
           - testing-type: lint-links
+          # markdownlint-cli2 over **/*.md with the action's config (MD013
+          # off, <img> allowed). openspec/specs/ (generated) and
+          # openspec/changes/archive/ (history) opt out through their own
+          # .markdownlint.yaml; .github/'s restates MD013 and drops MD041.
+          - testing-type: markdownlint
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
