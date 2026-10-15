@@ -5,7 +5,7 @@
 The rest of the mask set is asserted in-container by the smoke suite
 (`tests/smoke/smoke.sh` drives `run.sh`; `assert-in-container.sh` checks the tmpfs
 set under /root by equality). The smoke cells never pass `--gh`, and
-`tests/gh-proxy-integration.sh` does not look at the mask, so the rule that
+`tests/integration/gh-proxy-integration.sh` does not look at the mask, so the rule that
 keeps `/root/.config/gh` masked while the auth-proxy sidecar is active is only
 pinned here.
 

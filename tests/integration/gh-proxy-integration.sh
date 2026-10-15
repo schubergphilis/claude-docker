@@ -85,7 +85,7 @@ if ! docker image inspect "$TARGET_IMAGE" >/dev/null 2>&1; then
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-RUN_SH="$(cd "$SCRIPT_DIR/.." && pwd)/run.sh"
+RUN_SH="$(cd "$SCRIPT_DIR/../.." && pwd)/run.sh"
 if [ ! -f "$RUN_SH" ]; then
   echo "FATAL: run.sh not found at $RUN_SH" >&2
   exit 1
