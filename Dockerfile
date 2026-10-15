@@ -250,7 +250,9 @@ RUN ARCH=$(dpkg --print-architecture); \
 # update_pins.py writes with pins/az.env; the build fails if they disagree.
 # Extension wheel pinned by sha256 instead of the unpinned extension index.
 # `-I` keeps PYTHONPATH and the volume-backed user site out of az. Bundled pip
-# deleted: uv installs, and pip's vendored deps are scanner findings. The
+# deleted: uv installs, and pip's vendored deps are scanner findings. So is
+# ensurepip, which bundles another pip wheel, and so are Tcl/Tk, tkinter, IDLE
+# and turtle (~11 MB), a GUI stack az never imports. The
 # wrapper forces telemetry off (not relying on bypassing azure-cli's __main__),
 # points requests at the system store instead of certifi so a --az private CA
 # is trusted, and maps AZURE_DEVOPS_ORG_URL onto the extension's default org.
@@ -266,6 +268,14 @@ RUN . /tmp/az.env && . /tmp/azure-devops.env \
  && echo "${AZURE_DEVOPS_SHA256}  ${whl}" | sha256sum -c - \
  && UV_PYTHON_INSTALL_DIR=/opt/az/python uv venv --no-cache --managed-python --python 3.13 /opt/az/venv \
  && rm -rf /opt/az/python/cpython-*/bin/pip* /opt/az/python/cpython-*/lib/python3*/site-packages/pip* \
+ && rm -rf /opt/az/python/cpython-*/lib/libtcl* /opt/az/python/cpython-*/lib/libtk* \
+      /opt/az/python/cpython-*/lib/tcl9* /opt/az/python/cpython-*/lib/tk9* \
+      /opt/az/python/cpython-*/lib/itcl* /opt/az/python/cpython-*/lib/thread* \
+      /opt/az/python/cpython-*/lib/python3*/tkinter /opt/az/python/cpython-*/lib/python3*/idlelib \
+      /opt/az/python/cpython-*/lib/python3*/turtledemo /opt/az/python/cpython-*/lib/python3*/turtle.py \
+      /opt/az/python/cpython-*/lib/python3*/lib-dynload/_tkinter.* \
+      /opt/az/python/cpython-*/lib/python3*/ensurepip \
+ && ! /opt/az/venv/bin/python -I -c 'import tkinter' 2>/dev/null \
  && uv pip install --no-cache --python /opt/az/venv/bin/python \
       --require-hashes -r /tmp/az-requirements.txt \
  && uv pip install --no-cache --no-deps --python /opt/az/venv/bin/python \
