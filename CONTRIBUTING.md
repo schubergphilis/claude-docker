@@ -55,7 +55,7 @@ CI runs these on every PR; running them locally first is faster:
 
 ```bash
 # Lint shell scripts and the Dockerfile
-shellcheck run.sh entrypoint.sh smoke/*.sh scripts/*.sh
+shellcheck run.sh entrypoint.sh tests/smoke/*.sh scripts/*.sh
 hadolint --config .hadolint.yaml Dockerfile
 
 # Unit tests for the pin tooling
@@ -66,7 +66,7 @@ bats tests/bats
 
 # Build the image and run a smoke cell against it
 docker build -t claude-code:local .
-IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
+IMAGE=claude-code:local bash tests/smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
 See [`docs/`](docs/) for the reference material: the [threat

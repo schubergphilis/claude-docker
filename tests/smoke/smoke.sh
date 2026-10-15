@@ -114,7 +114,7 @@ trap cleanup EXIT
 # on stock macOS (where the Phase 2b job runs smoke.sh on the host directly).
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ASSERT_SCRIPT="${SCRIPT_DIR}/assert-in-container.sh"
-RUN_SH="$(cd "${SCRIPT_DIR}/.." && pwd)/run.sh"
+RUN_SH="$(cd "${SCRIPT_DIR}/../.." && pwd)/run.sh"
 [ -f "${ASSERT_SCRIPT}" ] || die "assert-in-container.sh not found at: ${ASSERT_SCRIPT}"
 [ -f "${RUN_SH}" ] || die "run.sh not found at: ${RUN_SH}"
 cp "${ASSERT_SCRIPT}" "${WORKSPACE_HOST}/assert-in-container.sh"
