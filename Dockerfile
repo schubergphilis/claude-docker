@@ -224,6 +224,9 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 # Placed before the npm layers on purpose — the tarball is ~64 MB and Go moves far
 # less often than the claude-code pin, so a weekly claude-code bump does not
 # re-download it.
+# api/ (the stdlib API compatibility lists for Go's own release checks), test/
+# (the compiler's regression suite) and every src/**/testdata are only read by
+# tests of Go itself, never by building or testing user code, so they go.
 ARG GO_VERSION=1.26.9
 ARG GO_SHA256_AMD64=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d
 ARG GO_SHA256_ARM64=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052
@@ -237,6 +240,8 @@ RUN ARCH=$(dpkg --print-architecture); \
  && echo "${SHA}  /tmp/go.tar.gz" | sha256sum -c - \
  && tar -C /usr/local -xzf /tmp/go.tar.gz \
  && rm /tmp/go.tar.gz \
+ && rm -rf /usr/local/go/api /usr/local/go/test \
+ && find /usr/local/go/src -type d -name testdata -prune -exec rm -rf {} + \
  && /usr/local/go/bin/go version
 
 # Azure DevOps CLI: azure-cli-core + the azure-devops extension, not full
