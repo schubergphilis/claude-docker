@@ -67,12 +67,12 @@ An exported `GITLAB_TOKEN` always wins. If `glab` isn't installed or has no toke
 
 The forge flags also let git itself authenticate over HTTPS, so `git fetch` / `push` work without a prompt. Each flag adds a git credential helper scoped to its own host, so git never offers that token to any other host:
 
-| Flag          | Host                                                        | Credential helper                                                                         |
-| ------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `--gh`        | `github.com`                                                | none needed: the sidecar injects the token                                                |
-| `--gh-direct` | `github.com`                                                | `gh auth git-credential`                                                                  |
-| `--glab`      | `GITLAB_HOST` (as set or discovered), else `gitlab.com`     | `glab auth git-credential`                                                                |
-| `--az`        | host of `AZURE_DEVOPS_ORG_URL`, else `dev.azure.com`        | answers with `AZURE_DEVOPS_EXT_PAT`, read from the container env when git calls it         |
+| Flag | Host | Credential helper |
+| --- | --- | --- |
+| `--gh` | `github.com` | none needed: the sidecar injects the token |
+| `--gh-direct` | `github.com` | `gh auth git-credential` |
+| `--glab` | `GITLAB_HOST` (as set or discovered), else `gitlab.com` | `glab auth git-credential` |
+| `--az` | host of `AZURE_DEVOPS_ORG_URL`, else `dev.azure.com` | answers with `AZURE_DEVOPS_EXT_PAT`, read from the container env when git calls it |
 
 The helpers are passed as `GIT_CONFIG_*` env, so nothing is written to `~/.gitconfig`. `--gh-direct` covers `github.com` only; a GitHub Enterprise Server host gets no helper.
 
