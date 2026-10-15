@@ -1,6 +1,7 @@
 ## Summary
 
-<!-- What changes and why. -->
+<!-- What changes and why. If a related issue exists, link it: `Closes #N`
+when this PR resolves it, `Refs #N` when it covers only part. -->
 
 ## OpenSpec
 

@@ -16,6 +16,13 @@ most often missed:
   [PR template](.github/pull_request_template.md): the archived change, or
   `No spec change` with the specs you checked. Update it when later commits
   change the answer.
+- **Link the related issue, if there is one.** Before opening a PR, search the
+  open issues for the problem it solves (`gh issue list --search <keywords>`).
+  Write `Closes #N` in the PR description when the PR resolves the issue, so
+  GitHub closes it on merge, or `Refs #N` when it covers only part, and say on
+  the issue what is left. Keep the line current when later commits change the
+  scope. Merged PRs that named no issue have left issues open after the work
+  was done. If no issue exists, don't open one just to link it.
 - **Never hand-edit `openspec/specs/`.** It is generated when a change is
   archived; fix the delta and re-archive.
 - **Run the [local checks](CONTRIBUTING.md#local-checks-before-opening-a-pr)**
