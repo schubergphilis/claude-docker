@@ -45,7 +45,7 @@ When a token is found:
 
 - TLS clients that don't read the OS trust store — notably Python's `certifi`-bundled CA set — get certificate errors against the three intercepted hostnames, since they never see the entrypoint-installed session CA. `uv` is handled for you (`UV_SYSTEM_CERTS=1`, above); for others, point the tool at the system store explicitly (`SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt`, or `REQUESTS_CA_BUNDLE` for `requests`/`certifi` consumers) or use `--gh-direct`.
 - Release assets in **private** repos aren't reachable via their `https://github.com/<owner>/<repo>/releases/download/…` URL. That's GitHub's behavior, not the proxy's: the web download path accepts only browser-session auth, so a token-authenticated request 404s with or without the proxy. Use the API asset endpoint instead — `gh release download`, or `GET /repos/{owner}/{repo}/releases/assets/{id}` with `Accept: application/octet-stream` — both of which go through `api.github.com` and work normally. Public release assets work directly.
-- SSH remotes (`git@github.com`) remain unsupported, as before — `--gh` never mounted a key or agent. The failure mode changes from an auth prompt to connection-refused, since `git@github.com` now resolves to the sidecar on a port it doesn't serve. Add `--git-https` to have git rewrite those remotes to HTTPS, which goes through the sidecar.
+- SSH remotes (`git@github.com`) remain unsupported, as before — `--gh` never mounted a key or agent. The failure mode changes from an auth prompt to connection-refused, since `git@github.com` now resolves to the sidecar on a port it doesn't serve. See [SSH remotes](#ssh-remotes).
 - git-LFS is expected to work unchanged: the batch endpoint on `github.com` gets the same `Authorization` injection as any other git smart-HTTP request, and the actual object transfer happens against pre-signed, non-intercepted hosts. It's covered by the [manual checklist](maintenance.md#manual-fallback-checklist-macos) rather than called out as a limitation.
 
 ## GitLab token discovery (`--glab`)
@@ -62,6 +62,34 @@ If `GITLAB_TOKEN` is unset, the wrapper runs `glab config get token --host <host
 This is what makes keyring logins work. When glab keeps the token in the OS keyring (`use_keyring: true` for the host, no `token:` in `config.yml`), the read-only `glab-cli` mount carries no token, but `glab config get token --host` reads it from the keyring (glab's `internal/config/config.go`, `GetWithSource`; checked against glab 1.118.0 and 1.119.0). Without `--host` glab never consults per-host tokens, so the wrapper always passes it. The container gets a copy of `config.yml` with `use_keyring: false`: otherwise the in-container glab still reads `job_token` from the keyring (no env var covers it) and fails without D-Bus, even with `GITLAB_TOKEN` set.
 
 An exported `GITLAB_TOKEN` always wins. If `glab` isn't installed or has no token for any of those hosts, the container starts without one and the wrapper prints a warning naming the hosts it tried. That matters because without a token, the in-container glab calls the GitLab API unauthenticated. Public projects still work, which hides the cause ([#126](https://github.com/schubergphilis/claude-docker/issues/126)). For an instance that isn't the first workspace's remote, set `GITLAB_HOST` or export `GITLAB_TOKEN` yourself.
+
+## Git over HTTPS
+
+The forge flags also let git itself authenticate over HTTPS, so `git fetch` / `push` work without a prompt. Each flag adds a git credential helper scoped to its own host, so git never offers that token to any other host:
+
+| Flag          | Host                                                        | Credential helper                                                                         |
+| ------------- | ----------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `--gh`        | `github.com`                                                | none needed: the sidecar injects the token                                                |
+| `--gh-direct` | `github.com`                                                | `gh auth git-credential`                                                                  |
+| `--glab`      | `GITLAB_HOST` (as set or discovered), else `gitlab.com`     | `glab auth git-credential`                                                                |
+| `--az`        | host of `AZURE_DEVOPS_ORG_URL`, else `dev.azure.com`        | answers with `AZURE_DEVOPS_EXT_PAT`, read from the container env when git calls it         |
+
+The helpers are passed as `GIT_CONFIG_*` env, so nothing is written to `~/.gitconfig`. `--gh-direct` covers `github.com` only; a GitHub Enterprise Server host gets no helper.
+
+### SSH remotes
+
+The container has no SSH key or agent, on purpose, so git can't use an SSH remote (`git@host:…`, `ssh://…`) from inside it. Switch the remote to HTTPS once, on the host:
+
+```bash
+git remote set-url origin https://github.com/org/repo.git                       # was git@github.com:org/repo.git
+git remote set-url origin https://gitlab.example.com/grp/repo.git               # was git@gitlab.example.com:grp/repo.git
+git remote set-url origin https://dev.azure.com/org/proj/_git/repo              # was git@ssh.dev.azure.com:v3/org/proj/repo
+git remote set-url origin https://ado.example.com/tfs/Coll/Proj/_git/repo       # was ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo
+```
+
+Or clone over HTTPS in the first place. Run `set-url` on the host: inside the container, `.git/config` is an overlay copy, so the change is dropped when the session ends. For `glab repo clone` and friends, set `git_protocol` to `https` in the host's glab config (`glab config set git_protocol https --host gitlab.example.com`); the container gets a copy of that config.
+
+If you'd rather not touch the remotes, add an `insteadOf` rule to the container's global git config, e.g. `git config --global url.https://github.com/.insteadOf git@github.com:`. It lives on the `claude-code-root` volume, so it lasts across sessions but not under `--ephemeral`. Azure DevOps can't be mapped this way: its SSH and HTTPS paths differ (`v3/org/proj/repo` vs `org/proj/_git/repo`). Don't set `GIT_CONFIG_*` in the `env` block of `settings.docker.json` for this: it would replace the wrapper's own `GIT_CONFIG_*` entries, credential helpers included.
 
 ## Terraform Cloud workflow
 

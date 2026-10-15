@@ -260,16 +260,14 @@ run_script_fn() {
   uname() { echo MINGW64_NT-10.0; }
   detect_msys
   [ "$HOST_UID" = 1000 ] && [ "$HOST_GID" = 1000 ]
-  build_git_config
-  [[ "$(lines_of "${ENV_ARGS[@]}")" == *$'GIT_CONFIG_KEY_0=safe.directory\n-e\nGIT_CONFIG_VALUE_0=/workspaces/*'* ]]
+  [ "$(lines_of "${GIT_CFG[@]}")" = $'safe.directory\n/workspaces/*' ]
 }
 
 @test "detect_msys: Linux keeps id -u and adds no git config" {
   uname() { echo Linux; }
   detect_msys
   [ "$HOST_UID" = "$(id -u)" ] && [ "$HOST_GID" = "$(id -g)" ]
-  build_git_config
-  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_CONFIG_* ]]
+  [ "${#GIT_CFG[@]}" -eq 0 ]
 }
 
 @test "hostpath: identity off MSYS" {
@@ -426,71 +424,40 @@ run_script_fn() {
 
 # --- build_git_config ---
 
-@test "build_git_config: without --git-https adds nothing" {
-  WITH_GLAB=1 WITH_GH=1 GITLAB_HOST=gitlab.example.com
+@test "build_git_config: no forge flag adds no git config" {
+  WITH_GH=1
   build_git_config
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_CONFIG_* ]]
-  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GLAB_GIT_PROTOCOL* ]]
 }
 
-@test "build_git_config: --git-https rewrites and authenticates per forge" {
-  WITH_GIT_HTTPS=1 WITH_GH_DIRECT=1 WITH_GLAB=1 WITH_AZ=1
-  GITLAB_HOST=https://gitlab.example.com:8443/ AZURE_DEVOPS_ORG_URL=https://dev.azure.com/org
+@test "build_git_config: one credential helper per forge host" {
+  WITH_GH_DIRECT=1 WITH_GLAB=1 WITH_AZ=1
+  GITLAB_HOST=https://gitlab.example.com:8443/ AZURE_DEVOPS_ORG_URL=https://ado.example.com/tfs/Coll
   GIT_CFG=(safe.directory "/workspaces/*")
   build_git_config
   env=$(lines_of "${ENV_ARGS[@]}")
   [[ "$env" == *$'GIT_CONFIG_KEY_0=safe.directory\n-e\nGIT_CONFIG_VALUE_0=/workspaces/*'* ]]
-  [[ "$env" == *$'GIT_CONFIG_KEY_1=url.https://github.com/.insteadOf\n-e\nGIT_CONFIG_VALUE_1=git@github.com:'* ]]
-  [[ "$env" == *"GIT_CONFIG_VALUE_3=!gh auth git-credential"* ]]
-  [[ "$env" == *$'GIT_CONFIG_KEY_4=url.https://gitlab.example.com:8443/.insteadOf\n-e\nGIT_CONFIG_VALUE_4=git@gitlab.example.com:'* ]]
-  [[ "$env" == *$'GIT_CONFIG_KEY_6=credential.https://gitlab.example.com:8443.helper\n-e\nGIT_CONFIG_VALUE_6=!glab auth git-credential'* ]]
-  [[ "$env" == *"GIT_CONFIG_KEY_7=credential.https://dev.azure.com.helper"* ]]
+  [[ "$env" == *$'GIT_CONFIG_KEY_1=credential.https://github.com.helper\n-e\nGIT_CONFIG_VALUE_1=!gh auth git-credential'* ]]
+  [[ "$env" == *$'GIT_CONFIG_KEY_2=credential.https://gitlab.example.com:8443.helper\n-e\nGIT_CONFIG_VALUE_2=!glab auth git-credential'* ]]
+  [[ "$env" == *"GIT_CONFIG_KEY_3=credential.https://ado.example.com.helper"* ]]
   [[ "$env" == *'password=$AZURE_DEVOPS_EXT_PAT'* ]]
-  [[ "$env" == *"GIT_CONFIG_COUNT=8"* ]]
-  [[ "$env" == *"GLAB_GIT_PROTOCOL=https"* ]]
+  [[ "$env" == *"GIT_CONFIG_COUNT=4"* ]]
+  [[ "$env" != *insteadOf* ]]
 }
 
-@test "build_git_config: --git-https rewrites git for real" {
+@test "build_git_config: Azure DevOps PAT is offered only to its own host" {
   unset -f git
-  WITH_GIT_HTTPS=1 WITH_GLAB=1 GITLAB_HOST=gitlab.example.com
+  WITH_AZ=1
   build_git_config
-  # ENV_ARGS is (-e K=V)...: export every K=V and ask git for the rewritten URL.
+  # ENV_ARGS is (-e K=V)...: export every K=V and ask git for credentials.
   for a in "${ENV_ARGS[@]}"; do [ "$a" = -e ] || export "$a"; done
-  run git ls-remote --get-url git@gitlab.example.com:grp/repo.git
-  [ "$output" = https://gitlab.example.com/grp/repo.git ]
-}
-
-@test "build_git_config: --git-https rewrites Azure DevOps SSH remotes per project / collection" {
-  unset -f git
-  git init -q "$WS" && git -C "$WS" remote add origin git@ssh.dev.azure.com:v3/org/proj/repo
-  srv="$BATS_TEST_TMPDIR/srv"
-  git init -q "$srv" && git -C "$srv" remote add origin ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo
-  SEEN_PATHS=("$WS" "$srv")
-  WITH_GIT_HTTPS=1 WITH_AZ=1 AZURE_DEVOPS_ORG_URL=https://dev.azure.com/org
-  build_git_config
-  for a in "${ENV_ARGS[@]}"; do [ "$a" = -e ] || export "$a"; done
-  # Services: any repo of the remote's project, either SSH form.
-  [ "$(git ls-remote --get-url git@ssh.dev.azure.com:v3/org/proj/other)" = https://dev.azure.com/org/proj/_git/other ]
-  [ "$(git ls-remote --get-url ssh://git@ssh.dev.azure.com/v3/org/proj/other)" = https://dev.azure.com/org/proj/_git/other ]
-  # No PAT helper for the Server host, so its remote is left alone.
-  [ "$(git ls-remote --get-url ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo)" = ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo ]
-
-  GIT_CFG=() ENV_ARGS=()
-  unset "${!GIT_CONFIG_@}"
-  AZURE_DEVOPS_ORG_URL=https://ado.example.com/tfs/Coll/
-  build_git_config
-  for a in "${ENV_ARGS[@]}"; do [ "$a" = -e ] || export "$a"; done
-  # Server: any repo of the collection; other hosts and Services left alone.
-  [ "$(git ls-remote --get-url ssh://ado.example.com:22/tfs/Coll/Proj2/_git/r)" = https://ado.example.com/tfs/Coll/Proj2/_git/r ]
-  [ "$(git ls-remote --get-url ssh://other.example.com:22/tfs/Coll/Proj/_git/r)" = ssh://other.example.com:22/tfs/Coll/Proj/_git/r ]
-  [ "$(git ls-remote --get-url git@ssh.dev.azure.com:v3/org/proj/repo)" = git@ssh.dev.azure.com:v3/org/proj/repo ]
-}
-
-@test "build_git_config: --git-https alone warns" {
-  WITH_GIT_HTTPS=1
-  run build_git_config
+  export AZURE_DEVOPS_EXT_PAT=s3cret GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=
+  run git credential fill <<<$'protocol=https\nhost=dev.azure.com\n'
   [ "$status" -eq 0 ]
-  [[ "$output" == *"nothing to rewrite"* ]]
+  [[ "$output" == *"password=s3cret"* ]]
+  run git credential fill <<<$'protocol=https\nhost=evil.example.com\n'
+  [ "$status" -ne 0 ]
+  [[ "$output" != *s3cret* ]]
 }
 
 # --- forward_git_identity / build_flags_env ---

@@ -77,13 +77,6 @@ Wrapper flags:
                       host ~/.azure file (no profile, no token caches). Covers
                       az devops / repos / boards / pipelines only.
                       Optional private CA via CLAUDE_DOCKER_AZ_CA.
-  --git-https         With --gh / --gh-direct / --glab / --az: use HTTPS +
-                      token instead of SSH. Rewrites git@<host>: and
-                      ssh://git@<host>/ remotes to https://<host>/, sets
-                      glab's git_protocol to https, and lets git
-                      authenticate with the forwarded token. Azure DevOps
-                      SSH remotes are rewritten per project (Services) or
-                      collection (Server) seen in the workspaces' remotes.
   --registry          Opt in to private package registries: surface host-
                       native uv/npm/pnpm/pip config so in-container installs
                       resolve against a private feed. Mounts ~/.npmrc,
@@ -173,7 +166,6 @@ WITH_TFE=0
 WITH_AZ=0
 WITH_REGISTRY=0
 WITH_API=0
-WITH_GIT_HTTPS=0
 # Flat key/value pairs, emitted as GIT_CONFIG_* env by build_git_config.
 GIT_CFG=()
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
@@ -219,7 +211,6 @@ parse_args() {
       --az)           WITH_AZ=1 ;;
       --registry)     WITH_REGISTRY=1 ;;
       --api)          WITH_API=1 ;;
-      --git-https)    WITH_GIT_HTTPS=1 ;;
       --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
       --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
       --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -583,23 +574,8 @@ build_env_args() {
   return 0
 }
 
-# Print the path of workspace $1's git config, read as a plain file (no
-# includes) from the repo's common git dir, so worktree and submodule
-# workspaces (.git is a pointer file) resolve to the main repo / module config.
-# Fails when there is none, or when .git or config is a symlink, as in the
-# git-config overlay below. git.exe is native under Git Bash and argv
-# conversion is off, so -C needs hostpath(), as for the core.autocrlf lookup in
-# stage_git_overlays.
-ws_git_config() {
-  local dir
-  [ -e "$1/.git" ] && [ ! -L "$1/.git" ] || return 1
-  dir=$(git -C "$(hostpath "$1")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || return 1
-  [ -n "$dir" ] && [ -f "$dir/config" ] && [ ! -L "$dir/config" ] || return 1
-  echo "$dir/config"
-}
-
 discover_tokens() {
-  local _glab_cfg _glab_remote _glab_default _glab_tried _glab_host
+  local _ws0 _glab_cfg _glab_remote _glab_default _glab_tried _glab_host
   # GitHub token discovery — shared, unchanged, by --gh and --gh-direct: host
   # env (GH_TOKEN/GITHUB_TOKEN) wins; else fall back to the gh CLI's active
   # token so users authenticated via `gh auth login` don't have to export
@@ -629,33 +605,42 @@ discover_tokens() {
   # glab calls the API unauthenticated, which public projects mask (#126); its
   # config.yml has the keyring off (stage_glab_config). `glab config get token
   # --host` reads the OS keyring, which the read-only config mount can't carry;
-  # without --host it never looks at per-host tokens. The origin URL comes from
-  # ws_git_config. Forwarded by bare name, never on argv; warn when nothing is
+  # without --host it never looks at per-host tokens. The origin URL is read as a
+  # plain file (no includes) from the repo's common git dir, so worktree and
+  # submodule workspaces (.git is a pointer file) resolve to the main repo /
+  # module config; symlinked .git or config is skipped, as in the git-config
+  # overlay below. Forwarded by bare name, never on argv; warn when nothing is
   # found.
   if [ "$WITH_GLAB" = "1" ] && [ -z "${GITLAB_TOKEN:-}" ]; then
     _glab_hosts=()
     if [ -n "${GITLAB_HOST:-}" ]; then
       _glab_hosts=("$GITLAB_HOST")
     else
-      if _glab_cfg=$(ws_git_config "${SEEN_PATHS[0]}"); then
-        _glab_remote=$(git config --file "$_glab_cfg" --get remote.origin.url 2>/dev/null) || true
-        # The port of an ssh:// or scp-style (user@host:path) remote is the SSH
-        # port, not GitLab's: reduce those to the bare host here. http(s) URLs
-        # keep theirs and are trimmed with the other candidates below.
-        case "$_glab_remote" in
-          http://* | https://*) ;;
-          *://*)
-            _glab_remote=${_glab_remote#*://}
-            _glab_remote=${_glab_remote%%/*}
-            _glab_remote=${_glab_remote##*@}
-            _glab_remote=${_glab_remote%%:*}
-            ;;
-          *)
-            _glab_remote=${_glab_remote%%:*}
-            _glab_remote=${_glab_remote##*@}
-            ;;
-        esac
-        [ -n "$_glab_remote" ] && _glab_hosts+=("$_glab_remote")
+      _ws0="${SEEN_PATHS[0]}"
+      if [ -e "$_ws0/.git" ] && [ ! -L "$_ws0/.git" ]; then
+        # git.exe is native under Git Bash and argv conversion is off, so -C
+        # needs hostpath(), as for the core.autocrlf lookup in stage_git_overlays.
+        _glab_cfg=$(git -C "$(hostpath "$_ws0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || true
+        if [ -n "$_glab_cfg" ] && [ -f "$_glab_cfg/config" ] && [ ! -L "$_glab_cfg/config" ]; then
+          _glab_remote=$(git config --file "$_glab_cfg/config" --get remote.origin.url 2>/dev/null) || true
+          # The port of an ssh:// or scp-style (user@host:path) remote is the SSH
+          # port, not GitLab's: reduce those to the bare host here. http(s) URLs
+          # keep theirs and are trimmed with the other candidates below.
+          case "$_glab_remote" in
+            http://* | https://*) ;;
+            *://*)
+              _glab_remote=${_glab_remote#*://}
+              _glab_remote=${_glab_remote%%/*}
+              _glab_remote=${_glab_remote##*@}
+              _glab_remote=${_glab_remote%%:*}
+              ;;
+            *)
+              _glab_remote=${_glab_remote%%:*}
+              _glab_remote=${_glab_remote##*@}
+              ;;
+          esac
+          [ -n "$_glab_remote" ] && _glab_hosts+=("$_glab_remote")
+        fi
       fi
       if command -v glab >/dev/null 2>&1; then
         _glab_default=$(GLAB_CHECK_UPDATE=false glab config get host 2>/dev/null) || true
@@ -697,72 +682,28 @@ discover_tokens() {
   fi
 }
 
-# --git-https: the container has no SSH key or agent, only tokens, so point
-# git and glab at HTTPS and give git a credential helper per opted-in host.
-# GIT_CONFIG_* env is command-line scope: nothing lands in the persistent
-# ~/.gitconfig. Azure DevOps SSH URLs (v3/org/proj/repo) don't map onto the
-# HTTPS path (org/proj/_git/repo), so only its credential helper is set.
-# Azure DevOps SSH and HTTPS paths differ, so one host-wide insteadOf can't map
-# them. Services: git@ssh.dev.azure.com:v3/<org>/<project>/<repo> is
-# https://dev.azure.com/<org>/<project>/_git/<repo>. Server:
-# ssh://<host>:22/[<vdir>/]<collection>/<project>/_git/<repo> is
-# $AZURE_DEVOPS_ORG_URL/<project>/_git/<repo>, the org URL ending in the
-# collection. Map each such prefix found in the workspaces' remotes, so other
-# repos of the same project (Services) or collection (Server) follow. Only for
-# the host the PAT helper answers for: a rewrite without credentials can't fetch.
-az_ssh_rewrites() {
-  local org=$1 host=$2 coll=${1##*/} ws cfg line url rest url_host
-  for ws in "${SEEN_PATHS[@]}"; do
-    cfg=$(ws_git_config "$ws") || continue
-    while IFS= read -r line; do
-      url=${line#* }
-      case "$url" in
-        git@ssh.dev.azure.com:v3/*/*/* | ssh://git@ssh.dev.azure.com/v3/*/*/*)
-          [ "$host" = dev.azure.com ] || continue
-          rest=${url#*v3/}; rest=${rest%/*}
-          GIT_CFG+=("url.https://dev.azure.com/$rest/_git/.insteadOf" "git@ssh.dev.azure.com:v3/$rest/"
-            "url.https://dev.azure.com/$rest/_git/.insteadOf" "ssh://git@ssh.dev.azure.com/v3/$rest/")
-          ;;
-        ssh://*)
-          case "$org" in *://*/*) ;; *) continue ;; esac
-          url_host=${url#ssh://}; url_host=${url_host%%/*}; url_host=${url_host##*@}
-          case "$url" in
-            */"$coll"/*) [ "${url_host%%:*}" = "${host%%:*}" ] \
-              && GIT_CFG+=("url.$org/.insteadOf" "${url%%/"$coll"/*}/$coll/") ;;
-          esac
-          ;;
-      esac
-    done < <(git config --file "$cfg" --get-regexp '^remote\..*\.url$' 2>/dev/null)
-  done
-  return 0
-}
-
+# The forwarded forge tokens reach the CLIs but not git: over HTTPS, git has no
+# credential helper and fails with "could not read Username". Give it one per
+# opted-in forge, each scoped to that forge's host so git never offers a token
+# anywhere else. Under --gh the sidecar injects auth for github.com, so only
+# --gh-direct needs one. GIT_CONFIG_* env is command-line scope: nothing lands
+# in the persistent ~/.gitconfig. SSH remotes are left alone (no key or agent
+# in the container); docs/auth.md#ssh-remotes covers switching them to HTTPS.
 build_git_config() {
-  local host org i=0
-  if [ "$WITH_GIT_HTTPS" = "1" ]; then
-    if [ "$WITH_GH" = "1" ] || [ "$WITH_GH_DIRECT" = "1" ]; then
-      GIT_CFG+=(url.https://github.com/.insteadOf git@github.com: url.https://github.com/.insteadOf ssh://git@github.com/)
-      # Under --gh the sidecar injects auth; --gh-direct has GH_TOKEN in env.
-      [ "$WITH_GH_DIRECT" = "1" ] && GIT_CFG+=(credential.https://github.com.helper "!gh auth git-credential")
-    fi
-    if [ "$WITH_GLAB" = "1" ]; then
-      host=${GITLAB_HOST:-gitlab.com}
-      host=${host#*://}; host=${host%%/*}
-      GIT_CFG+=("url.https://$host/.insteadOf" "git@${host%%:*}:" "url.https://$host/.insteadOf" "ssh://git@${host%%:*}/"
-        "credential.https://$host.helper" "!glab auth git-credential")
-      ENV_ARGS+=("-e" "GLAB_GIT_PROTOCOL=https")
-    fi
-    if [ "$WITH_AZ" = "1" ]; then
-      org=${AZURE_DEVOPS_ORG_URL:-https://dev.azure.com}
-      org=${org%/}
-      host=${org#*://}; host=${host%%/*}
-      # \$ stays literal: the PAT is read from env when git runs the helper.
-      GIT_CFG+=("credential.https://$host.helper" "!f() { test \"\$1\" = get && echo username=pat && echo \"password=\$AZURE_DEVOPS_EXT_PAT\"; }; f")
-      az_ssh_rewrites "$org" "$host"
-    fi
-    if [ "$WITH_GH" = "0" ] && [ "$WITH_GH_DIRECT" = "0" ] && [ "$WITH_GLAB" = "0" ] && [ "$WITH_AZ" = "0" ]; then
-      echo "claude-docker: --git-https without --gh, --gh-direct, --glab or --az has nothing to rewrite" >&2
-    fi
+  local host i=0
+  [ "$WITH_GH_DIRECT" = "1" ] && GIT_CFG+=(credential.https://github.com.helper "!gh auth git-credential")
+  if [ "$WITH_GLAB" = "1" ]; then
+    # discover_tokens has set GITLAB_HOST to the token's host when it found one.
+    host=${GITLAB_HOST:-gitlab.com}
+    host=${host#*://}; host=${host%%/*}
+    GIT_CFG+=("credential.https://$host.helper" "!glab auth git-credential")
+  fi
+  if [ "$WITH_AZ" = "1" ]; then
+    host=${AZURE_DEVOPS_ORG_URL:-https://dev.azure.com}
+    host=${host#*://}; host=${host%%/*}
+    # \$ stays literal: the PAT is read from env when git runs the helper, so it
+    # is never on argv or in the helper string.
+    GIT_CFG+=("credential.https://$host.helper" "!f() { test \"\$1\" = get && echo username=pat && echo \"password=\$AZURE_DEVOPS_EXT_PAT\"; }; f")
   fi
   while [ "$i" -lt "${#GIT_CFG[@]}" ]; do
     ENV_ARGS+=("-e" "GIT_CONFIG_KEY_$((i / 2))=${GIT_CFG[i]}" "-e" "GIT_CONFIG_VALUE_$((i / 2))=${GIT_CFG[i + 1]}")
