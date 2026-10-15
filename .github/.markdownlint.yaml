@@ -1,3 +1,4 @@
+---
 # The PR template starts at ## Summary, like every GitHub template; the
 # action's own config is replaced here, so restate its MD013 setting.
 MD013: false
