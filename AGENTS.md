@@ -16,13 +16,22 @@ most often missed:
   [PR template](.github/pull_request_template.md): the archived change, or
   `No spec change` with the specs you checked. Update it when later commits
   change the answer.
-- **Link the related issue, if there is one.** Before opening a PR, search the
-  open issues for the problem it solves (`gh issue list --search <keywords>`).
-  Write `Closes #N` in the PR description when the PR resolves the issue, so
-  GitHub closes it on merge, or `Refs #N` when it covers only part, and say on
-  the issue what is left. Keep the line current when later commits change the
-  scope. Merged PRs that named no issue have left issues open after the work
-  was done. If no issue exists, don't open one just to link it.
+- **Link the PR to the issue it resolves, if there is one.** Before opening a
+  PR, search the open issues for the problem it solves
+  (`gh issue list --search <keywords>`). Write `Closes #N` in the PR
+  description: that is what links the PR to the issue (the issue's
+  *Development* sidebar) and closes the issue on merge. A plain `Refs #N` or
+  `Part of #N` only leaves a mention in the issue's timeline, so merged PRs
+  that relied on one have left issues open after the work was done.
+  - **The PR resolves only part of the issue?** Split the issue first: open a
+    sub-issue for the part this PR finishes (add it under the original in the
+    issue's *Sub-issues* panel, or with the `addSubIssue` GraphQL mutation via
+    `gh api graphql`), and `Closes` the sub-issue. The original stays open for
+    the rest.
+  - **Stacked PRs:** `Closes` only fires when a PR merges into `main`, so merge
+    a stack bottom-up and let GitHub retarget each next PR to `main`.
+  - Keep the line current when later commits change the scope. If no issue
+    exists, don't open one just to link it.
 - **Never hand-edit `openspec/specs/`.** It is generated when a change is
   archived; fix the delta and re-archive.
 - **Run the [local checks](CONTRIBUTING.md#local-checks-before-opening-a-pr)**
