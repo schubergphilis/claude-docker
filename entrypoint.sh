@@ -58,9 +58,18 @@ install_cas() {
 # mount paths intact instead of forcing a layout migration.
 # -K UID_MIN=1 overrides the login.defs floor per-call so macOS UIDs (≥501,
 # below Ubuntu's default 1000) don't trigger a warning.
+# An existing `claude` (e.g. one a child image added) must already have
+# HOST_UID: otherwise the session would run as that UID — wrong owner on the
+# workspace mounts, and no privilege drop at all if it is 0 — so refuse.
 ensure_user() {
-  local uid=$1 gid=$2
-  getent passwd claude >/dev/null 2>&1 && return 0
+  local uid=$1 gid=$2 existing
+  if getent passwd claude >/dev/null 2>&1; then
+    existing="$(id -u claude)" || return
+    [ "$existing" = "$uid" ] && return 0
+    printf 'entrypoint: ERROR existing claude user has UID %s, expected HOST_UID %s\n' \
+      "$existing" "$uid" >&2
+    return 1
+  fi
   getent group "$gid" >/dev/null 2>&1 \
     || groupadd -o -g "$gid" claude \
     || return

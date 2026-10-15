@@ -20,6 +20,9 @@ setup() {
   # Entries getent knows about, e.g. "passwd claude" or "group 1000".
   KNOWN=""
   getent() { [[ " $KNOWN " == *" $1 $2 "* ]]; }
+  # UID `id -u claude` reports for a pre-existing claude user.
+  CLAUDE_UID=1000
+  id() { echo "$CLAUDE_UID"; }
   # exec bypasses shell functions, so runuser is a PATH stub.
   mkdir -p "$BATS_TEST_TMPDIR/bin"
   printf '#!/bin/sh\necho "runuser $*"\n' > "$BATS_TEST_TMPDIR/bin/runuser"
@@ -62,11 +65,28 @@ setup() {
   [[ "$output" == *"useradd -o -K UID_MIN=1 -u 1000 -g 1000"* ]]
 }
 
-@test "existing claude user is left alone" {
+@test "existing claude user with HOST_UID is left alone" {
   KNOWN="passwd claude"
   run ensure_user 1000 1000
   [ "$status" -eq 0 ]
   [ -z "$output" ]
+}
+
+@test "existing claude user with another UID is refused" {
+  KNOWN="passwd claude"
+  CLAUDE_UID=0
+  run ensure_user 1000 1000
+  [ "$status" -ne 0 ]
+  [ "$output" = "entrypoint: ERROR existing claude user has UID 0, expected HOST_UID 1000" ]
+}
+
+@test "existing claude user with another UID stops main before runuser" {
+  KNOWN="passwd claude"
+  CLAUDE_UID=1001
+  HOST_UID=1000 HOST_GID=1000 run main claude
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"existing claude user has UID 1001, expected HOST_UID 1000"* ]]
+  [[ "$output" != *runuser* ]]
 }
 
 @test "EROFS chown errors are filtered out" {
