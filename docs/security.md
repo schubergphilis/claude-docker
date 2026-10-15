@@ -51,11 +51,11 @@ The container narrows blast radius vs. running `claude --yolo` on the host, but 
 - `azure-cli-core` and all its transitive deps installed from a hash-locked `pins/az-requirements.txt` (`--require-hashes`).
 - npm packages (npm itself, claude-code, openspec, pnpm) pinned by version with `--ignore-scripts`, not sha256-verified. A compromised npm registry serving a malicious tarball at the pinned version would not be caught at build time.
 - Lifecycle scripts: claude-code and pnpm ship their native binary in a per-arch optional dependency and are unusable until their own install script links it. The build runs exactly those two scripts by hand (claude-code's `install.cjs`, pnpm's `install.js`) and asserts the result; the Dockerfile names them with the conditions they're held to. No other package's, or transitive dependency's, lifecycle script ever runs.
-- CI scans the built image for **known** vulnerabilities in its OS and language packages and fails the build on a HIGH or CRITICAL finding that upstream has already fixed. Findings with no fix yet are reported but do not fail, and accepted ones carry a mandatory expiry (see [Image vulnerability scanning](#image-vulnerability-scanning)). A green build means no *fixable* high-severity CVE, not an absence of known CVEs.
+- CI scans the built image for **known** vulnerabilities in its OS and language packages and fails the build on a HIGH or CRITICAL finding that upstream has already fixed. Findings with no fix yet are reported but do not fail, and accepted ones carry a mandatory expiry (see [Image vulnerability scanning](#image-vulnerability-scanning)). A green build means no _fixable_ high-severity CVE, not an absence of known CVEs.
 
 ## Image vulnerability scanning
 
-CI scans the built image for **known** vulnerabilities with [Trivy](https://trivy.dev), across the whole image filesystem: the Ubuntu base image's system packages, the pinned CLIs, and their transitive dependencies. This is a different question from the one [`scripts/update_pins.py`](../scripts/update_pins.py) answers — that reports when a *newer* version exists, while a pin can sit on the newest release and still carry a disclosed CVE. It is also a different question from the `npm audit signatures` check in [Updating pinned tool versions](maintenance.md#updating-pinned-tool-versions), which establishes that a tarball came from npm's keyring, not that the code inside it is free of known vulnerabilities.
+CI scans the built image for **known** vulnerabilities with [Trivy](https://trivy.dev), across the whole image filesystem: the Ubuntu base image's system packages, the pinned CLIs, and their transitive dependencies. This is a different question from the one [`scripts/update_pins.py`](../scripts/update_pins.py) answers — that reports when a _newer_ version exists, while a pin can sit on the newest release and still carry a disclosed CVE. It is also a different question from the `npm audit signatures` check in [Updating pinned tool versions](maintenance.md#updating-pinned-tool-versions), which establishes that a tarball came from npm's keyring, not that the code inside it is free of known vulnerabilities.
 
 Each scan runs twice over the same image, with one policy:
 
@@ -71,7 +71,7 @@ The scan is a **step in the `Docker build (validate, no push)` job**, not a chec
 
 To accept a finding you can't fix yet, add it to [`.trivyignore`](../.trivyignore) with a reason and an expiry date:
 
-```
+```text
 # ubuntu has no fixed package yet; revisit at the next base-image bump
 CVE-2026-12345 exp:2026-12-01
 ```
