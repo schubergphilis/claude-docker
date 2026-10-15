@@ -20,7 +20,8 @@ jobs:
           # markdownlint-cli2 over **/*.md with the action's config (MD013
           # off, <img> allowed). openspec/specs/ (generated) and
           # openspec/changes/archive/ (history) opt out through their own
-          # .markdownlint.yaml; .github/'s restates MD013 and drops MD041.
+          # .markdownlint.yaml. The PR template disables MD041 for its first
+          # heading only, inline.
           - testing-type: markdownlint
     runs-on: ubuntu-24.04
     steps:
