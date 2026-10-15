@@ -87,7 +87,7 @@ git remote set-url origin https://dev.azure.com/org/proj/_git/repo              
 git remote set-url origin https://ado.example.com/tfs/Coll/Proj/_git/repo       # was ssh://ado.example.com:22/tfs/Coll/Proj/_git/repo
 ```
 
-Or clone over HTTPS in the first place. Run `set-url` on the host: inside the container, `.git/config` is an overlay copy, so the change is dropped when the session ends. For `glab repo clone` and friends, set `git_protocol` to `https` in the host's glab config (`glab config set git_protocol https --host gitlab.example.com`); the container gets a copy of that config.
+Or clone over HTTPS in the first place. Run `set-url` on the host: inside the container, `.git/config` is a single-file bind mount, and git's write to it fails with `Device or resource busy` ([#1](https://github.com/schubergphilis/claude-docker/issues/1)). For `glab repo clone` and friends, set `git_protocol` to `https` in the host's glab config (`glab config set git_protocol https --host gitlab.example.com`); the container gets a copy of that config.
 
 If you'd rather not touch the remotes, add an `insteadOf` rule to the container's global git config, e.g. `git config --global url.https://github.com/.insteadOf git@github.com:`. It lives on the `claude-code-root` volume, so it lasts across sessions but not under `--ephemeral`. Azure DevOps can't be mapped this way: its SSH and HTTPS paths differ (`v3/org/proj/repo` vs `org/proj/_git/repo`). Don't set `GIT_CONFIG_*` in the `env` block of `settings.docker.json` for this: it would replace the wrapper's own `GIT_CONFIG_*` entries, credential helpers included.
 
