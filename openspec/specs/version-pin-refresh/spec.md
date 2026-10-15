@@ -226,7 +226,7 @@ SHALL name the newest published version.
 
 - **GIVEN** the Dockerfile pins `TASK_VERSION=3.53.1` and the apt repo's newest
   published version is `3.54.0`
-- **WHEN** the operator runs `uv run update_pins.py`
+- **WHEN** the operator runs `uv run scripts/update_pins.py`
 - **THEN** the manual-pin reminder block reports the pinned version, the newest
   published version, and that the two differ
 - **AND** no `pins/*.env` fragment is created for `task`
@@ -235,7 +235,7 @@ SHALL name the newest published version.
 
 - **GIVEN** the pinned `TASK_VERSION` is the newest version published in the apt
   repo
-- **WHEN** the operator runs `uv run update_pins.py`
+- **WHEN** the operator runs `uv run scripts/update_pins.py`
 - **THEN** the reminder reports the pinned version and that it matches the newest
   published version
 
@@ -295,7 +295,7 @@ drift apart.
 #### Scenario: reminder degrades gracefully without network
 
 - **GIVEN** the apt repo is unreachable
-- **WHEN** the operator runs `uv run update_pins.py`
+- **WHEN** the operator runs `uv run scripts/update_pins.py`
 - **THEN** the `task` reminder states that the newest published version could not
   be resolved, and still reports the pinned version
 - **AND** the run continues and exits on the same status it otherwise would
@@ -303,7 +303,7 @@ drift apart.
 #### Scenario: unparseable index does not fail the run
 
 - **GIVEN** the apt repo returns content that is not a readable package index
-- **WHEN** the operator runs `uv run update_pins.py`
+- **WHEN** the operator runs `uv run scripts/update_pins.py`
 - **THEN** the `task` reminder states that the newest published version could not
   be resolved
 - **AND** every automated tool's pin is refreshed exactly as it otherwise would be

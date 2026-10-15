@@ -12,7 +12,7 @@ IMAGE=claude-docker:ci
 
 # Registry rows: name, probe, version_re, pinned, kind, ref (tab-separated).
 list_tools() {
-  python3 update_pins.py --list-tools
+  python3 scripts/update_pins.py --list-tools
 }
 
 # Probe one tool in the image and print its PASS/FAIL line; non-zero on FAIL.
