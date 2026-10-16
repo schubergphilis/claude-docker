@@ -14,12 +14,15 @@ setup() {
   CALLS="$BATS_TEST_TMPDIR/calls"
   : >"$CALLS"
   unset GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN GITLAB_HOST CLAUDE_DOCKER_RUNTIME \
-    CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA CLAUDE_DOCKER_ADD_HOSTS \
-    CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+    CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_GLAB_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA \
+    CLAUDE_DOCKER_ADD_HOSTS CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS \
+    ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BASE_URL CLAUDE_DOCKER_GLAB_UPSTREAM
   RUNTIME=docker
   # Knobs for the docker stub: STUB_FAIL names subcommands that fail,
-  # STUB_PS is the stopped-container list, STUB_ALIVE the running sidecar id.
+  # STUB_PS is the stopped-container list, STUB_ALIVE the running sidecar id,
+  # STUB_LOGS what the sidecar has logged so far.
   STUB_FAIL="" STUB_PS="" STUB_ALIVE="cid" STUB_IP="10.0.0.2"
+  STUB_LOGS="serving initial configuration"
   docker() {
     echo "docker $*" >>"$CALLS"
     case " $STUB_FAIL " in *" $1 "*) return 1 ;; esac
@@ -30,7 +33,7 @@ setup() {
       network) [ "$2" = "ls" ] && echo "net1"; return 0 ;;
       cp) echo "CA" >"$3" ;;
       inspect) echo "$STUB_IP" ;;
-      logs) echo "caddy: bad policy" ;;
+      logs) echo "$STUB_LOGS" ;;
     esac
     return 0
   }
@@ -58,7 +61,7 @@ lines_of() { printf '%s\n' "$@"; }
 # functions.
 export_stubs() {
   export -f docker podman gh glab git sleep
-  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP
+  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP STUB_LOGS
 }
 run_script() {
   export_stubs
@@ -123,6 +126,47 @@ run_script_fn() {
   run validate_opts
   [ "$status" -eq 1 ]
   [[ "$output" == *"--gh and --gh-direct are mutually exclusive"* ]]
+}
+
+@test "validate_opts: --glab with --glab-direct is rejected" {
+  WITH_GLAB=1 WITH_GLAB_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--glab and --glab-direct are mutually exclusive"* ]]
+}
+
+@test "validate_opts: --api with --api-direct is rejected" {
+  WITH_API=1 WITH_API_DIRECT=1 ANTHROPIC_API_KEY=k
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--api and --api-direct are mutually exclusive"* ]]
+}
+
+@test "validate_opts: --api-direct without a token is rejected too" {
+  WITH_API_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY"* ]]
+}
+
+@test "validate_opts: --api needs an http(s) ANTHROPIC_BASE_URL" {
+  WITH_API=1 ANTHROPIC_API_KEY=k ANTHROPIC_BASE_URL=llm.example.com
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must start with http:// or https://"* ]]
+  WITH_API=0 WITH_API_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_opts: missing CLAUDE_DOCKER_GLAB_POLICY is fatal under --glab only" {
+  WITH_GLAB=1 CLAUDE_DOCKER_GLAB_POLICY="$BATS_TEST_TMPDIR/nope.caddy"
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CLAUDE_DOCKER_GLAB_POLICY '$BATS_TEST_TMPDIR/nope.caddy' is not a readable file"* ]]
+  WITH_GLAB=0 WITH_GLAB_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 0 ]
 }
 
 @test "validate_opts: --api without a token is rejected" {
@@ -224,19 +268,28 @@ run_script_fn() {
   [[ "$output" == *"requested runtime 'podman' not found on PATH"* ]]
 }
 
-# --- prune_stale_gh ---
+# --- prune_stale_auth_proxy ---
 
-@test "prune_stale_gh: removes stopped sidecars and stale networks" {
+@test "prune_stale_auth_proxy: removes stopped sidecars and stale networks" {
   STUB_PS="old1 old2"
-  prune_stale_gh
+  prune_stale_auth_proxy
   grep -qx "docker rm -f old1" "$CALLS"
   grep -qx "docker rm -f old2" "$CALLS"
   grep -qx "docker network rm net1" "$CALLS"
 }
 
-@test "prune_stale_gh: failures never abort the run" {
+@test "prune_stale_auth_proxy: sweeps the legacy claude-gh names too, stopped only" {
+  prune_stale_auth_proxy
+  for prefix in claude-auth claude-gh; do
+    grep -qx "docker ps -aq --filter name=^$prefix-proxy- --filter status=exited --filter status=created --filter status=dead" "$CALLS"
+    grep -qx "docker network ls -q --filter name=^$prefix-" "$CALLS"
+  done
+  run ! grep -q "status=running" "$CALLS"
+}
+
+@test "prune_stale_auth_proxy: failures never abort the run" {
   STUB_PS="old1" STUB_FAIL="rm ps network"
-  run prune_stale_gh
+  run prune_stale_auth_proxy
   [ "$status" -eq 0 ]
 }
 
@@ -375,6 +428,31 @@ run_script_fn() {
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *UV_INDEX_CORP_PASSWORD* ]]
 }
 
+@test "build_env_args: --glab forwards GITLAB_HOST but never GITLAB_TOKEN" {
+  export GITLAB_TOKEN=glpat GITLAB_HOST=gl.example.com
+  WITH_GLAB=1
+  build_env_args
+  [ "$(lines_of "${ENV_ARGS[@]}")" = "$(printf -- '-e\nTERM\n-e\nCOLORTERM\n-e\nGITLAB_HOST')" ]
+  ENV_ARGS=() WITH_GLAB=0 WITH_GLAB_DIRECT=1
+  build_env_args
+  [ "$(lines_of "${ENV_ARGS[@]}")" = "$(printf -- '-e\nGITLAB_TOKEN\n-e\nGITLAB_HOST')" ]
+}
+
+@test "build_env_args: --api keeps the endpoint and credentials for the sidecar" {
+  export ANTHROPIC_BASE_URL=https://llm ANTHROPIC_API_KEY=k ANTHROPIC_AUTH_TOKEN=t ANTHROPIC_MODEL=m ANTHROPIC_CUSTOM_HEADERS="X: y"
+  WITH_API=1
+  build_env_args
+  local got
+  got=$(lines_of "${ENV_ARGS[@]}")
+  [[ "$got" == *ANTHROPIC_MODEL* ]] && [[ "$got" == *ANTHROPIC_CUSTOM_HEADERS* ]]
+  [[ "$got" != *ANTHROPIC_BASE_URL* ]] && [[ "$got" != *ANTHROPIC_API_KEY* ]] && [[ "$got" != *ANTHROPIC_AUTH_TOKEN* ]]
+  ENV_ARGS=() WITH_API=0 WITH_API_DIRECT=1
+  build_env_args
+  got=$(lines_of "${ENV_ARGS[@]}")
+  [[ "$got" == *ANTHROPIC_BASE_URL* ]] && [[ "$got" == *ANTHROPIC_API_KEY* ]] && [[ "$got" == *ANTHROPIC_AUTH_TOKEN* ]]
+  [[ "$got" == *ANTHROPIC_MODEL* ]]
+}
+
 # --- discover_tokens ---
 
 @test "discover_tokens: --gh-direct forwards the gh CLI token by name" {
@@ -404,13 +482,52 @@ run_script_fn() {
   run ! grep -q "^gh " "$CALLS"
 }
 
-@test "discover_tokens: --glab asks glab for GITLAB_HOST's token" {
-  WITH_GLAB=1 GITLAB_HOST=https://gitlab.example.com/
+@test "discover_tokens: --glab-direct asks glab for GITLAB_HOST's token and forwards it" {
+  WITH_GLAB_DIRECT=1 GITLAB_HOST=https://gitlab.example.com/
   SEEN_PATHS=("$WS")
   discover_tokens
   [ "$GITLAB_TOKEN" = glpat_stub ]
   grep -q "glab config get token --host gitlab.example.com" "$CALLS"
   [[ "$(lines_of "${ENV_ARGS[@]}")" == *$'-e\nGITLAB_TOKEN'* ]]
+  [ -z "$GLAB_HOST_TOKEN" ]
+}
+
+@test "discover_tokens: --glab keeps the discovered token for the sidecar" {
+  WITH_GLAB=1 GITLAB_HOST=https://gitlab.example.com:8443/
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ "$GLAB_HOST_TOKEN" = glpat_stub ]
+  [ "$GLAB_PROXY_HOST" = gitlab.example.com:8443 ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GITLAB_TOKEN* ]]
+}
+
+@test "discover_tokens: --glab with an explicit token proxies the first candidate host" {
+  WITH_GLAB=1 GITLAB_TOKEN=glpat_explicit
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ "$GLAB_HOST_TOKEN" = glpat_explicit ]
+  [ "$GLAB_PROXY_HOST" = gitlab.com ]
+  [ "$GITLAB_HOST" = gitlab.com ]
+  run ! grep -q "glab config get token" "$CALLS"
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *$'-e\nGITLAB_TOKEN'* ]]
+}
+
+@test "discover_tokens: --glab-direct with an explicit token asks glab nothing" {
+  WITH_GLAB_DIRECT=1 GITLAB_TOKEN=glpat_explicit
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ ! -s "$CALLS" ]
+  [ -z "${GITLAB_HOST:-}" ]
+}
+
+@test "discover_tokens: --glab refuses hosts the proxy can't serve" {
+  for h in http://gitlab.internal 10.0.0.5 10.0.0.5:8443 "[::1]:8443"; do
+    WITH_GLAB=1 GITLAB_HOST="$h"
+    SEEN_PATHS=("$WS")
+    run discover_tokens
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"use --glab-direct"* ]]
+  done
 }
 
 @test "discover_tokens: --glab with no token warns" {
@@ -424,14 +541,14 @@ run_script_fn() {
 
 # --- build_git_config ---
 
-@test "build_git_config: no forge flag adds no git config" {
-  WITH_GH=1
+@test "build_git_config: proxied forges add no git config" {
+  WITH_GH=1 WITH_GLAB=1 GITLAB_HOST=gitlab.example.com
   build_git_config
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_CONFIG_* ]]
 }
 
 @test "build_git_config: one credential helper per forge host" {
-  WITH_GH_DIRECT=1 WITH_GLAB=1 WITH_AZ=1
+  WITH_GH_DIRECT=1 WITH_GLAB_DIRECT=1 WITH_AZ=1
   GITLAB_HOST=https://gitlab.example.com:8443/ AZURE_DEVOPS_ORG_URL=https://ado.example.com/tfs/Coll
   GIT_CFG=(safe.directory "/workspaces/*")
   build_git_config
@@ -480,6 +597,12 @@ run_script_fn() {
   [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=aws,gh,ephemeral" ]
 }
 
+@test "build_flags_env: -direct modes get their own tags" {
+  WITH_GLAB_DIRECT=1 WITH_API_DIRECT=1
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=glab-direct,api-direct" ]
+}
+
 @test "build_flags_env: no opt-ins, no tag" {
   build_flags_env
   [[ "${ENV_ARGS[*]}" != *CLAUDE_DOCKER_FLAGS* ]]
@@ -492,14 +615,15 @@ run_script_fn() {
     create_stage
     echo "$stage" >"$BATS_TEST_TMPDIR/stage"
     [ -d "$stage" ]
-    [ "$GH_PROXY_SIDECAR" = "claude-gh-proxy-${stage##*.}" ]
+    [ "$AUTH_PROXY_SIDECAR" = "claude-auth-proxy-${stage##*.}" ]
+    [ "$AUTH_PROXY_NETWORK" = "claude-auth-${stage##*.}" ]
   )
   local s
   s=$(cat "$BATS_TEST_TMPDIR/stage")
   [[ "$s" == "$HOME/.cache/claude-docker/host."* ]]
   [ ! -e "$s" ]
-  grep -q "docker rm -f claude-gh-proxy-" "$CALLS"
-  grep -q "docker network rm claude-gh-" "$CALLS"
+  grep -q "docker rm -f claude-auth-proxy-" "$CALLS"
+  grep -q "docker network rm claude-auth-" "$CALLS"
 }
 
 @test "create_stage: an unwritable cache dir aborts" {
@@ -508,93 +632,183 @@ run_script_fn() {
   [ "$status" -eq 1 ]
 }
 
-# --- start_gh_sidecar ---
+# --- start_auth_sidecar ---
 
 sidecar_setup() {
   WITH_GH=1 GH_HOST_TOKEN=gho_secret
   stage="$BATS_TEST_TMPDIR/stage"
   mkdir -p "$stage"
-  GH_PROXY_NETWORK=claude-gh-x GH_PROXY_SIDECAR=claude-gh-proxy-x
+  AUTH_PROXY_NETWORK=claude-auth-x AUTH_PROXY_SIDECAR=claude-auth-proxy-x
 }
 
-@test "start_gh_sidecar: no-op without a host token" {
-  WITH_GH=1
-  start_gh_sidecar
-  [ "$GH_SIDECAR_ACTIVE" = 0 ]
+@test "start_auth_sidecar: no-op without a proxied credential" {
+  WITH_GH=1 WITH_GLAB=1
+  start_auth_sidecar
+  [ "$GH_SIDECAR_ACTIVE" = 0 ] && [ "$GLAB_SIDECAR_ACTIVE" = 0 ] && [ "$API_SIDECAR_ACTIVE" = 0 ]
   [ ! -s "$CALLS" ]
 }
 
-@test "start_gh_sidecar: wires the agent to the sidecar" {
+@test "start_auth_sidecar: wires the agent to the gh sidecar" {
   sidecar_setup
   CLAUDE_DOCKER_GH_POLICY="$BATS_TEST_TMPDIR/policy.caddy"
   echo "# user policy" >"$CLAUDE_DOCKER_GH_POLICY"
-  start_gh_sidecar 2>/dev/null
+  start_auth_sidecar 2>/dev/null
   [ "$GH_SIDECAR_ACTIVE" = 1 ]
-  [ "$(cat "$stage/gh-proxy/policy.caddy")" = "# user policy" ]
+  [ "$(cat "$stage/auth-proxy/caddy/policy.caddy")" = "# user policy" ]
+  [ -f "$stage/auth-proxy/caddy/sites/gh.caddy" ]
+  [ ! -e "$stage/auth-proxy/caddy/sites/glab.caddy" ] && [ ! -e "$stage/auth-proxy/caddy/sites/api.caddy" ]
   [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--add-host\napi.github.com:10.0.0.2'* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"auth-proxy/root.crt:/usr/local/share/ca-certificates/claude-docker-auth-proxy.crt:ro"* ]]
   [[ "$(lines_of "${ENV_ARGS[@]}")" == *"GH_TOKEN=claude-docker-proxy"* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"UV_SYSTEM_CERTS=1"* ]]
+  grep -q "^docker run -d --name claude-auth-proxy-x --network claude-auth-x .* -v $stage/auth-proxy/caddy:/etc/caddy:ro" "$CALLS"
   # The real token is passed by name, never on argv.
   run ! grep -q gho_secret "$CALLS"
   run ! grep -rq gho_secret "$stage"
 }
 
-@test "start_gh_sidecar: passes CLAUDE_DOCKER_ADD_HOSTS to the sidecar" {
+@test "start_auth_sidecar: passes CLAUDE_DOCKER_ADD_HOSTS to the sidecar" {
   sidecar_setup
   ADD_HOSTS=(github.com:140.82.121.4)
-  start_gh_sidecar 2>/dev/null
+  start_auth_sidecar 2>/dev/null
   grep -q "^docker run -d .*--add-host github.com:140.82.121.4" "$CALLS"
 }
 
-@test "start_gh_sidecar: no policy stages an empty one" {
+@test "start_auth_sidecar: no policy stages an empty one" {
   sidecar_setup
-  start_gh_sidecar 2>/dev/null
-  [ -f "$stage/gh-proxy/policy.caddy" ] && [ ! -s "$stage/gh-proxy/policy.caddy" ]
+  start_auth_sidecar 2>/dev/null
+  [ -f "$stage/auth-proxy/caddy/policy.caddy" ] && [ ! -s "$stage/auth-proxy/caddy/policy.caddy" ]
 }
 
-@test "start_gh_sidecar: network create failure aborts" {
+@test "start_auth_sidecar: --glab redirects only the token's host" {
+  WITH_GLAB=1 GLAB_HOST_TOKEN=glpat_secret GLAB_PROXY_HOST=gl.example.com:8443
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  AUTH_PROXY_NETWORK=claude-auth-x AUTH_PROXY_SIDECAR=claude-auth-proxy-x
+  start_auth_sidecar 2>/dev/null
+  [ "$GLAB_SIDECAR_ACTIVE" = 1 ] && [ "$GH_SIDECAR_ACTIVE" = 0 ]
+  [ -f "$stage/auth-proxy/caddy/sites/glab.caddy" ] && [ -f "$stage/auth-proxy/caddy/glab-policy.caddy" ]
+  [ "$GLAB_PROXY_SITE" = gl.example.com:8443 ]
+  [ "$GLAB_PROXY_UPSTREAM" = https://gl.example.com:8443 ]
+  [ "$GLAB_PROXY_BASIC" = "Basic $(printf 'oauth2:glpat_secret' | base64)" ]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--add-host\ngl.example.com:10.0.0.2'* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *github.com* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"GITLAB_TOKEN=claude-docker-proxy"* ]]
+  grep -q -- "-e GLAB_PROXY_BEARER -e GLAB_PROXY_BASIC" "$CALLS"
+  run ! grep -q glpat_secret "$CALLS"
+  run ! grep -rq glpat_secret "$stage"
+}
+
+@test "start_auth_sidecar: --api routes through the sidecar without a CA" {
+  WITH_API=1 ANTHROPIC_API_KEY=sk-secret ANTHROPIC_BASE_URL=https://llm.example.com/anthropic/
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  AUTH_PROXY_NETWORK=claude-auth-x AUTH_PROXY_SIDECAR=claude-auth-proxy-x
+  start_auth_sidecar 2>/dev/null
+  [ "$API_SIDECAR_ACTIVE" = 1 ]
+  [ "$API_PROXY_UPSTREAM" = https://llm.example.com ] && [ "$API_PROXY_PREFIX" = /anthropic ]
+  [ "$(cat "$stage/auth-proxy/caddy/api-cred.caddy")" = 'request_header x-api-key "{env.API_PROXY_KEY}"
+request_header -Authorization' ]
+  [ ! -s "$stage/auth-proxy/caddy/api-transport.caddy" ]
+  got=$(lines_of "${ENV_ARGS[@]}")
+  [[ "$got" == *"ANTHROPIC_BASE_URL=http://claude-docker-api-proxy:8080"* ]]
+  [[ "$got" == *"ANTHROPIC_API_KEY=claude-docker-proxy"* ]]
+  [[ "$got" != *ANTHROPIC_AUTH_TOKEN* ]] && [[ "$got" != *UV_SYSTEM_CERTS* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--add-host\nclaude-docker-api-proxy:10.0.0.2'* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *root.crt* ]]
+  run ! grep -q "^docker cp" "$CALLS"
+  grep -q -- "-e API_PROXY_KEY " "$CALLS"
+  run ! grep -q -- "API_PROXY_BEARER" "$CALLS"
+  run ! grep -q sk-secret "$CALLS"
+  run ! grep -rq sk-secret "$stage"
+}
+
+@test "start_auth_sidecar: --api with an auth token and a CA" {
+  WITH_API=1 ANTHROPIC_AUTH_TOKEN=tok-secret CLAUDE_DOCKER_API_CA="$BATS_TEST_TMPDIR/ca.pem"
+  echo PEM >"$CLAUDE_DOCKER_API_CA"
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  start_auth_sidecar 2>/dev/null
+  [ "$API_PROXY_UPSTREAM" = https://api.anthropic.com ] && [ -z "$API_PROXY_PREFIX" ]
+  [ "$API_PROXY_BEARER" = "Bearer tok-secret" ]
+  [ "$(cat "$stage/auth-proxy/caddy/api-cred.caddy")" = 'request_header -x-api-key
+request_header Authorization "{env.API_PROXY_BEARER}"' ]
+  [ "$(cat "$stage/auth-proxy/caddy/api-ca.pem")" = PEM ]
+  grep -q "tls_trust_pool file /etc/ssl/certs/ca-certificates.crt /etc/caddy/api-ca.pem" "$stage/auth-proxy/caddy/api-transport.caddy"
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"ANTHROPIC_AUTH_TOKEN=claude-docker-proxy"* ]]
+}
+
+@test "start_auth_sidecar: one sidecar serves gh, glab and api" {
+  sidecar_setup
+  WITH_GLAB=1 GLAB_HOST_TOKEN=glpat GLAB_PROXY_HOST=gl.example.com WITH_API=1 ANTHROPIC_API_KEY=k
+  run start_auth_sidecar
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auth-proxy sidecar 'claude-auth-proxy-x' is active for gh, glab, api"* ]]
+  [ "$(grep -c "^docker run -d" "$CALLS")" -eq 1 ]
+  [ "$(grep -c "^docker network create" "$CALLS")" -eq 1 ]
+}
+
+@test "start_auth_sidecar: --glab on the --api port is refused" {
+  WITH_GLAB=1 GLAB_HOST_TOKEN=glpat GLAB_PROXY_HOST=gl.example.com:8080 WITH_API=1 ANTHROPIC_API_KEY=k
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  run start_auth_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"collides with the --api proxy port"* ]]
+  run ! grep -q "^docker" "$CALLS"
+}
+
+@test "start_auth_sidecar: network create failure aborts" {
   sidecar_setup
   STUB_FAIL="network"
-  run start_gh_sidecar
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
-  [[ "$output" == *"failed to create network 'claude-gh-x'"* ]]
+  [[ "$output" == *"failed to create network 'claude-auth-x'"* ]]
   run ! grep -q "^docker run" "$CALLS"
 }
 
-@test "start_gh_sidecar: sidecar start failure aborts" {
+@test "start_auth_sidecar: sidecar start failure aborts and names the -direct flags" {
   sidecar_setup
+  WITH_API=1 ANTHROPIC_API_KEY=k
   STUB_FAIL="run"
-  run start_gh_sidecar
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
-  [[ "$output" == *"failed to start the gh-auth-proxy sidecar"* ]]
+  [[ "$output" == *"failed to start the auth-proxy sidecar"* ]]
+  [[ "$output" == *"--gh-direct / --api-direct"* ]]
   run ! grep -q "^docker cp" "$CALLS"
 }
 
-@test "start_gh_sidecar: an exited sidecar reports Caddy's logs" {
+@test "start_auth_sidecar: an exited sidecar reports Caddy's logs" {
   sidecar_setup
-  STUB_FAIL="cp" STUB_ALIVE=""
-  run start_gh_sidecar
+  STUB_LOGS="caddy: bad policy" STUB_ALIVE=""
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
   [[ "$output" == *"sidecar exited during startup"* ]]
   [[ "$output" == *"  | caddy: bad policy"* ]]
   run ! grep -q "^docker inspect" "$CALLS"
 }
 
-@test "start_gh_sidecar: no CA within the budget aborts" {
+@test "start_auth_sidecar: no CA within the budget aborts" {
   sidecar_setup
   STUB_FAIL="cp"
-  run start_gh_sidecar
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
   [[ "$output" == *"did not produce a CA certificate within 15s"* ]]
   [ "$(grep -c "^docker cp" "$CALLS")" -eq 15 ]
 }
 
-@test "start_gh_sidecar: a failing inspect reaches the address error" {
+@test "start_auth_sidecar: a config that never loads aborts, without trying the CA" {
+  sidecar_setup
+  STUB_LOGS="still starting"
+  run start_auth_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"did not load its config within 15s"* ]]
+  run ! grep -q "^docker cp" "$CALLS"
+}
+
+@test "start_auth_sidecar: a failing inspect reaches the address error" {
   STUB_FAIL="inspect"
   # Under set -e, which `run` would ignore: without `|| true` on the inspect
   # the shell aborts before this message prints.
-  run_script_fn 'WITH_GH=1 GH_HOST_TOKEN=t stage=$HOME/st; mkdir -p "$stage"; start_gh_sidecar'
+  run_script_fn 'WITH_GH=1 GH_HOST_TOKEN=t stage=$HOME/st; mkdir -p "$stage"; start_auth_sidecar'
   [ "$status" -eq 1 ]
-  [[ "$output" == *"could not determine the gh-auth-proxy sidecar's network address"* ]]
+  [[ "$output" == *"could not determine the auth-proxy sidecar's network address"* ]]
   [[ "$output" != *"is active"* ]]
 }
 
@@ -613,6 +827,13 @@ sidecar_setup() {
   [[ "$output" == *"entry 'GitHub.com:140.82.121.4' skipped"* ]]
   build_host_args 2>/dev/null
   [ "$(lines_of "${MOUNT_ARGS[@]}")" = $'--add-host\ngitlab.example.com:10.1.2.3' ]
+}
+
+@test "build_host_args: under --glab the proxied GitLab host is skipped" {
+  ADD_HOSTS=(GL.example.com:10.1.2.3 registry.gl.example.com:10.1.2.4)
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com:8443
+  build_host_args 2>/dev/null
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = $'--add-host\nregistry.gl.example.com:10.1.2.4' ]
 }
 
 @test "build_host_args: nothing set adds nothing" {
@@ -753,6 +974,65 @@ run_statusline() {
   WITH_GH=1 GH_SIDECAR_ACTIVE=1
   build_volume_mounts
   [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--tmpfs\n/root/.config/gh'* ]]
+}
+
+@test "build_volume_mounts: glab state is unmasked under either glab flag" {
+  for f in WITH_GLAB WITH_GLAB_DIRECT; do
+    WITH_GLAB=0 WITH_GLAB_DIRECT=0 MOUNT_ARGS=()
+    printf -v "$f" 1
+    build_volume_mounts
+    [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *glab-cli* ]]
+  done
+}
+
+# --- stage_glab_config ---
+
+glab_config_setup() {
+  GLAB_SRC="$BATS_TEST_TMPDIR/glab-cli"
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$GLAB_SRC" "$stage"
+  cat >"$GLAB_SRC/config.yml" <<'YML'
+git_protocol: https
+hosts:
+  gl.example.com:
+    token: glpat-one
+    oauth2_refresh_token: refresh-one
+    api_host: gl.example.com
+    use_keyring: true
+  gitlab.com:
+    job_token: "glcbt-two"
+    api_host: gitlab.com
+YML
+}
+
+@test "stage_glab_config: proxied copy blanks every token value" {
+  glab_config_setup
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run stage_glab_config
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  stage_glab_config 2>/dev/null
+  run ! grep -Eq 'glpat-one|refresh-one|glcbt-two' "$stage/glab-config.yml"
+  grep -qx '    token: ""' "$stage/glab-config.yml"
+  grep -qx '    use_keyring: false' "$stage/glab-config.yml"
+  grep -qx '    api_host: gl.example.com' "$stage/glab-config.yml"
+  [ "$(wc -l <"$stage/glab-config.yml")" -eq "$(wc -l <"$GLAB_SRC/config.yml")" ]
+}
+
+@test "stage_glab_config: --glab-direct keeps the tokens" {
+  glab_config_setup
+  stage_glab_config
+  grep -q glpat-one "$stage/glab-config.yml"
+  grep -qx '    use_keyring: false' "$stage/glab-config.yml"
+}
+
+@test "stage_glab_config: warns when api_host is not the proxied host" {
+  glab_config_setup
+  sed 's/    api_host: gl.example.com/    api_host: api.gl.example.com/' "$GLAB_SRC/config.yml" >"$BATS_TEST_TMPDIR/c.yml"
+  mv "$BATS_TEST_TMPDIR/c.yml" "$GLAB_SRC/config.yml"
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run stage_glab_config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"api_host for gl.example.com is 'api.gl.example.com'"* ]]
 }
 
 # --- run_container / main ---
