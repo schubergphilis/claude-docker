@@ -58,9 +58,10 @@ RUN echo 'APT::Sandbox::User "root";' > /etc/apt/apt.conf.d/10no-sandbox \
 
 # Free UID/GID 1000. Ubuntu's base image ships a default `ubuntu` user at
 # 1000:1000 — i.e. exactly the typical host UID. The entrypoint creates a
-# fresh `claude` user mapped to HOST_UID; without this step its `useradd`
-# is skipped on collision and `runuser -u claude` then fails. Reusing the
-# baked-in `ubuntu` account would also silently inherit its supplementary
+# fresh `claude` user mapped to HOST_UID (useradd -o tolerates a duplicate
+# UID); without this step getpwuid(1000) would still resolve to `ubuntu`
+# first and GID 1000 would be named `ubuntu`. Reusing the baked-in
+# `ubuntu` account would also silently inherit its supplementary
 # groups (sudo, adm, plugdev, …). Guarded so a future base image without
 # the default user doesn't break the build.
 RUN if getent passwd ubuntu >/dev/null; then userdel -r ubuntu; fi \
