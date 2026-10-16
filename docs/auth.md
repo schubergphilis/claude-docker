@@ -21,7 +21,7 @@ Credentials are opt-in per run — the [Credential opt-in](#credential-opt-in) t
 | `--api` | Claude Code talks to your LLM gateway (LiteLLM, enterprise proxy) instead of the in-container OAuth login. `ANTHROPIC_BASE_URL` and the `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` credential go to the per-session **auth proxy sidecar**; the agent container gets a sidecar base URL and placeholders. `ANTHROPIC_CUSTOM_HEADERS` / `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `CLAUDE_CODE_MAX_CONTEXT_TOKENS` are forwarded by name when set. Optional private CA via `CLAUDE_DOCKER_API_CA`. Bedrock/Vertex are not covered yet. See [Custom model endpoint](#custom-model-endpoint). |
 | `--api-direct` | Same as `--api`, but forwards the base URL and credential into the agent container too — no sidecar. Mutually exclusive with `--api`. |
 
-Combine as needed: `claude-docker --aws --gh ~/repo`. `--gh` and `--gh-direct` cannot be combined with each other.
+Combine as needed: `claude-docker --aws --gh ~/repo`. Each proxied flag and its `-direct` variant are mutually exclusive: pass `--gh` or `--gh-direct`, `--glab` or `--glab-direct`, `--api` or `--api-direct`, never both of a pair.
 
 ## AWS SSO flow (`--aws`)
 
@@ -89,14 +89,18 @@ Under `--glab` the token, exported or discovered, never enters the agent contain
 - **One host is proxied:** the host the token belongs to. That is `GITLAB_HOST` when set, else the host discovery found the token for, else, for an exported token, glab's default host (the `host:` key in glab's `config.yml`, else `gitlab.com`). An exported token is never tied to the `origin` host, which may not be GitLab at all. Its port is kept, so `gitlab.example.com:8443` works. That host resolves to the sidecar via `--add-host`, and the sidecar terminates TLS for it with the session CA. Other hostnames, such as a separate `registry.gitlab.example.com`, resolve normally and never see the token.
 - **What gets the token:**
   - `/api/…` (REST and GraphQL) gets `Authorization: Bearer <token>`, which GitLab accepts for PATs and OAuth tokens alike.
-  - Git smart-HTTP and LFS paths (`info/refs`, `git-upload-pack`, `git-receive-pack`, `info/lfs/…`) get `Basic oauth2:<token>`, so `git clone` / `push` over HTTPS work with no credential prompt.
-  - Every other path is forwarded with no credential.
+  - Git smart-HTTP paths (`info/refs`, `git-upload-pack`, `git-receive-pack`) get `Basic oauth2:<token>`, so `git clone` / `push` over HTTPS work with no credential prompt.
+  - Every other path is forwarded with no credential, Git LFS paths (`info/lfs/…`, `gitlab-lfs/…`) included. GitLab's LFS batch response hands a usable credential back to the client, so injecting the token there would let the container read one. Git LFS against a private project therefore needs `--glab-direct`.
   - Any `Authorization`, `PRIVATE-TOKEN` or `JOB-TOKEN` header the client sent is removed first.
 - **The mounted `config.yml` copy** also has every token value blanked, even when no token was found (`token`, `job_token`, `oauth2_refresh_token`, for every host), so tokens for other GitLab instances stay out too.
-- **Policy:** `DELETE` of a project or group (`/api/v4/projects/:id`, `/api/v4/groups/:id`, numeric id or URL-encoded path) is answered `403` by the sidecar and never reaches GitLab. Extend it with `CLAUDE_DOCKER_GLAB_POLICY=<path>`, a Caddyfile snippet imported into the GitLab site block. A set path that isn't a readable file is a startup error.
+- **Policy:** the sidecar answers these with `403`, and they never reach GitLab:
+  - `DELETE` of a project or group (`/api/v4/projects/:id`, `/api/v4/groups/:id`, numeric id or URL-encoded path).
+  - REST calls that create or rotate a token, since the response would hand the container a real credential: personal access tokens (`/personal_access_tokens/:id/rotate`, `self` included; `/user/personal_access_tokens`; `/users/:id/personal_access_tokens`), impersonation tokens, project and group access tokens and their rotation, deploy tokens, and group service-account tokens. GraphQL mutations that create tokens are not filtered.
+
+  Extend the policy with `CLAUDE_DOCKER_GLAB_POLICY=<path>`, a Caddyfile snippet imported into the GitLab site block. A set path that isn't a readable file is a startup error.
 - **Audit log** entries carry the GitLab host, method, path and status. Request headers are left out entirely.
 
-**`--glab-direct`** keeps the previous behaviour: the real token is forwarded into the agent container as `GITLAB_TOKEN` and no GitLab site is added to the sidecar. Use it for hosts the proxy can't serve: a plain `http://` `GITLAB_HOST` or an IP address, both of which `--glab` rejects at startup, or a GitLab whose certificate chains to a private CA. Passing `--glab` and `--glab-direct` together is a startup error.
+**`--glab-direct`** keeps the previous behaviour: the real token is forwarded into the agent container as `GITLAB_TOKEN` and no GitLab site is added to the sidecar. Use it for hosts the proxy can't serve: a plain `http://` `GITLAB_HOST` or an IP address, both of which `--glab` rejects at startup, or a GitLab whose certificate chains to a private CA. Use it too for Git LFS on private projects, which `--glab` doesn't authenticate (see above). Passing `--glab` and `--glab-direct` together is a startup error.
 
 **Limitations:**
 

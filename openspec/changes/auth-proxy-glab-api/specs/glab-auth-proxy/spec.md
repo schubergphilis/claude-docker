@@ -56,7 +56,7 @@ The agent container SHALL resolve the GitLab host the token belongs to (the host
 
 ### Requirement: GitLab credentials are injected per path class
 
-The sidecar SHALL inject `Authorization: Bearer <token>` on paths under `/api/` (REST and GraphQL). It SHALL inject `Authorization: Basic base64(oauth2:<token>)` on git smart-HTTP and git-LFS paths (`info/refs`, `git-upload-pack`, `git-receive-pack`, `info/lfs/…`). It SHALL forward every other path with no credential.
+The sidecar SHALL inject `Authorization: Bearer <token>` on paths under `/api/` (REST and GraphQL). It SHALL inject `Authorization: Basic base64(oauth2:<token>)` on git smart-HTTP paths (`info/refs`, `git-upload-pack`, `git-receive-pack`). It SHALL forward every other path with no credential, git-LFS paths (`info/lfs/…`, `gitlab-lfs/…`) included: GitLab's LFS batch response hands a usable credential back to the client, so injecting there would expose one to the container. Git LFS against a private project therefore needs `--glab-direct`.
 
 #### Scenario: glab and git work authenticated
 
@@ -68,6 +68,12 @@ The sidecar SHALL inject `Authorization: Bearer <token>` on paths under `/api/` 
 
 - **GIVEN** the sidecar is active
 - **WHEN** a `GET` for `https://gitlab.example.com/group/project/-/tree/main` is made from the agent container
+- **THEN** the request reaches GitLab with no `Authorization`, `PRIVATE-TOKEN` or `JOB-TOKEN` header
+
+#### Scenario: LFS paths carry no credential
+
+- **GIVEN** the sidecar is active
+- **WHEN** a `POST` to `https://gitlab.example.com/group/project.git/info/lfs/objects/batch` is made from the agent container with its own `Authorization` header
 - **THEN** the request reaches GitLab with no `Authorization`, `PRIVATE-TOKEN` or `JOB-TOKEN` header
 
 ### Requirement: Mounted glab config carries no tokens
@@ -89,7 +95,7 @@ Under `--glab`, whether or not a token was found, the `config.yml` copy mounted 
 
 ### Requirement: GitLab request filtering policy
 
-The sidecar SHALL block project and group deletion on the proxied host by default. Blocked requests are `DELETE`s whose raw, still percent-encoded request URI matches `^/+api/v4/(projects|groups)/[^/?]+/*(\?.*)?$`, so a numeric id and a URL-encoded path are both caught. They SHALL get a `403` whose body names the claude-docker glab-proxy policy. `CLAUDE_DOCKER_GLAB_POLICY` SHALL name a Caddyfile snippet imported into the GitLab site block. A set but unreadable path SHALL be a startup error.
+The sidecar SHALL block project and group deletion on the proxied host by default. Blocked requests are `DELETE`s whose raw, still percent-encoded request URI matches `^/+api/v4/(projects|groups)/[^/?]+/*(\?.*)?$`, so a numeric id and a URL-encoded path are both caught. The sidecar SHALL also block, by default, the REST calls that create or rotate a token and return it: `POST` or `PUT` on `personal_access_tokens/:id/rotate` (`:id` may be `self`), `user/personal_access_tokens`, `users/:id/personal_access_tokens`, `users/:id/impersonation_tokens`, `(projects|groups)/:id/access_tokens` and `.../access_tokens/:id/rotate`, `(projects|groups)/:id/deploy_tokens`, `deploy_tokens`, and `groups/:id/service_accounts/:id/personal_access_tokens` (and its `rotate`), all under `/api/v4/`. These match on the raw request URI too, tolerating repeated slashes, a trailing slash and a query string. Token creation through GraphQL is not filtered. Blocked requests SHALL get a `403` whose body names the claude-docker glab-proxy policy and points at `CLAUDE_DOCKER_GLAB_POLICY` and `--glab-direct`. `CLAUDE_DOCKER_GLAB_POLICY` SHALL name a Caddyfile snippet imported into the GitLab site block. A set but unreadable path SHALL be a startup error.
 
 #### Scenario: Project deletion is blocked by default
 
@@ -102,9 +108,15 @@ The sidecar SHALL block project and group deletion on the proxied host by defaul
 - **WHEN** `glab api -X DELETE /groups/42` runs inside the agent container
 - **THEN** the response is `403` and the request never reaches GitLab
 
+#### Scenario: Token creation and rotation are blocked by default
+
+- **WHEN** `glab api -X POST /personal_access_tokens/self/rotate`, `glab api -X POST /user/personal_access_tokens` or `glab api -X POST /projects/group%2Fp/access_tokens` runs inside the agent container
+- **THEN** the response is `403` naming the claude-docker glab-proxy policy
+- **AND** the request never reaches GitLab
+
 #### Scenario: Non-destructive requests pass
 
-- **WHEN** `glab mr list` and `glab api /user` run inside the agent container
+- **WHEN** `glab mr list`, `glab api /user`, `glab api /personal_access_tokens` and `glab api -X POST /projects/1/issues` run inside the agent container
 - **THEN** both succeed
 
 #### Scenario: User-supplied policy extension is honoured

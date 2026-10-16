@@ -709,8 +709,10 @@ discover_tokens() {
         _glab_default=$(GLAB_CHECK_UPDATE=false glab config get host 2>/dev/null) || true
         _glab_hosts+=("${_glab_default:-gitlab.com}")
       else
-        # Only reached with an explicit GITLAB_TOKEN under --glab: the token
-        # needs a host to be proxied for, and glab's own default is gitlab.com.
+        # No glab on the host (--glab or --glab-direct, token or not), so no
+        # configured default to ask for: use glab's built-in one, gitlab.com.
+        # An exported GITLAB_TOKEN then belongs to it; without one nothing
+        # below can look a token up, and discovery comes back empty.
         _glab_hosts+=("gitlab.com")
       fi
     fi
@@ -1024,10 +1026,13 @@ CADDY
 # policy, or a user snippet) only after proxying. Client credentials are
 # stripped first; then the real one is injected per path class: Bearer on
 # /api/ (REST and GraphQL take PATs and OAuth tokens alike), Basic oauth2:<token>
-# on git smart-HTTP and LFS, nothing anywhere else (web UI paths don't serve
-# glab or git). The deletion policy matches the raw request URI: path_regexp
-# sees the decoded path, so a URL-encoded project path (group%2Fproject) would
-# slip past it. Request headers are dropped from the access log.
+# on git smart-HTTP, nothing anywhere else (web UI paths don't serve glab or
+# git). Not on LFS either: the batch response echoes a usable credential back
+# to the client (actions.*.header.Authorization). The default policy blocks
+# project/group deletion and the REST calls that create or rotate tokens (they
+# return a real credential). Both match the raw request URI: path_regexp sees
+# the decoded path, so a URL-encoded project path (group%2Fproject) would slip
+# past it. Request headers are dropped from the access log.
 stage_glab_proxy_site() {
   if [ -n "${CLAUDE_DOCKER_GLAB_POLICY:-}" ]; then
     cp "$CLAUDE_DOCKER_GLAB_POLICY" "$1/glab-policy.caddy" || exit 1
@@ -1052,7 +1057,7 @@ stage_glab_proxy_site() {
 
 		@glab_proxy_api path /api/*
 		request_header @glab_proxy_api Authorization "{env.GLAB_PROXY_BEARER}"
-		@glab_proxy_git path_regexp (/info/refs|/git-upload-pack|/git-receive-pack|/info/lfs/.*)$
+		@glab_proxy_git path_regexp (/info/refs|/git-upload-pack|/git-receive-pack)$
 		request_header @glab_proxy_git Authorization "{env.GLAB_PROXY_BASIC}"
 
 		@glab_proxy_delete {
@@ -1060,6 +1065,11 @@ stage_glab_proxy_site() {
 			vars_regexp {http.request.uri} ^/+api/v4/(projects|groups)/[^/?]+/*(\?.*)?$
 		}
 		respond @glab_proxy_delete "claude-docker glab-proxy policy: project and group deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GLAB_POLICY, or bypass the proxy entirely with --glab-direct." 403
+		@glab_proxy_mint {
+			method POST PUT
+			vars_regexp {http.request.uri} ^/+api/v4/+(personal_access_tokens/+[^/?]+/+rotate|user/+personal_access_tokens|users/+[^/?]+/+(personal_access_tokens|impersonation_tokens)|(projects|groups)/+[^/?]+/+(access_tokens|deploy_tokens)(/+[^/?]+/+rotate)?|groups/+[^/?]+/+service_accounts/+[^/?]+/+personal_access_tokens(/+[^/?]+/+rotate)?|deploy_tokens)/*(\?.*)?$
+		}
+		respond @glab_proxy_mint "claude-docker glab-proxy policy: creating or rotating access tokens is blocked by default, since the response would hand a real credential to the container. Extend policy via CLAUDE_DOCKER_GLAB_POLICY, or bypass the proxy entirely with --glab-direct." 403
 		import /etc/caddy/glab-policy.caddy
 
 		reverse_proxy {$GLAB_PROXY_UPSTREAM}

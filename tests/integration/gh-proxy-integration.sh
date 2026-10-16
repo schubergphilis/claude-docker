@@ -652,7 +652,7 @@ run_glabapi_checks() {
   else
     skip "glab: glab not on PATH in this image"
   fi
-  out=$(curl -sS --max-time 10 https://gitlab.example.test/g/p.git/info/refs?service=git-upload-pack 2>/dev/null)
+  out=$(curl -sS --max-time 10 'https://gitlab.example.test/g/p.git/info/refs?service=git-upload-pack' 2>/dev/null)
   case "$out" in
     *'"authorization":"Basic '*) pass "glab: git smart-HTTP path got the injected Basic header" ;;
     *) fail "glab: git path echo: $out" ;;
@@ -662,14 +662,26 @@ run_glabapi_checks() {
     *'"authorization":""'*) pass "glab: web path carries no credential" ;;
     *) fail "glab: web path echo: $out" ;;
   esac
-  local code
-  code=$(curl -sS --max-time 10 -o /tmp/glab_del.$$ -w '%{http_code}' -X DELETE 'https://gitlab.example.test/api/v4/projects/g%2Fp' 2>/dev/null)
-  if [ "$code" = 403 ] && grep -q "claude-docker glab-proxy policy" /tmp/glab_del.$$; then
+  out=$(curl -sS --max-time 10 -X POST -H 'Authorization: Basic Y2xpZW50' 'https://gitlab.example.test/g/p.git/info/lfs/objects/batch' 2>/dev/null)
+  case "$out" in
+    *'"authorization":""'*) pass "glab: LFS batch path carries no credential" ;;
+    *) fail "glab: LFS batch echo: $out" ;;
+  esac
+  local code body
+  body=$(mktemp)
+  code=$(curl -sS --max-time 10 -o "$body" -w '%{http_code}' -X DELETE 'https://gitlab.example.test/api/v4/projects/g%2Fp' 2>/dev/null)
+  if [ "$code" = 403 ] && grep -q "claude-docker glab-proxy policy" "$body"; then
     pass "glab: default policy blocks DELETE /api/v4/projects/g%2Fp"
   else
     fail "glab: DELETE /api/v4/projects/g%2Fp got $code"
   fi
-  rm -f /tmp/glab_del.$$
+  code=$(curl -sS --max-time 10 -o "$body" -w '%{http_code}' -X POST 'https://gitlab.example.test/api/v4/personal_access_tokens/self/rotate' 2>/dev/null)
+  if [ "$code" = 403 ] && grep -q "claude-docker glab-proxy policy" "$body"; then
+    pass "glab: default policy blocks POST /api/v4/personal_access_tokens/self/rotate"
+  else
+    fail "glab: POST /api/v4/personal_access_tokens/self/rotate got $code"
+  fi
+  rm -f "$body"
 
   out=$(curl -sS --max-time 10 -X POST -H 'x-api-key: claude-docker-proxy' -H 'Authorization: Bearer oauth-from-volume' \
     -d '{}' http://claude-docker-api-proxy:8080/v1/messages 2>/dev/null)
