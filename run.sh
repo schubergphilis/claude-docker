@@ -633,7 +633,7 @@ build_env_args() {
 }
 
 discover_tokens() {
-  local _ws0 _glab_cfg _glab_remote _glab_default _glab_tried _glab_host _glab_discovered=0
+  local _ws0 _glab_cfg _glab_remote _glab_default _glab_tried _glab_host _glab_from _glab_discovered=0
   # GitHub token discovery — shared, unchanged, by --gh and --gh-direct: host
   # env (GH_TOKEN/GITHUB_TOKEN) wins; else fall back to the gh CLI's active
   # token so users authenticated via `gh auth login` don't have to export
@@ -716,14 +716,20 @@ discover_tokens() {
     fi
     _glab_tried=""
     _glab_host=""
+    # The candidate as given, scheme included, for the plain-http check below.
+    _glab_from=""
     if [ -n "${GITLAB_TOKEN:-}" ]; then
-      # Explicit token (--glab): it belongs to the first candidate.
-      _glab_host=$(glab_host_of "${_glab_hosts[0]}")
+      # Explicit token (--glab): no lookup ties it to a host, so it belongs to
+      # GITLAB_HOST when set, else glab's default host, the last candidate.
+      # Never the origin: it may not be a GitLab host at all, and the proxy
+      # would then send the token there.
+      _glab_from="${_glab_hosts[${#_glab_hosts[@]}-1]}"
+      _glab_host=$(glab_host_of "$_glab_from")
     elif command -v glab >/dev/null 2>&1; then
       # Non-empty whenever glab is on PATH (default host always appended), so
       # the expansion is safe under bash 3.2's set -u.
-      for _glab_host in "${_glab_hosts[@]}"; do
-        _glab_host=$(glab_host_of "$_glab_host")
+      for _glab_from in "${_glab_hosts[@]}"; do
+        _glab_host=$(glab_host_of "$_glab_from")
         [ -n "$_glab_host" ] || continue
         case ", $_glab_tried, " in *", $_glab_host, "*) continue ;; esac
         _glab_tried="${_glab_tried:+$_glab_tried, }$_glab_host"
@@ -736,9 +742,9 @@ discover_tokens() {
         # Proxied: the token goes to the auth-proxy sidecar only (it is not in
         # ENV_VARS under --glab, so nothing forwards it), which needs a host it
         # can intercept by name over TLS.
-        case "${GITLAB_HOST:-}" in
+        case "$_glab_from" in
           http://*)
-            echo "claude-docker: --glab: GITLAB_HOST '$GITLAB_HOST' is plain http, which the auth proxy can't serve; use --glab-direct" >&2
+            echo "claude-docker: --glab: GitLab host '$_glab_from' is plain http, which the auth proxy can't serve; use --glab-direct" >&2
             exit 1 ;;
         esac
         case "${_glab_host%:*}" in
@@ -1134,7 +1140,7 @@ CADDY
 }
 
 start_auth_sidecar() {
-  local proxy_dir caddy_dir cfg_loaded ca_ready proxy_exited i proxy_ip entry
+  local proxy_dir caddy_dir cfg_loaded ca_ready proxy_exited proxy_logs i proxy_ip entry
   local tls_active=0 services="" direct_hint="" sidecar_env sidecar_hosts
   # One sidecar per session serves every proxied opt-in that has a credential.
   # --gh / --glab without a host token keep their no-token fallback and add no
@@ -1238,9 +1244,11 @@ start_auth_sidecar() {
   proxy_exited=0
   i=0
   while [ "$i" -lt 15 ]; do
-    if [ "$cfg_loaded" = "0" ] \
-       && "$RUNTIME" logs "$AUTH_PROXY_SIDECAR" 2>&1 | grep -q 'serving initial configuration'; then
-      cfg_loaded=1
+    # Logs captured first: grep -q on a pipe exits at the match, and under
+    # pipefail the SIGPIPE'd logs call would fail the whole check.
+    if [ "$cfg_loaded" = "0" ]; then
+      proxy_logs=$("$RUNTIME" logs "$AUTH_PROXY_SIDECAR" 2>&1) || true
+      case "$proxy_logs" in *'serving initial configuration'*) cfg_loaded=1 ;; esac
     fi
     if [ "$cfg_loaded" = "1" ]; then
       [ "$tls_active" = "0" ] && { ca_ready=1; break; }
@@ -1469,18 +1477,18 @@ EOF
 # The in-container glab reads job_token through the OS keyring whenever the
 # host's config.yml says use_keyring: true, even with GITLAB_TOKEN set (no env
 # var covers job_token), and that read fails hard without D-Bus. Overlay a copy
-# with the keyring turned off; the token itself arrives as GITLAB_TOKEN. While
-# the auth proxy serves GitLab, the copy also has every *token value blanked
-# (token, job_token, oauth2_refresh_token — for every host, since tokens for
-# other hosts have no business in the container either); the placeholder
-# GITLAB_TOKEN env wins over config in glab, so nothing reads them. glab
-# refuses a config.yml that others can read, so write the copy as 0600 rather
-# than whatever the umask gives (#168).
+# with the keyring turned off; the token itself arrives as GITLAB_TOKEN. Under
+# --glab, proxied or not (no token found), the copy also has every *token value
+# blanked (token, job_token, oauth2_refresh_token — for every host, since
+# tokens for other hosts have no business in the container either); the
+# placeholder GITLAB_TOKEN env wins over config in glab, so nothing reads them.
+# glab refuses a config.yml that others can read, so write the copy as 0600
+# rather than whatever the umask gives (#168).
 stage_glab_config() {
   local token_expr api_host
   [ -n "$GLAB_SRC" ] && [ -f "$GLAB_SRC/config.yml" ] || return 0
   token_expr='s/x/x/'
-  [ "$GLAB_SIDECAR_ACTIVE" = "1" ] && token_expr='s/^\([[:space:]]*[A-Za-z0-9_]*token:\).*/\1 ""/'
+  [ "$WITH_GLAB" = "1" ] && token_expr='s/^\([[:space:]]*[A-Za-z0-9_]*token:\).*/\1 ""/'
   (umask 077 && sed -e 's/^\([[:space:]]*use_keyring:\).*/\1 false/' -e "$token_expr" "$GLAB_SRC/config.yml" >"$stage/glab-config.yml") || exit 1
   MOUNT_ARGS+=("-v" "$(hostpath "$stage/glab-config.yml"):/root/.config/glab-cli/config.yml:ro")
   # glab sends API calls to the host's api_host, not the host itself. A

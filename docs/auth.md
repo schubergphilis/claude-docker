@@ -86,13 +86,13 @@ An exported `GITLAB_TOKEN` always wins. If `glab` isn't installed or has no toke
 
 Under `--glab` the token, exported or discovered, never enters the agent container. It goes to the session's [auth proxy sidecar](#github-auth-proxy), which adds it to requests in transit. The agent container gets the placeholder `GITLAB_TOKEN=claude-docker-proxy`, which is enough for `glab` to consider itself authenticated.
 
-- **One host is proxied:** the host the token belongs to. That is `GITLAB_HOST` when set, else the host discovery found the token for, else the first candidate host for an exported token. Its port is kept, so `gitlab.example.com:8443` works. That host resolves to the sidecar via `--add-host`, and the sidecar terminates TLS for it with the session CA. Other hostnames, such as a separate `registry.gitlab.example.com`, resolve normally and never see the token.
+- **One host is proxied:** the host the token belongs to. That is `GITLAB_HOST` when set, else the host discovery found the token for, else, for an exported token, glab's default host (the `host:` key in glab's `config.yml`, else `gitlab.com`). An exported token is never tied to the `origin` host, which may not be GitLab at all. Its port is kept, so `gitlab.example.com:8443` works. That host resolves to the sidecar via `--add-host`, and the sidecar terminates TLS for it with the session CA. Other hostnames, such as a separate `registry.gitlab.example.com`, resolve normally and never see the token.
 - **What gets the token:**
   - `/api/…` (REST and GraphQL) gets `Authorization: Bearer <token>`, which GitLab accepts for PATs and OAuth tokens alike.
   - Git smart-HTTP and LFS paths (`info/refs`, `git-upload-pack`, `git-receive-pack`, `info/lfs/…`) get `Basic oauth2:<token>`, so `git clone` / `push` over HTTPS work with no credential prompt.
   - Every other path is forwarded with no credential.
   - Any `Authorization`, `PRIVATE-TOKEN` or `JOB-TOKEN` header the client sent is removed first.
-- **The mounted `config.yml` copy** also has every token value blanked (`token`, `job_token`, `oauth2_refresh_token`, for every host), so tokens for other GitLab instances stay out too.
+- **The mounted `config.yml` copy** also has every token value blanked, even when no token was found (`token`, `job_token`, `oauth2_refresh_token`, for every host), so tokens for other GitLab instances stay out too.
 - **Policy:** `DELETE` of a project or group (`/api/v4/projects/:id`, `/api/v4/groups/:id`, numeric id or URL-encoded path) is answered `403` by the sidecar and never reaches GitLab. Extend it with `CLAUDE_DOCKER_GLAB_POLICY=<path>`, a Caddyfile snippet imported into the GitLab site block. A set path that isn't a readable file is a startup error.
 - **Audit log** entries carry the GitLab host, method, path and status. Request headers are left out entirely.
 

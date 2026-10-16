@@ -25,7 +25,7 @@ When `--glab` is passed and a host token is found, the token SHALL be given only
 
 ### Requirement: GitLab host is redirected through the sidecar
 
-The agent container SHALL resolve the GitLab host the token belongs to (the host `--glab` token discovery settled on, with its port) to the sidecar via `--add-host`. No other hostname SHALL be redirected for GitLab. The sidecar SHALL terminate TLS for that host on that port with the session CA, the same root `--gh` uses. When the host is plain `http://` or an IP literal, `run.sh` SHALL exit with an error naming `--glab-direct`.
+The agent container SHALL resolve the GitLab host the token belongs to (the host `--glab` token discovery settled on, with its port) to the sidecar via `--add-host`. For an exported `GITLAB_TOKEN`, that host SHALL be `GITLAB_HOST` when set, else glab's default host, and never the workspace's `origin` host. No other hostname SHALL be redirected for GitLab. The sidecar SHALL terminate TLS for that host on that port with the session CA, the same root `--gh` uses. When the host is plain `http://` (from `GITLAB_HOST` or the `origin` remote) or an IP literal, `run.sh` SHALL exit with an error naming `--glab-direct`.
 
 #### Scenario: Redirection is scoped to the discovered host
 
@@ -47,6 +47,13 @@ The agent container SHALL resolve the GitLab host the token belongs to (the host
 - **THEN** `run.sh` exits non-zero with an error suggesting `--glab-direct`
 - **AND** no container starts and the token is not forwarded
 
+#### Scenario: Exported token is not proxied for a non-GitLab origin
+
+- **GIVEN** `GITLAB_TOKEN` is exported, `GITLAB_HOST` is unset and the workspace's `origin` is `git@github.com:org/repo.git`
+- **WHEN** user runs `claude-docker --glab ~/repo`
+- **THEN** the proxied host is glab's default host (`gitlab.com` when glab has none)
+- **AND** `github.com` is not redirected to the sidecar
+
 ### Requirement: GitLab credentials are injected per path class
 
 The sidecar SHALL inject `Authorization: Bearer <token>` on paths under `/api/` (REST and GraphQL). It SHALL inject `Authorization: Basic base64(oauth2:<token>)` on git smart-HTTP and git-LFS paths (`info/refs`, `git-upload-pack`, `git-receive-pack`, `info/lfs/…`). It SHALL forward every other path with no credential.
@@ -65,7 +72,7 @@ The sidecar SHALL inject `Authorization: Bearer <token>` on paths under `/api/` 
 
 ### Requirement: Mounted glab config carries no tokens
 
-While the GitLab proxy is active, the `config.yml` copy mounted into the agent container SHALL have the value of every key whose name ends in `token` blanked, for every host, in addition to the existing `use_keyring: false` rewrite. The host file SHALL NOT be modified.
+Under `--glab`, whether or not a token was found, the `config.yml` copy mounted into the agent container SHALL have the value of every key whose name ends in `token` blanked, for every host, in addition to the existing `use_keyring: false` rewrite. The host file SHALL NOT be modified.
 
 #### Scenario: Tokens for other hosts are not exposed
 
@@ -73,6 +80,12 @@ While the GitLab proxy is active, the `config.yml` copy mounted into the agent c
 - **WHEN** user runs `claude-docker --glab ~/repo` and the proxy is active for `gitlab.example.com`
 - **THEN** `/root/.config/glab-cli/config.yml` inside the agent container contains neither token
 - **AND** its other keys match the host file apart from `use_keyring`
+
+#### Scenario: Tokens are blanked when no token was found
+
+- **GIVEN** host glab's `config.yml` stores a token, but discovery finds none for the candidate hosts
+- **WHEN** user runs `claude-docker --glab ~/repo`
+- **THEN** `/root/.config/glab-cli/config.yml` inside the agent container contains no token values
 
 ### Requirement: GitLab request filtering policy
 

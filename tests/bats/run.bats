@@ -501,7 +501,10 @@ run_script_fn() {
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *GITLAB_TOKEN* ]]
 }
 
-@test "discover_tokens: --glab with an explicit token proxies the first candidate host" {
+@test "discover_tokens: --glab with an explicit token proxies glab's default host, not the origin" {
+  command git init -q "$WS"
+  command git -C "$WS" remote add origin git@github.com:org/repo.git
+  git() { command git "$@"; }
   WITH_GLAB=1 GITLAB_TOKEN=glpat_explicit
   SEEN_PATHS=("$WS")
   discover_tokens
@@ -528,6 +531,17 @@ run_script_fn() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"use --glab-direct"* ]]
   done
+}
+
+@test "discover_tokens: --glab refuses a plain-http origin" {
+  command git init -q "$WS"
+  command git -C "$WS" remote add origin http://gitlab.internal/g/p.git
+  git() { command git "$@"; }
+  WITH_GLAB=1
+  SEEN_PATHS=("$WS")
+  run discover_tokens
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"'http://gitlab.internal/g/p.git' is plain http"*"use --glab-direct"* ]]
 }
 
 @test "discover_tokens: --glab with no token warns" {
@@ -1007,7 +1021,7 @@ YML
 
 @test "stage_glab_config: proxied copy blanks every token value" {
   glab_config_setup
-  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  WITH_GLAB=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
   run stage_glab_config
   [ "$status" -eq 0 ] && [ -z "$output" ]
   stage_glab_config 2>/dev/null
@@ -1016,6 +1030,13 @@ YML
   grep -qx '    use_keyring: false' "$stage/glab-config.yml"
   grep -qx '    api_host: gl.example.com' "$stage/glab-config.yml"
   [ "$(wc -l <"$stage/glab-config.yml")" -eq "$(wc -l <"$GLAB_SRC/config.yml")" ]
+}
+
+@test "stage_glab_config: --glab without a found token still blanks them" {
+  glab_config_setup
+  WITH_GLAB=1 GLAB_SIDECAR_ACTIVE=0
+  stage_glab_config
+  run ! grep -Eq 'glpat-one|refresh-one|glcbt-two' "$stage/glab-config.yml"
 }
 
 @test "stage_glab_config: --glab-direct keeps the tokens" {
