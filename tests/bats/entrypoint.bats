@@ -114,6 +114,15 @@ setup() {
   [ "$output" = "entrypoint: WARN chown: find: '/root/y': Permission denied" ]
 }
 
+@test "chown walk skips a missing /root/.claude" {
+  find() { printf '%s\n' "$@" >"$BATS_TEST_TMPDIR/find.args"; }
+  chown_volumes 1000 1000
+  [ "$(head -2 "$BATS_TEST_TMPDIR/find.args")" = "$ROOT_HOME"$'\n'"-xdev" ]
+  mkdir "$ROOT_HOME/.claude"
+  chown_volumes 1000 1000
+  [ "$(head -2 "$BATS_TEST_TMPDIR/find.args")" = "$ROOT_HOME"$'\n'"$ROOT_HOME/.claude" ]
+}
+
 @test "chown walk runs under LC_ALL=C" {
   xargs() { echo "LC_ALL=${LC_ALL-}" >&2; }
   HOST_UID=1000 HOST_GID=1000 run main true
