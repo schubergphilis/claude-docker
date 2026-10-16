@@ -16,9 +16,9 @@
 - [x] 2.2 Compute the proxied GitLab host as `GITLAB_HOST`, else the host the token was discovered for, else the first candidate. Normalise it to `host[:port]`, rejecting `http://` and IP literals with an error that names `--glab-direct`. Under `--glab`, stop forwarding the real `GITLAB_TOKEN` and set the placeholder, while still forwarding `GITLAB_HOST` by name. Verify with `tests/test_glab_token.py` cases: explicit token, discovered token, `GITLAB_HOST` with a port, `https://` form, `http://` rejected, IP literal rejected, and placeholder in the agent's env.
 - [x] 2.3 Write a constant `glab.caddy` with:
   - the `{$GLAB_PROXY_SITE}` address and `tls internal`
-  - Bearer on `/api/*` and Basic `oauth2:` on git and LFS paths, with credential headers stripped elsewhere
+  - Bearer on `/api/*` and Basic `oauth2:` on git smart-HTTP paths, with credential headers stripped elsewhere (LFS paths included)
   - `-PRIVATE-TOKEN -JOB-TOKEN` on every path
-  - the default project and group deletion `403`, and an import of the always-staged `glab-policy.caddy`
+  - the default project and group deletion `403`, the default token creation and rotation `403`, and an import of the always-staged `glab-policy.caddy`
   - access logs with request headers filtered out
 
   Add `CLAUDE_DOCKER_GLAB_POLICY` validation (set but unreadable is a startup error) and the `CLAUDE_DOCKER_GLAB_UPSTREAM` test hook. Pass `GLAB_PROXY_BEARER` / `GLAB_PROXY_BASIC` to the sidecar by bare name. Verify that a Caddyfile unit test asserts the snippet is constant and contains each matcher.

@@ -9,10 +9,10 @@
 - **One sidecar per session for every proxied service.** The `--gh` sidecar becomes a shared per-session auth proxy. `--gh`, `--glab` and `--api` each add their own site blocks to one Caddy instance, so a session has one network, one CA and one audit log. It is renamed to match: `claude-auth-<id>` / `claude-auth-proxy-<id>`, replacing `claude-gh-<id>` / `claude-gh-proxy-<id>`. The stale-resource prune sweeps both prefixes so strays from older versions are still cleaned up.
 - **`--glab` keeps the token in the sidecar.** **BREAKING** (behavioural): the agent container gets `GITLAB_TOKEN=claude-docker-proxy`, not the real token.
   - The GitLab host the token belongs to is redirected to the sidecar via `--add-host`, port included. It is the host `--glab` already discovers.
-  - The sidecar terminates TLS with the session CA. It injects `Authorization: Bearer <token>` on `/api/` and `Basic oauth2:<token>` on git smart-HTTP and LFS paths, and strips client credentials everywhere else.
+  - The sidecar terminates TLS with the session CA. It injects `Authorization: Bearer <token>` on `/api/` and `Basic oauth2:<token>` on git smart-HTTP paths, and strips client credentials everywhere else, LFS paths included (LFS against private projects needs `--glab-direct`).
   - The mounted glab `config.yml` copy has every token-valued key blanked, so tokens for other GitLab hosts stay out too.
   - Token discovery is unchanged.
-- **`--glab` default policy and audit log.** The default policy blocks project and group deletion. `CLAUDE_DOCKER_GLAB_POLICY` extends it, mirroring `CLAUDE_DOCKER_GH_POLICY`.
+- **`--glab` default policy and audit log.** The default policy blocks project and group deletion, and the REST calls that create or rotate tokens. `CLAUDE_DOCKER_GLAB_POLICY` extends it, mirroring `CLAUDE_DOCKER_GH_POLICY`.
 - **`--api` keeps the gateway key in the sidecar.** **BREAKING** (behavioural): the agent container gets `ANTHROPIC_BASE_URL` pointing at the sidecar over the session-private network, plus `claude-docker-proxy` placeholders for whichever of `ANTHROPIC_API_KEY` / `ANTHROPIC_AUTH_TOKEN` the host set.
   - The sidecar forwards to the host's `ANTHROPIC_BASE_URL`, default `https://api.anthropic.com`. It replaces `x-api-key` / `Authorization` with the real values and drops any credential the host did not provide, so a stray claude.ai OAuth bearer never reaches the gateway.
   - `CLAUDE_DOCKER_API_CA` is also given to the sidecar as an extra upstream trust root.

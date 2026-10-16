@@ -270,11 +270,17 @@ class SidecarBehaviourTest(unittest.TestCase):
         self.assertEqual(st, 200)
         self.assertEqual(echo["headers"].get("authorization"), "Bearer glpat-real")
         self.assertNotIn("private-token", echo["headers"])
-        for path in ("/g/p.git/info/refs?service=git-upload-pack", "/g/p.git/git-receive-pack",
-                     "/g/p.git/info/lfs/objects/batch"):
+        for path in ("/g/p.git/info/refs?service=git-upload-pack", "/g/p.git/git-receive-pack"):
             with self.subTest(path=path):
                 _, echo = self.glab("POST", path, {"Authorization": "Basic Y2xpZW50"})
                 self.assertEqual(echo["headers"].get("authorization"), "Basic b2F1dGgyOmdscGF0LXJlYWw=")
+        # LFS gets nothing: GitLab's batch response would echo the credential back.
+        for path in ("/g/p.git/info/lfs/objects/batch", "/g/p.git/info/lfs/locks",
+                     "/g/p.git/gitlab-lfs/objects/" + "0" * 64):
+            with self.subTest(path=path):
+                st, echo = self.glab("POST", path, {"Authorization": "Basic Y2xpZW50"})
+                self.assertEqual(st, 200)
+                self.assertNotIn("authorization", echo["headers"])
         _, echo = self.glab("GET", "/g/p/-/tree/main",
                             {"Authorization": "Bearer x", "PRIVATE-TOKEN": "x", "JOB-TOKEN": "x"})
         for h in ("authorization", "private-token", "job-token"):
@@ -291,6 +297,43 @@ class SidecarBehaviourTest(unittest.TestCase):
         for path in ("/api/v4/projects/123/repository/branches/x", "/api/v4/projects/123/issues/1"):
             with self.subTest(path=path):
                 self.assertEqual(self.glab("DELETE", path)[0], 200)
+
+    def test_glab_default_policy_blocks_token_minting(self):
+        self._start()
+        blocked = (
+            ("POST", "/api/v4/personal_access_tokens/self/rotate"),
+            ("POST", "/api/v4/personal_access_tokens/17/rotate"),
+            ("POST", "/api/v4/user/personal_access_tokens"),
+            ("POST", "/api/v4/users/5/personal_access_tokens"),
+            ("POST", "/api/v4/users/5/impersonation_tokens"),
+            ("POST", "/api/v4/projects/123/access_tokens"),
+            ("POST", "/api/v4/projects/g%2Fsub%2Fp/access_tokens"),
+            ("POST", "/api/v4/projects/123/access_tokens/9/rotate"),
+            ("POST", "/api/v4/groups/42/access_tokens/9/rotate"),
+            ("POST", "/api/v4/projects/g%2fp/deploy_tokens?x=1"),
+            ("POST", "/api/v4/groups/42/deploy_tokens"),
+            ("POST", "/api/v4/deploy_tokens"),
+            ("POST", "/api/v4/groups/42/service_accounts/7/personal_access_tokens"),
+            ("POST", "//api/v4//personal_access_tokens/self/rotate"),
+            ("POST", "/api/v4/projects/123//access_tokens/"),
+            ("PUT", "/api/v4/personal_access_tokens/self/rotate"),
+        )
+        for method, path in blocked:
+            with self.subTest(method=method, path=path):
+                st, body = self.glab(method, path)
+                self.assertEqual(st, 403)
+                self.assertIn("claude-docker glab-proxy policy", body)
+                self.assertIn("CLAUDE_DOCKER_GLAB_POLICY", body)
+        allowed = (
+            ("GET", "/api/v4/personal_access_tokens"),
+            ("GET", "/api/v4/personal_access_tokens/self"),
+            ("GET", "/api/v4/projects/123/access_tokens"),
+            ("POST", "/api/v4/projects/1/issues"),
+            ("POST", "/api/v4/projects/1/merge_requests"),
+        )
+        for method, path in allowed:
+            with self.subTest(method=method, path=path):
+                self.assertEqual(self.glab(method, path)[0], 200)
 
     def test_glab_user_policy_extension_is_honoured(self):
         self._start(glab_policy=(

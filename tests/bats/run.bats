@@ -515,6 +515,24 @@ run_script_fn() {
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *$'-e\nGITLAB_TOKEN'* ]]
 }
 
+@test "discover_tokens: --glab with an explicit token and no host glab proxies gitlab.com" {
+  # A PATH with everything but glab, so the gitlab.com fallback is taken.
+  unset -f glab
+  nobin="$BATS_TEST_TMPDIR/no-glab-bin"; mkdir -p "$nobin"
+  for f in /usr/local/bin/* /usr/bin/* /bin/*; do
+    case "${f##*/}" in glab) continue ;; esac
+    [ -e "$nobin/${f##*/}" ] || ln -s "$f" "$nobin/${f##*/}"
+  done
+  PATH="$nobin"
+  [ -z "$(command -v glab)" ]
+  WITH_GLAB=1 GITLAB_TOKEN=glpat_explicit
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ "$GLAB_HOST_TOKEN" = glpat_explicit ]
+  [ "$GLAB_PROXY_HOST" = gitlab.com ]
+  [ "$GITLAB_HOST" = gitlab.com ]
+}
+
 @test "discover_tokens: --glab-direct with an explicit token asks glab nothing" {
   WITH_GLAB_DIRECT=1 GITLAB_TOKEN=glpat_explicit
   SEEN_PATHS=("$WS")
@@ -696,11 +714,14 @@ sidecar_setup() {
 
 @test "start_auth_sidecar: --glab redirects only the token's host" {
   WITH_GLAB=1 GLAB_HOST_TOKEN=glpat_secret GLAB_PROXY_HOST=gl.example.com:8443
+  CLAUDE_DOCKER_GLAB_POLICY="$BATS_TEST_TMPDIR/glab-policy.caddy"
+  echo "# user glab policy" >"$CLAUDE_DOCKER_GLAB_POLICY"
   stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
   AUTH_PROXY_NETWORK=claude-auth-x AUTH_PROXY_SIDECAR=claude-auth-proxy-x
   start_auth_sidecar 2>/dev/null
   [ "$GLAB_SIDECAR_ACTIVE" = 1 ] && [ "$GH_SIDECAR_ACTIVE" = 0 ]
-  [ -f "$stage/auth-proxy/caddy/sites/glab.caddy" ] && [ -f "$stage/auth-proxy/caddy/glab-policy.caddy" ]
+  [ -f "$stage/auth-proxy/caddy/sites/glab.caddy" ]
+  [ "$(cat "$stage/auth-proxy/caddy/glab-policy.caddy")" = "# user glab policy" ]
   [ "$GLAB_PROXY_SITE" = gl.example.com:8443 ]
   [ "$GLAB_PROXY_UPSTREAM" = https://gl.example.com:8443 ]
   [ "$GLAB_PROXY_BASIC" = "Basic $(printf 'oauth2:glpat_secret' | base64)" ]
