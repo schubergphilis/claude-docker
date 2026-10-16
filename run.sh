@@ -120,9 +120,9 @@ Wrapper flags:
   --api-direct        Like --api, but forward ANTHROPIC_BASE_URL and the
                       credential straight into the agent container (no
                       sidecar). Mutually exclusive with --api.
-  --egress-lock       With --api or --api-direct: lock model traffic to ANTHROPIC_BASE_URL
-                      (required). The container joins an --internal
-                      network and goes out only via a squid sidecar
+  --egress-lock       With --api or --api-direct: lock model traffic to
+                      ANTHROPIC_BASE_URL (required). The container joins an
+                      --internal network and goes out only via a squid sidecar
                       (HTTPS via CONNECT, no TLS interception) that refuses
                       *.anthropic.com / *.claude.ai / *.claude.com and logs
                       every connection. Other hosts stay reachable. The log
@@ -373,14 +373,16 @@ validate_opts() {
   # --egress-lock: every connection goes through a logging squid sidecar
   # (see api-egress-policy), and model traffic may reach only the configured
   # endpoint. Its own opt-in, not part of --api, because most gateway users
-  # don't need the sidecar or a log of every connection; it needs --api for the
-  # endpoint and token forwarding. Everything else stays open: only model traffic has to stay in the
+  # don't need the sidecar or a log of every connection; it needs --api or
+  # --api-direct for the endpoint and token forwarding. Under --api the model
+  # traffic goes agent → squid → auth-proxy sidecar → endpoint, so the
+  # endpoint below is the sidecar's upstream. Everything else stays open: only model traffic has to stay in the
   # EU, and an allowlist of every git/npm/pypi host would be a list each user
   # maintains. The endpoint must be set: unset, Claude Code talks to
   # api.anthropic.com, which the lock refuses. Checked before runtime detection,
   # so a bad value aborts with nothing to undo.
-  if [ "$WITH_EGRESS_LOCK" = "1" ] && [ "$WITH_API" != "1" ]; then
-    echo "claude-docker: --egress-lock needs --api (it locks model traffic to the --api endpoint)" >&2
+  if [ "$WITH_EGRESS_LOCK" = "1" ] && [ "$WITH_API" != "1" ] && [ "$WITH_API_DIRECT" != "1" ]; then
+    echo "claude-docker: --egress-lock needs --api or --api-direct (it locks model traffic to the --api endpoint)" >&2
     exit 1
   fi
   if [ "$WITH_EGRESS_LOCK" = "1" ]; then
@@ -569,6 +571,13 @@ hostpath() {
 # ponytail: a CONNECT to a provider's raw IP isn't matched by the dstdomain
 # deny. Claude Code never does that, and it would still show up in the log;
 # add the providers' published ranges if that's not enough.
+# Whether the proxied --glab host carries an explicit port, which squid then
+# allows for that host only. The host:port goes into the squid config, so it
+# must be a plain name; anything else gets no rule and stays refused.
+egress_glab_port_rule() {
+  [ "$GLAB_SIDECAR_ACTIVE" = "1" ] && [[ $GLAB_PROXY_HOST =~ ^[A-Za-z0-9.-]+:[0-9]{1,5}$ ]]
+}
+
 gen_egress_squid_conf() {
   cat <<'EOF'
 http_port 3128
@@ -594,6 +603,17 @@ EOF
   printf 'acl egress_model_endpoint dstdomain -n %s\n' "$egress_api_host"
   printf 'acl egress_model_port port %s\n' "$egress_api_port"
   printf 'acl egress_model_providers dstdomain -n %s\n' "$EGRESS_MODEL_PROVIDERS"
+  # Names the auth-proxy sidecar answers on a port the generic rules refuse:
+  # the --api proxy (plain HTTP on 8080), and a --glab host on a port other
+  # than 443. Both resolve to the sidecar on the internal network.
+  if [ "$API_SIDECAR_ACTIVE" = "1" ]; then
+    printf 'acl egress_auth_proxy_api dstdomain -n claude-docker-api-proxy\n'
+    printf 'acl egress_auth_proxy_api_port port 8080\n'
+  fi
+  if egress_glab_port_rule; then
+    printf 'acl egress_auth_proxy_glab dstdomain -n %s\n' "${GLAB_PROXY_HOST%:*}"
+    printf 'acl egress_auth_proxy_glab_port port %s\n' "${GLAB_PROXY_HOST##*:}"
+  fi
   cat <<'EOF'
 
 http_access deny manager
@@ -601,6 +621,14 @@ http_access deny egress_metadata_names
 http_access deny egress_linklocal
 http_access deny egress_loopback
 http_access allow egress_model_endpoint egress_model_port
+EOF
+  if [ "$API_SIDECAR_ACTIVE" = "1" ]; then
+    printf 'http_access allow egress_auth_proxy_api egress_auth_proxy_api_port\n'
+  fi
+  if egress_glab_port_rule; then
+    printf 'http_access allow egress_auth_proxy_glab egress_auth_proxy_glab_port\n'
+  fi
+  cat <<'EOF'
 http_access deny !egress_ports
 http_access deny CONNECT !egress_tls_port
 http_access allow egress_model_endpoint
@@ -618,8 +646,13 @@ EOF
 # can't replace it, and /etc/claude-code is root's. ANTHROPIC_BASE_URL has
 # passed validate_opts' URL character check, so it needs no JSON escaping.
 gen_egress_managed_settings() {
+  local url="$ANTHROPIC_BASE_URL"
+  # Under --api Claude Code talks to the auth-proxy sidecar, which holds the
+  # real endpoint; pinning that here would skip the sidecar and send the
+  # placeholder credential to the gateway.
+  [ "$API_SIDECAR_ACTIVE" = "1" ] && url="http://claude-docker-api-proxy:8080"
   printf '{\n  "env": {\n'
-  printf '    "ANTHROPIC_BASE_URL": "%s",\n' "$ANTHROPIC_BASE_URL"
+  printf '    "ANTHROPIC_BASE_URL": "%s",\n' "$url"
   printf '    "CLAUDE_CODE_USE_BEDROCK": "0",\n'
   printf '    "CLAUDE_CODE_USE_VERTEX": "0",\n'
   printf '    "CLAUDE_CODE_USE_FOUNDRY": "0"\n'
@@ -1672,10 +1705,10 @@ build_host_args() {
 egress_listening() { "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; }
 
 start_egress_sidecar() {
-  local egress_wait egress_ip egress_url started entry EGRESS_SIDECAR_ARGS
+  local egress_wait egress_ip egress_url started entry via EGRESS_SIDECAR_ARGS
   # --egress-lock proxy sidecar: squid from its own image (ensure_egress_image;
   # see openspec/specs/api-egress-policy).
-  # The lifecycle mirrors the gh sidecar above: `run -d` without --rm so a crash
+  # The lifecycle mirrors the auth-proxy sidecar: `run -d` without --rm so a crash
   # leaves logs to diagnose, exited-during-startup detection, and a fail-closed
   # abort on every path. The agent container is never started without the proxy.
   if [ "$WITH_EGRESS_LOCK" = "1" ]; then
@@ -1772,7 +1805,9 @@ start_egress_sidecar() {
       # Code's first-run connectivity check (api.anthropic.com) is skipped.
       "-e" "CLAUDE_DOCKER_EGRESS_LOCK=1"
     )
-    echo "claude-docker: egress proxy '$EGRESS_SIDECAR' is active; model traffic goes only to $egress_api_host, every connection is logged to $EGRESS_LOG_DIR" >&2
+    via=""
+    [ "$API_SIDECAR_ACTIVE" = "1" ] && via=" (via the auth-proxy sidecar)"
+    echo "claude-docker: egress proxy '$EGRESS_SIDECAR' is active; model traffic goes only to $egress_api_host$via, every connection is logged to $EGRESS_LOG_DIR" >&2
   fi
 }
 

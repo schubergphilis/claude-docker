@@ -122,10 +122,23 @@ TXT
   timeout() { shift 3; "$@"; }
   run_session >/dev/null
   [ "$endpoint_host" = github.com ] && [ "$endpoint_url" = https://github.com:22 ]
-  [ "${flags[*]}" = "--api --egress-lock --ephemeral --gh" ]
+  # The endpoint-port cell needs the agent to dial the endpoint: --api-direct.
+  [ "${flags[*]}" = "--api-direct --egress-lock --ephemeral --gh" ]
   grep -q 'ANTHROPIC_BASE_URL=https://github.com:22' "$BATS_TEST_TMPDIR/cmd"
   grep -q 'GH_TOKEN=ghp_fake' "$BATS_TEST_TMPDIR/cmd"
   grep -q 'EXPECT_EGRESS_GH=1' "$BATS_TEST_TMPDIR/cmd"
+  grep -q 'EXPECT_EGRESS_MANAGED_URL=https://github.com:22' "$BATS_TEST_TMPDIR/cmd"
+}
+
+@test "run_session: the plain cell goes through the --api auth-proxy sidecar" {
+  setup_cell
+  script() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/cmd"; echo "RESULT: PASS" > "$3"; echo 0 > "$TMPROOT/rc"; }
+  timeout() { shift 3; "$@"; }
+  run_session >/dev/null
+  [ "${flags[*]}" = "--api --egress-lock --ephemeral" ] && [ "$API_PROXY" = 1 ]
+  grep -q 'EXPECT_EGRESS_API_PROXY=1' "$BATS_TEST_TMPDIR/cmd"
+  grep -q 'EXPECT_EGRESS_MANAGED_URL=http://claude-docker-api-proxy:8080' "$BATS_TEST_TMPDIR/cmd"
+  grep -q 'ANTHROPIC_BASE_URL=https://example.com' "$BATS_TEST_TMPDIR/cmd"
 }
 
 @test "run_session fails on a non-zero exit or a missing PASS" {
@@ -162,6 +175,19 @@ TXT
   [[ "$output" == *"does not list example.org:22"* ]]
 }
 
+@test "assert_evidence under --api needs the request to the auth-proxy sidecar" {
+  setup_cell
+  fake_session
+  API_PROXY=1
+  run assert_evidence
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"lacks the agent's request to the --api auth-proxy sidecar"* ]]
+  echo "1 0 1 TCP_MISS/404 0 GET http://claude-docker-api-proxy:8080/ - HIER_DIRECT/x -" \
+    >> "$TMPROOT/state/claude-docker/egress/s.log"
+  run assert_evidence
+  [ "$status" -eq 0 ]
+}
+
 @test "assert_evidence fails without the saved meta" {
   setup_cell
   fake_session
@@ -196,7 +222,7 @@ TXT
   STUB_PS="cid" STUB_NETWORKS="nid"
   run assert_teardown
   [ "$status" -eq 1 ]
-  [[ "$output" == *"claude-egress-proxy-a1B2c3 claude-gh-proxy-a1B2c3 network:claude-egress-a1B2c3"* ]]
+  [[ "$output" == *"claude-egress-proxy-a1B2c3 claude-auth-proxy-a1B2c3 network:claude-egress-a1B2c3"* ]]
 }
 
 @test "assert_teardown fails without a session id" {

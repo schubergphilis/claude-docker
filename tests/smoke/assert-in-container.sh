@@ -641,7 +641,7 @@ check_egress() {
   fi
 
   if [ -n "${EXPECT_EGRESS_ENDPOINT_PORT:-}" ]; then
-    # The endpoint is github.com on an SSH port (smoke/egress.sh --endpoint-port):
+    # The endpoint is github.com on an SSH port (tests/smoke/egress.sh --endpoint-port):
     # squid tunnels to it (http_connect 200; the TLS handshake with sshd then
     # fails, which doesn't matter), while the same port on any other host stays
     # refused. Both are squid's decision, so 403 means a rule refused it.
@@ -653,6 +653,17 @@ check_egress() {
   else
     assert_eq "egress-endpoint: the model endpoint (example.com) via proxy" \
       "$(egress_code http_code https://example.com/)" "200"
+  fi
+  if [ "${EXPECT_EGRESS_API_PROXY:-0}" = "1" ]; then
+    # --api: squid passes the plain-HTTP hop to the auth-proxy sidecar on its
+    # port 8080. Whatever the upstream answers, a 403 is squid refusing it and
+    # 000 a broken chain.
+    local api_code
+    api_code=$(egress_code http_code http://claude-docker-api-proxy:8080/)
+    case "$api_code" in
+      403|000) fail "egress-api-proxy: the --api auth-proxy sidecar via proxy (HTTP $api_code)" ;;
+      *) pass "egress-api-proxy: the --api auth-proxy sidecar via proxy (HTTP $api_code)" ;;
+    esac
   fi
   assert_eq "egress-open: a non-model host (example.org) via proxy" \
     "$(egress_code http_code https://example.org/)" "200"
@@ -667,7 +678,7 @@ check_egress() {
   local ms=/etc/claude-code/managed-settings.json ms_json
   ms_json=$(jq -c '.env' "$ms" 2>/dev/null) || ms_json=""
   assert_eq "egress-managed: managed settings pin the endpoint, other backends off" "$ms_json" \
-    "{\"ANTHROPIC_BASE_URL\":\"${EXPECT_EGRESS_ENDPOINT_URL:-}\",\"CLAUDE_CODE_USE_BEDROCK\":\"0\",\"CLAUDE_CODE_USE_VERTEX\":\"0\",\"CLAUDE_CODE_USE_FOUNDRY\":\"0\"}"
+    "{\"ANTHROPIC_BASE_URL\":\"${EXPECT_EGRESS_MANAGED_URL:-}\",\"CLAUDE_CODE_USE_BEDROCK\":\"0\",\"CLAUDE_CODE_USE_VERTEX\":\"0\",\"CLAUDE_CODE_USE_FOUNDRY\":\"0\"}"
   if ( : >>"$ms" ) 2>/dev/null; then
     fail "egress-managed-ro: the agent can write $ms"
   else
@@ -726,21 +737,21 @@ check_egress() {
 
   if [ "${EXPECT_EGRESS_GH:-0}" = "1" ]; then
     # --cacert replaces the default bundle, so a completed handshake proves the
-    # gh sidecar terminated TLS (squid routed api.github.com to it). /user needs
+    # auth-proxy sidecar terminated TLS (squid routed api.github.com to it). /user needs
     # a token and this probe sends none, so GitHub's 401 message tells the two
     # apart: "Bad credentials" means the sidecar injected smoke's fake token,
     # "Requires authentication" means it did not. A 502 would be the sidecar
     # failing upstream, 000 the chain broken.
     local gh_out gh_code gh_body
     gh_out=$(curl -s -m 20 -w '\n%{http_code}' \
-      --cacert /usr/local/share/ca-certificates/claude-docker-gh-proxy.crt \
+      --cacert /usr/local/share/ca-certificates/claude-docker-auth-proxy.crt \
       https://api.github.com/user 2>/dev/null) || true
     gh_code=${gh_out##*$'\n'}
     gh_body=${gh_out%$'\n'*}
     if [ "$gh_code" = "401" ] && [[ "$gh_body" == *'"Bad credentials"'* ]]; then
-      pass "egress-gh: api.github.com via proxy → gh sidecar → GitHub, token injected (401 Bad credentials)"
+      pass "egress-gh: api.github.com via proxy → auth-proxy sidecar → GitHub, token injected (401 Bad credentials)"
     else
-      fail "egress-gh: api.github.com via proxy → gh sidecar did not inject the token (HTTP ${gh_code:-000}: $(printf '%s' "$gh_body" | tr -d '\n' | cut -c1-120))"
+      fail "egress-gh: api.github.com via proxy → auth-proxy sidecar did not inject the token (HTTP ${gh_code:-000}: $(printf '%s' "$gh_body" | tr -d '\n' | cut -c1-120))"
     fi
   fi
 }

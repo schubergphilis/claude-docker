@@ -16,7 +16,10 @@
 #   --endpoint-port  use an endpoint on a port other than 80/443
 #                    (https://github.com:22, whose sshd reliably accepts the
 #                    tunnel) and assert squid allows that port for the endpoint
-#                    only.
+#                    only. Runs with --api-direct: only then does the agent
+#                    itself dial the endpoint.
+# The other cells use --api, so model traffic goes agent → squid → auth-proxy
+# sidecar → endpoint.
 #
 # Linux-only (util-linux `script` supplies the PTY that run.sh's `-it` needs).
 
@@ -90,13 +93,18 @@ http_access allow all" "is not a valid hostname"
 
 # 2. The session, under util-linux `script` for the PTY run.sh's `-it` needs.
 run_session() {
-  local entry envs quoted rc rcfile="$TMPROOT/rc"
+  local entry envs quoted rc rcfile="$TMPROOT/rc" api_flag=--api api_proxy=1 managed_url
   endpoint_host=example.com endpoint_url=https://example.com
   if [ -n "$ENDPOINT_PORT" ]; then
     endpoint_host=github.com endpoint_url="https://github.com:$ENDPOINT_PORT"
+    api_flag=--api-direct api_proxy=0
   fi
-  entry="EXPECT_EGRESS=1 EXPECT_EGRESS_GH=$WITH_GH EXPECT_EGRESS_ENDPOINT_PORT=$ENDPOINT_PORT EXPECT_EGRESS_ENDPOINT_URL=$endpoint_url EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
-  flags=(--api --egress-lock --ephemeral)
+  # The URL the managed settings pin: the auth-proxy sidecar's under --api.
+  managed_url="$endpoint_url"
+  [ "$api_proxy" = "1" ] && managed_url=http://claude-docker-api-proxy:8080
+  API_PROXY="$api_proxy"
+  entry="EXPECT_EGRESS=1 EXPECT_EGRESS_GH=$WITH_GH EXPECT_EGRESS_API_PROXY=$api_proxy EXPECT_EGRESS_ENDPOINT_PORT=$ENDPOINT_PORT EXPECT_EGRESS_MANAGED_URL=$managed_url EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
+  flags=("$api_flag" --egress-lock --ephemeral)
   envs=("${api_env[@]}"
         ANTHROPIC_BASE_URL="$endpoint_url"
         CLAUDE_DOCKER_TEST_ENTRY="$entry")
@@ -126,6 +134,13 @@ assert_evidence() {
   [ -n "$logf" ] && [ -f "${logf%.log}.meta" ] || die "no egress log/meta saved under $TMPROOT/state"
   grep -q "TCP_TUNNEL/200 .* CONNECT example.org:443" "$logf" || die "saved log lacks the example.org CONNECT"
   grep -q "^endpoint=$endpoint_host\$" "${logf%.log}.meta" || die "meta does not name the endpoint"
+  # Under --api the agent's model traffic reaches squid as plain HTTP to the
+  # auth-proxy sidecar; the sidecar's own connection to the endpoint doesn't
+  # pass through squid.
+  if [ "$API_PROXY" = "1" ]; then
+    grep -q " http://claude-docker-api-proxy:8080/" "$logf" \
+      || die "saved log lacks the agent's request to the --api auth-proxy sidecar"
+  fi
   # squid runs from its own image, built by run.sh, never from the agent image.
   proxy_image=$(sed -n 's/^proxy_image=//p' "${logf%.log}.meta")
   case "$proxy_image" in
@@ -154,10 +169,10 @@ assert_teardown() {
   sid=$(grep -o "egress proxy 'claude-egress-proxy-[A-Za-z0-9]*'" "$transcript" \
         | head -1 | sed -e "s#.*claude-egress-proxy-##" -e "s#'\$##") || true
   [ -n "$sid" ] || die "no session id in the startup banner"
-  for name in "claude-egress-proxy-$sid" "claude-gh-proxy-$sid"; do
+  for name in "claude-egress-proxy-$sid" "claude-auth-proxy-$sid"; do
     [ -z "$(docker ps -aq --filter "name=^${name}\$")" ] || leftover+=" $name"
   done
-  for name in "claude-egress-$sid" "claude-egress-out-$sid" "claude-gh-$sid"; do
+  for name in "claude-egress-$sid" "claude-egress-out-$sid" "claude-auth-$sid"; do
     [ -z "$(docker network ls -q --filter "name=^${name}\$")" ] || leftover+=" network:$name"
   done
   [ -z "$leftover" ] || die "teardown left resources behind:$leftover"
