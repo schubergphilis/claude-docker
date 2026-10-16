@@ -1645,18 +1645,23 @@ start_auth_sidecar() {
 
 # CLAUDE_DOCKER_ADD_HOSTS entries for the agent container. The hosts the
 # sidecar intercepts are skipped: they must keep resolving to the sidecar.
+# Whether $1 (case-insensitive) is a name the active auth-proxy sidecar
+# answers for, so it must keep resolving to the sidecar.
+sidecar_name() {
+  local name
+  name=$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')
+  case "$name" in
+    github.com|api.github.com|uploads.github.com) [ "$GH_SIDECAR_ACTIVE" = "1" ] && return 0 ;;
+    claude-docker-api-proxy) [ "$API_SIDECAR_ACTIVE" = "1" ] && return 0 ;;
+  esac
+  [ "$GLAB_SIDECAR_ACTIVE" = "1" ] \
+    && [ "$name" = "$(printf '%s' "${GLAB_PROXY_HOST%%:*}" | tr '[:upper:]' '[:lower:]')" ]
+}
+
 build_host_args() {
-  local entry name skip glab_name=""
-  [ "$GLAB_SIDECAR_ACTIVE" = "1" ] && glab_name=$(printf '%s' "${GLAB_PROXY_HOST%%:*}" | tr '[:upper:]' '[:lower:]')
+  local entry
   for entry in ${ADD_HOSTS[@]+"${ADD_HOSTS[@]}"}; do
-    name=$(printf '%s' "${entry%%:*}" | tr '[:upper:]' '[:lower:]')
-    skip=0
-    case "$name" in
-      github.com|api.github.com|uploads.github.com) [ "$GH_SIDECAR_ACTIVE" = "1" ] && skip=1 ;;
-      claude-docker-api-proxy) [ "$API_SIDECAR_ACTIVE" = "1" ] && skip=1 ;;
-    esac
-    [ -n "$glab_name" ] && [ "$name" = "$glab_name" ] && skip=1
-    if [ "$skip" = "1" ]; then
+    if sidecar_name "${entry%%:*}"; then
       echo "claude-docker: CLAUDE_DOCKER_ADD_HOSTS entry '$entry' skipped for the agent container: it resolves to the auth-proxy sidecar" >&2
       continue
     fi
@@ -1667,7 +1672,7 @@ build_host_args() {
 egress_listening() { "$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 | grep -q 'Accepting HTTP Socket connections'; }
 
 start_egress_sidecar() {
-  local egress_wait egress_ip egress_url started EGRESS_SIDECAR_ARGS
+  local egress_wait egress_ip egress_url started entry EGRESS_SIDECAR_ARGS
   # --egress-lock proxy sidecar: squid from its own image (ensure_egress_image;
   # see openspec/specs/api-egress-policy).
   # The lifecycle mirrors the gh sidecar above: `run -d` without --rm so a crash
@@ -1690,6 +1695,14 @@ start_egress_sidecar() {
     if [ "$API_SIDECAR_ACTIVE" = "1" ]; then
       EGRESS_SIDECAR_ARGS+=("--add-host" "claude-docker-api-proxy:$proxy_ip")
     fi
+    # squid resolves every name the agent connects to, so it needs the
+    # CLAUDE_DOCKER_ADD_HOSTS entries too: the agent's own /etc/hosts is never
+    # consulted for a proxied connection. Names served by the auth-proxy
+    # sidecar stay on it (build_host_args warns about those).
+    for entry in ${ADD_HOSTS[@]+"${ADD_HOSTS[@]}"}; do
+      sidecar_name "${entry%%:*}" && continue
+      EGRESS_SIDECAR_ARGS+=("--add-host" "$entry")
+    done
     ensure_egress_image
     gen_egress_squid_conf >"$stage/egress-squid.conf" || exit 1
     gen_egress_managed_settings >"$stage/egress-managed-settings.json" || exit 1
