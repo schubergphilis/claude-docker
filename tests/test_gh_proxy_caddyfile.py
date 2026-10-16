@@ -8,7 +8,7 @@ baked into the staged file. That holds only while the heredoc delimiter stays
 quoted. This runs the heredoc through bash with those variables set and asserts
 the output is the literal body, byte for byte.
 
-Behaviour of the config itself is covered by tests/gh-proxy-integration.sh.
+Behaviour of the config itself is covered by tests/integration/gh-proxy-integration.sh.
 """
 
 import os

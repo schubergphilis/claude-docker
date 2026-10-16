@@ -31,23 +31,23 @@ The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinn
 
 ## CI smoke tests
 
-The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`smoke/smoke.sh`](../smoke/smoke.sh) + [`smoke/assert-in-container.sh`](../smoke/assert-in-container.sh)), which drives the real `run.sh` with fixture credentials under a fake `$HOME`. It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.
+The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`tests/smoke/smoke.sh`](../tests/smoke/smoke.sh) + [`tests/smoke/assert-in-container.sh`](../tests/smoke/assert-in-container.sh)), which drives the real `run.sh` with fixture credentials under a fake `$HOME`. It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.
 
 Run a cell locally against a built image:
 
 ```bash
-IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
+IMAGE=claude-code:local bash tests/smoke/smoke.sh --uid="$(id -u)" --optins=aws,glab,tfe,api,az
 ```
 
 Each cell starts from `env -i` plus an allowlist, so your own `AWS_*`/`GH_TOKEN`/`CLAUDE_DOCKER_*` never reach it. A cell removes its `smoke-test-*` volumes on exit; a run killed with `SIGKILL` can't, so clean up with `docker volume ls -q --filter name=smoke-test- | xargs -r docker volume rm`.
 
-The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/gh-proxy-integration.sh`](../tests/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against.
+The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/integration/gh-proxy-integration.sh`](../tests/integration/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against.
 
 ### Manual fallback checklist (macOS)
 
 There is **no automated macOS CI job**: GitHub-hosted `macos-latest` runners can't reliably provision a Docker daemon (the `vz` VM driver fails to boot under the runner's nested-virtualization limits, and the `qemu` driver hits an upstream Lima crash), so a hosted job can't even reach the assertions — and Colima's file-sharing may not match Docker Desktop's anyway. The one behaviour unique to macOS is **virtiofs collapsing `st_dev` across bind mounts**, which changes how `entrypoint.sh`'s `-xdev` chown-prune treats the `:ro` mounts under `/root` (see `entrypoint.sh:30-45`). Verify it by hand on a real Mac with Docker Desktop before shipping changes to `entrypoint.sh` / `run.sh` / `Dockerfile`:
 
-- Run the smoke cells on macOS: `IMAGE=claude-code:local bash smoke/smoke.sh --uid="$(id -u)" --volstate=warm` and `… --ro=1` and `… --optins=aws,glab,tfe,api,az` — the entrypoint must reach the dropped process with **no spurious `entrypoint: WARN`** despite the `:ro` mounts under `/root`.
+- Run the smoke cells on macOS: `IMAGE=claude-code:local bash tests/smoke/smoke.sh --uid="$(id -u)" --volstate=warm` and `… --ro=1` and `… --optins=aws,glab,tfe,api,az` — the entrypoint must reach the dropped process with **no spurious `entrypoint: WARN`** despite the `:ro` mounts under `/root`.
 - File ownership round-trips to the host user and is editable without `sudo` on a real `~/repo` bind mount.
 - macOS Keychain `gh` flow: `--gh` with no `GH_TOKEN`/`GITHUB_TOKEN` exported falls back to `gh auth token`; in-container `gh` is authenticated.
 - Real AWS SSO (`--aws`) and Terraform Cloud (`--tfe`) reach their endpoints from inside the container via the mounted config.

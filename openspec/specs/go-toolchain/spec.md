@@ -219,7 +219,7 @@ image's pinned toolchain wins over anything installed into the volume.
 
 #### Scenario: the smoke suite enforces the ordering
 
-- **WHEN** `smoke/smoke.sh` runs against a built image
+- **WHEN** `tests/smoke/smoke.sh` runs against a built image
 - **THEN** the in-container assertions confirm `/usr/local/go/bin` precedes
   `/usr/bin`, that `/usr/bin` precedes both `/root/.local/bin` and
   `/root/go/bin`, and that `git` resolves to `/usr/bin/git`
