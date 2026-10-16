@@ -188,7 +188,8 @@ run_script_fn() {
 }
 
 @test "validate_opts: --egress-lock takes the endpoint port, else the scheme default" {
-  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  # --api-direct: --api itself refuses a scheme that isn't lowercase http(s).
+  WITH_API_DIRECT=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
   local url want
   for url in "https://gw.eu/v1=443" "http://litellm/=80" "HTTP://litellm=80" \
              "https://u:p@gw.eu:8443/v1=8443" "http://litellm:4000=4000" "https://gw.eu:08443=8443"; do
@@ -217,6 +218,33 @@ http_access deny egress_model_providers
 http_access allow all" ]
 }
 
+@test "validate_opts: --egress-lock needs --api or --api-direct" {
+  WITH_EGRESS_LOCK=1 ANTHROPIC_BASE_URL=https://gw.eu ANTHROPIC_AUTH_TOKEN=t
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--egress-lock needs --api or --api-direct"* ]]
+  WITH_API_DIRECT=1
+  validate_opts
+  [ "$egress_api_host" = gw.eu ]
+}
+
+@test "gen_egress_squid_conf: the auth-proxy sidecar's own ports are opened for its names only" {
+  egress_api_host=gw.eu egress_api_port=443
+  API_SIDECAR_ACTIVE=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com:8443
+  run gen_egress_squid_conf
+  [[ "$output" == *$'\nacl egress_auth_proxy_api dstdomain -n claude-docker-api-proxy\nacl egress_auth_proxy_api_port port 8080\n'* ]]
+  [[ "$output" == *$'\nacl egress_auth_proxy_glab dstdomain -n gl.example.com\nacl egress_auth_proxy_glab_port port 8443\n'* ]]
+  # Below the address denies, above the generic port denies.
+  [[ "$output" == *$'http_access deny egress_loopback\nhttp_access allow egress_model_endpoint egress_model_port\nhttp_access allow egress_auth_proxy_api egress_auth_proxy_api_port\nhttp_access allow egress_auth_proxy_glab egress_auth_proxy_glab_port\nhttp_access deny !egress_ports\n'* ]]
+}
+
+@test "gen_egress_squid_conf: no sidecar, or a glab host without a port, adds no rule" {
+  egress_api_host=gw.eu egress_api_port=443
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run gen_egress_squid_conf
+  [[ "$output" != *egress_auth_proxy* ]]
+}
+
 @test "validate_opts: --egress-lock refuses a provider host in any case" {
   WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
   ANTHROPIC_BASE_URL="https://Api.Anthropic.com"
@@ -236,6 +264,13 @@ http_access allow all" ]
   done
   ANTHROPIC_BASE_URL='https://u:p@gw.eu:8443/v1?a=1&b=%20'
   validate_opts
+}
+
+@test "gen_egress_managed_settings: under the --api sidecar, pins the sidecar's URL" {
+  ANTHROPIC_BASE_URL=https://gw.eu/v1 API_SIDECAR_ACTIVE=1
+  run gen_egress_managed_settings
+  [[ "$output" == *'"ANTHROPIC_BASE_URL": "http://claude-docker-api-proxy:8080",'* ]]
+  [[ "$output" != *gw.eu* ]]
 }
 
 @test "gen_egress_managed_settings: pins the endpoint and switches the other backends off" {
@@ -1189,6 +1224,17 @@ USER squid" ]
   done
 }
 
+@test "start_egress_sidecar: squid resolves the --glab and --api names to the auth sidecar" {
+  egress_setup
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com:8443 API_SIDECAR_ACTIVE=1 proxy_ip=10.0.0.9
+  start_egress_sidecar 2>/dev/null
+  local run_line
+  run_line=$(grep "^docker run -d --name claude-egress-proxy-x" "$CALLS")
+  [[ "$run_line" == *"--add-host gl.example.com:10.0.0.9 "* ]]
+  [[ "$run_line" == *"--add-host claude-docker-api-proxy:10.0.0.9 "* ]]
+  grep -q '"ANTHROPIC_BASE_URL": "http://claude-docker-api-proxy:8080"' "$stage/egress-managed-settings.json"
+}
+
 @test "start_egress_sidecar: squid gets the CLAUDE_DOCKER_ADD_HOSTS entries" {
   egress_setup
   ADD_HOSTS=(gitlab.example.com:10.1.2.3)
@@ -1198,13 +1244,13 @@ USER squid" ]
 
 @test "start_egress_sidecar: under --gh, ADD_HOSTS GitHub entries stay off squid" {
   egress_setup
-  GH_SIDECAR_ACTIVE=1 gh_proxy_ip=10.0.0.9
-  ADD_HOSTS=(GitHub.com:140.82.121.4 gitlab.example.com:10.1.2.3)
+  GH_SIDECAR_ACTIVE=1 API_SIDECAR_ACTIVE=1 proxy_ip=10.0.0.9
+  ADD_HOSTS=(GitHub.com:140.82.121.4 gitlab.example.com:10.1.2.3 claude-docker-api-proxy:10.9.9.9)
   start_egress_sidecar 2>/dev/null
   local run_line
   run_line=$(grep "^docker run -d --name claude-egress-proxy-x" "$CALLS")
   [[ "$run_line" == *"--add-host gitlab.example.com:10.1.2.3 "* ]]
-  [[ "$run_line" != *"140.82.121.4"* ]]
+  [[ "$run_line" != *"140.82.121.4"* ]] && [[ "$run_line" != *"10.9.9.9"* ]]
 }
 
 @test "start_egress_sidecar: proxy start failure aborts" {
@@ -1511,20 +1557,25 @@ YML
   export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu
   run_script --ephemeral --api "$WS"
   [ "$status" -eq 0 ]
-  run ! grep -q "^docker network create" "$CALLS"
-  run ! grep -q "^docker run -d" "$CALLS"
-  run ! grep -q "^docker run --rm .*proxy=" "$CALLS"
+  run ! grep -q "^docker network create.* claude-egress-" "$CALLS"
+  run ! grep -q "^docker run -d --name claude-egress-" "$CALLS"
+  run ! grep -q "^docker run --rm .*_proxy=" "$CALLS"
 }
 
 @test "main: --egress-lock starts the agent on the internal network, behind the proxy" {
   export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu/v1
-  STUB_LOGS="Accepting HTTP Socket connections"
+  STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
   run_script --ephemeral --api --egress-lock "$WS"
   [ "$status" -eq 0 ]
   local agent
   agent=$(grep "^docker run --rm" "$CALLS")
   [[ "$agent" == *"--network claude-egress-"* ]]
   [[ "$agent" == *"-e HTTPS_PROXY=http://10.0.0.2:3128"* ]]
+  # Model traffic goes to the auth sidecar, which squid resolves on the
+  # internal network.
+  [[ "$agent" == *"-e ANTHROPIC_BASE_URL=http://claude-docker-api-proxy:8080"* ]]
+  grep -q "^docker network connect claude-egress-[^ ]* claude-auth-proxy-" "$CALLS"
+  grep -q "^docker run -d --name claude-egress-proxy-.*--add-host claude-docker-api-proxy:10.0.0.2 " "$CALLS"
   # Networks, then the proxy, then the agent; teardown after it.
   [ "$(grep -n "^docker network create --internal" "$CALLS" | cut -d: -f1)" -lt \
     "$(grep -n "^docker run -d --name claude-egress-proxy-" "$CALLS" | cut -d: -f1)" ]
@@ -1537,7 +1588,7 @@ YML
 
 @test "main: --gh --egress-lock creates the internal network before the auth sidecar joins it" {
   export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu
-  STUB_LOGS="Accepting HTTP Socket connections"
+  STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
   run_script --ephemeral --gh --api --egress-lock "$WS"
   [ "$status" -eq 0 ]
   [ "$(grep -n "^docker network create --internal claude-egress-" "$CALLS" | cut -d: -f1)" -lt \
@@ -1551,7 +1602,7 @@ YML
 
 @test "main: a failing egress proxy stops before the agent starts" {
   export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu
-  STUB_LOGS="Starting Squid Cache"
+  STUB_LOGS=$'serving initial configuration\nStarting Squid Cache'
   run_script --ephemeral --api --egress-lock "$WS"
   [ "$status" -eq 1 ]
   [[ "$output" == *"was not accepting connections within 15s"* ]]
@@ -1559,6 +1610,18 @@ YML
   # The EXIT trap still cleans up what was created.
   grep -q "^docker rm -f claude-egress-proxy-" "$CALLS"
   grep -q "^docker network rm claude-egress-" "$CALLS"
+}
+
+@test "main: --api-direct --egress-lock starts no auth sidecar and pins the real endpoint" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu/v1
+  STUB_LOGS="Accepting HTTP Socket connections"
+  run_script --ephemeral --api-direct --egress-lock "$WS"
+  [ "$status" -eq 0 ]
+  run ! grep -q "^docker run -d --name claude-auth-proxy-" "$CALLS"
+  local agent
+  agent=$(grep "^docker run --rm" "$CALLS")
+  [[ "$agent" == *"--network claude-egress-"* ]]
+  [[ "$agent" != *"claude-docker-api-proxy"* ]]
 }
 
 @test "main: an invalid endpoint stops before any docker call" {
