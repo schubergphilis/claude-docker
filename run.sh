@@ -166,6 +166,8 @@ WITH_TFE=0
 WITH_AZ=0
 WITH_REGISTRY=0
 WITH_API=0
+# Flat key/value pairs, emitted as GIT_CONFIG_* env by build_git_config.
+GIT_CFG=()
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 MOUNT_ARGS=()
 # COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
@@ -364,7 +366,7 @@ detect_msys() {
     # Those same root-owned NTFS mounts trip git's ownership check ("detected
     # dubious ownership") in every workspace. GIT_CONFIG_* env is command-line
     # scope, which git honours for safe.directory; scoped to /workspaces only.
-    ENV_ARGS+=("-e" "GIT_CONFIG_COUNT=1" "-e" "GIT_CONFIG_KEY_0=safe.directory" "-e" "GIT_CONFIG_VALUE_0=/workspaces/*")
+    GIT_CFG+=(safe.directory "/workspaces/*")
   else
     HOST_UID=$(id -u)
     HOST_GID=$(id -g)
@@ -678,6 +680,37 @@ discover_tokens() {
       echo "claude-docker: --glab: glab not on host PATH, no GitLab token to forward; export GITLAB_TOKEN" >&2
     fi
   fi
+}
+
+# The forwarded forge tokens reach the CLIs but not git: over HTTPS, git has no
+# credential helper and fails with "could not read Username". Give it one per
+# opted-in forge, each scoped to that forge's host so git never offers a token
+# anywhere else. Under --gh the sidecar injects auth for github.com, so only
+# --gh-direct needs one. GIT_CONFIG_* env is command-line scope: nothing lands
+# in the persistent ~/.gitconfig. SSH remotes are left alone (no key or agent
+# in the container); docs/auth.md#ssh-remotes covers switching them to HTTPS.
+build_git_config() {
+  local host i=0
+  [ "$WITH_GH_DIRECT" = "1" ] && GIT_CFG+=(credential.https://github.com.helper "!gh auth git-credential")
+  if [ "$WITH_GLAB" = "1" ]; then
+    # discover_tokens has set GITLAB_HOST to the token's host when it found one.
+    host=${GITLAB_HOST:-gitlab.com}
+    host=${host#*://}; host=${host%%/*}
+    GIT_CFG+=("credential.https://$host.helper" "!glab auth git-credential")
+  fi
+  if [ "$WITH_AZ" = "1" ]; then
+    host=${AZURE_DEVOPS_ORG_URL:-https://dev.azure.com}
+    host=${host#*://}; host=${host%%/*}
+    # \$ stays literal: the PAT is read from env when git runs the helper, so it
+    # is never on argv or in the helper string.
+    GIT_CFG+=("credential.https://$host.helper" "!f() { test \"\$1\" = get && echo username=pat && echo \"password=\$AZURE_DEVOPS_EXT_PAT\"; }; f")
+  fi
+  while [ "$i" -lt "${#GIT_CFG[@]}" ]; do
+    ENV_ARGS+=("-e" "GIT_CONFIG_KEY_$((i / 2))=${GIT_CFG[i]}" "-e" "GIT_CONFIG_VALUE_$((i / 2))=${GIT_CFG[i + 1]}")
+    i=$((i + 2))
+  done
+  [ "$i" -gt 0 ] && ENV_ARGS+=("-e" "GIT_CONFIG_COUNT=$((i / 2))")
+  return 0
 }
 
 forward_git_identity() {
@@ -1271,6 +1304,7 @@ main() {
   build_cred_mounts
   build_env_args
   discover_tokens
+  build_git_config
   forward_git_identity
   build_flags_env
   create_stage
