@@ -1,6 +1,8 @@
 ## Summary
 
-<!-- What changes and why. -->
+<!-- What changes and why. If an issue exists for it, write `Closes #N`: only
+a closing keyword links the PR to the issue. If this PR resolves only part of
+the issue, open a sub-issue for that part and close the sub-issue instead. -->
 
 ## OpenSpec
 
