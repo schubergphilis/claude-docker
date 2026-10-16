@@ -1189,6 +1189,24 @@ USER squid" ]
   done
 }
 
+@test "start_egress_sidecar: squid gets the CLAUDE_DOCKER_ADD_HOSTS entries" {
+  egress_setup
+  ADD_HOSTS=(gitlab.example.com:10.1.2.3)
+  start_egress_sidecar 2>/dev/null
+  grep -q "^docker run -d --name claude-egress-proxy-x .*--add-host gitlab.example.com:10.1.2.3 " "$CALLS"
+}
+
+@test "start_egress_sidecar: under --gh, ADD_HOSTS GitHub entries stay off squid" {
+  egress_setup
+  GH_SIDECAR_ACTIVE=1 gh_proxy_ip=10.0.0.9
+  ADD_HOSTS=(GitHub.com:140.82.121.4 gitlab.example.com:10.1.2.3)
+  start_egress_sidecar 2>/dev/null
+  local run_line
+  run_line=$(grep "^docker run -d --name claude-egress-proxy-x" "$CALLS")
+  [[ "$run_line" == *"--add-host gitlab.example.com:10.1.2.3 "* ]]
+  [[ "$run_line" != *"140.82.121.4"* ]]
+}
+
 @test "start_egress_sidecar: proxy start failure aborts" {
   egress_setup
   STUB_FAIL="run"
