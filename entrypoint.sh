@@ -132,8 +132,11 @@ ensure_user() {
 # under /root. stderr is captured for the whole pipeline, so a failing
 # find warns too; LC_ALL=C pins the EROFS message the filter matches.
 chown_volumes() {
-  local uid=$1 gid=$2 chown_errs
-  chown_errs="$( { find "$ROOT_HOME" "$ROOT_HOME/.claude" -xdev -print0 \
+  local uid=$1 gid=$2 chown_errs roots=("$ROOT_HOME")
+  # /root/.claude is its own volume, absent under --ephemeral until something
+  # (a seeded settings.json) creates it.
+  [ -d "$ROOT_HOME/.claude" ] && roots+=("$ROOT_HOME/.claude")
+  chown_errs="$( { find "${roots[@]}" -xdev -print0 \
     | xargs -0 --no-run-if-empty chown -h "$uid:$gid"; } 2>&1 >/dev/null || true)"
   chown_errs="$(grep -v 'Read-only file system' <<<"$chown_errs" || true)"
   if [ -n "$chown_errs" ]; then
