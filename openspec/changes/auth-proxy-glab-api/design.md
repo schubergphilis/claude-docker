@@ -76,7 +76,7 @@ The early-exit detection (the container is gone, so dump its logs) is unchanged.
 
 ### 5. Sanitised glab config
 
-The existing `stage_glab_config` sed gains one more expression while the proxy is active. Every key matching `^\s*[A-Za-z0-9_]*token:` gets its value replaced by `""`. That catches `token`, `oauth2_refresh_token` and `job_token` for every host. Blanking only the proxied host would mean parsing YAML in shell; tokens for other hosts have no business in the container under `--glab` anyway.
+The existing `stage_glab_config` sed gains one more expression under `--glab`, also when no token was found. Every key matching `^\s*[A-Za-z0-9_]*token:` gets its value replaced by `""`. That catches `token`, `oauth2_refresh_token` and `job_token` for every host. Blanking only the proxied host would mean parsing YAML in shell; tokens for other hosts have no business in the container under `--glab` anyway.
 
 `glab` reads `GITLAB_TOKEN` from env ahead of config, so the placeholder wins. A blank `oauth2_refresh_token` can't trigger a refresh, because glab doesn't refresh env-supplied tokens. A task verifies this against an OAuth-logged-in config.
 
