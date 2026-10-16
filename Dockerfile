@@ -283,6 +283,7 @@ RUN . /tmp/az.env && . /tmp/azure-devops.env \
 COPY pins/npm.env /tmp/npm.env
 RUN . /tmp/npm.env \
  && npm install -g --ignore-scripts "npm@${NPM_VERSION}" \
+ && npm cache clean --force \
  && rm /tmp/npm.env
 
 # npm-backed CLIs — pinned versions. Trust = npm's signed dist.integrity;
@@ -314,6 +315,9 @@ RUN . /tmp/npm.env \
 # npm tools carry version-only pins (no sha256): npm install verifies the
 # registry-advertised dist.integrity (registry-integrity, not provenance; CI
 # runs `npm audit signatures`). All three share this layer, so they share a COPY.
+# Both npm layers end with `npm cache clean --force`: npm keeps every tarball it
+# fetched under /root/.npm/_cacache, about 200 MB here (the claude-code
+# platform package alone is 110 MB), which nothing in the image reads again.
 COPY pins/claude-code.env pins/openspec.env pins/pnpm.env /tmp/
 RUN . /tmp/claude-code.env && . /tmp/openspec.env && . /tmp/pnpm.env \
  && npm install -g --ignore-scripts \
@@ -328,6 +332,7 @@ RUN . /tmp/claude-code.env && . /tmp/openspec.env && . /tmp/pnpm.env \
       echo "install.js did not replace the placeholder — pnpm would run through node." >&2; \
       exit 1; \
     fi \
+ && npm cache clean --force \
  && rm /tmp/claude-code.env /tmp/openspec.env /tmp/pnpm.env
 
 # tfenv — pure-bash terraform version manager. Arch-independent (just
