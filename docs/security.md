@@ -55,7 +55,7 @@ The container narrows blast radius vs. running `claude --yolo` on the host, but 
 
 ## Image vulnerability scanning
 
-CI scans the built image for **known** vulnerabilities with [Trivy](https://trivy.dev), across the whole image filesystem: the Ubuntu base image's system packages, the pinned CLIs, and their transitive dependencies. This is a different question from the one [`update_pins.py`](../update_pins.py) answers — that reports when a *newer* version exists, while a pin can sit on the newest release and still carry a disclosed CVE. It is also a different question from the `npm audit signatures` check in [Updating pinned tool versions](maintenance.md#updating-pinned-tool-versions), which establishes that a tarball came from npm's keyring, not that the code inside it is free of known vulnerabilities.
+CI scans the built image for **known** vulnerabilities with [Trivy](https://trivy.dev), across the whole image filesystem: the Ubuntu base image's system packages, the pinned CLIs, and their transitive dependencies. This is a different question from the one [`scripts/update_pins.py`](../scripts/update_pins.py) answers — that reports when a *newer* version exists, while a pin can sit on the newest release and still carry a disclosed CVE. It is also a different question from the `npm audit signatures` check in [Updating pinned tool versions](maintenance.md#updating-pinned-tool-versions), which establishes that a tarball came from npm's keyring, not that the code inside it is free of known vulnerabilities.
 
 Each scan runs twice over the same image, with one policy:
 

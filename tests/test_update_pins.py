@@ -2,7 +2,7 @@
 # Copyright 2026 Schuberg Philis
 """Unit tests for the pure helpers in update_pins.py.
 
-No network, no Docker. The parent directory is put on sys.path so the script
+No network, no Docker. The repo's scripts/ directory is put on sys.path so the script
 imports as a normal module. Run with:
     python3 -m unittest discover -s tests
 """
@@ -21,7 +21,7 @@ import urllib.request
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
 import update_pins as up  # noqa: E402 — path set above
 

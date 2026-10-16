@@ -8,20 +8,20 @@
 
 The pins live in version-controlled fragments under [`pins/`](../pins/), one `pins/<tool>.env` per tool, which the Dockerfile `COPY`s and sources at build time — so `docker build` is reproducible from the committed files.
 
-Refresh them with [`update_pins.py`](../update_pins.py) (a single stdlib-only Python file, run via `uv`):
+Refresh them with [`scripts/update_pins.py`](../scripts/update_pins.py) (a single stdlib-only Python file, run via `uv`):
 
 ```bash
-uv run update_pins.py                      # refresh all tools (per-tool soak)
-uv run update_pins.py --soak 14            # one 14-day soak window for every tool
-uv run update_pins.py --block-major-bumps  # stay within each tool's current major
-uv run update_pins.py --pin uv=0.12.3      # pin one tool to a specific version
+uv run scripts/update_pins.py                      # refresh all tools (per-tool soak)
+uv run scripts/update_pins.py --soak 14            # one 14-day soak window for every tool
+uv run scripts/update_pins.py --block-major-bumps  # stay within each tool's current major
+uv run scripts/update_pins.py --pin uv=0.12.3      # pin one tool to a specific version
 ```
 
 For each tool it selects the newest stable version older than that tool's soak window, downloads the `amd64` and `arm64` artifacts, computes their sha256s, and rewrites `pins/<tool>.env`. The soak window gives a release time to be vetted (and a bad one pulled) before it enters the image. The window is 7 days for every tool except `claude-code`, which uses 1 day. Claude Code ships almost daily and most of its users update within hours, so a bad release is found and pulled within a day, and a 7-day pin only leaves the image behind. `--soak` sets one window for every tool in that run, `claude-code` included. The script prints a report — each `old → new` bump with its age, a `⬆ MAJOR` marker on major-version jumps, `held` lines for versions still inside the soak window, and `⚠` reminders for the manual pins — then review the diff, build to test, and commit. By default a major-version bump is taken once it has soaked; `--block-major-bumps` keeps a run within each tool's current major. Set `GITHUB_TOKEN` (or `GH_TOKEN`) to avoid GitHub's unauthenticated rate limit.
 
 The script also has a listing mode that exists for CI rather than for you: `--list-tools` prints one row per pinned tool with its pinned version, the command that asks it its version, the rule for reading a version out of the reply, and its kind and package reference (the npm supply-chain audit keeps the `npm` rows). CI's `Docker build` job runs every `--list-tools` probe against the image it just built and fails if a tool reports anything other than its pin — a successful install says nothing about whether the executable actually runs, and until this existed only `claude-code` was checked. Because the tool list and the probes come from the script, adding a tool to `pins/` extends that coverage without editing a workflow file.
 
-A weekly GitHub Actions run does the same thing unattended: [`pins-updater.yml`](../.github/workflows/pins-updater.yml) fires every Monday (and on demand via _Run workflow_, where you can override the soak window or ask for `--block-major-bumps`), runs the same script, and — if any pin moved — force-pushes the `bump/pins` branch and opens (or refreshes) a single PR carrying the script's full report. One long-lived branch on purpose: a stale pins PR proposes versions that the next refresh has already superseded, so the newest run replaces the open PR rather than stacking another one beside it. The workflow invokes the script as `python3 update_pins.py` on the runner's preinstalled interpreter — it is stdlib-only, so there is nothing for `uv` to resolve and no toolchain to install first. Review the diff and let CI build the image before merging; the manual pins the report flags under `⚠ needs your eyes` still need a separate, hand-written commit.
+A weekly GitHub Actions run does the same thing unattended: [`pins-updater.yml`](../.github/workflows/pins-updater.yml) fires every Monday (and on demand via _Run workflow_, where you can override the soak window or ask for `--block-major-bumps`), runs the same script, and — if any pin moved — force-pushes the `bump/pins` branch and opens (or refreshes) a single PR carrying the script's full report. One long-lived branch on purpose: a stale pins PR proposes versions that the next refresh has already superseded, so the newest run replaces the open PR rather than stacking another one beside it. The workflow invokes the script as `python3 scripts/update_pins.py` on the runner's preinstalled interpreter — it is stdlib-only, so there is nothing for `uv` to resolve and no toolchain to install first. Review the diff and let CI build the image before merging; the manual pins the report flags under `⚠ needs your eyes` still need a separate, hand-written commit.
 
 > **CI on the automated PR needs one click.** The PR is opened with the job's `GITHUB_TOKEN`, so GitHub holds its `pull_request` runs until a maintainer clicks _Approve and run_ on the PR. The required `Validate` and `Docker build (validate, no push)` checks report after that. Review the diff, then approve the run.
 

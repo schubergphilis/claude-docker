@@ -84,7 +84,7 @@ refresh run.
 
 - **GIVEN** the Dockerfile pins `GO_VERSION=1.26.6` and go.dev's newest stable
   release is `go1.27.0`
-- **WHEN** the operator runs `uv run update_pins.py`
+- **WHEN** the operator runs `uv run scripts/update_pins.py`
 - **THEN** the manual-pin reminder block reports the pinned version, the latest
   stable version, and that bumping it means updating the hashes too
 - **AND** no `pins/*.env` fragment is created for Go
@@ -98,7 +98,7 @@ refresh run.
 #### Scenario: reminder degrades gracefully without network
 
 - **GIVEN** go.dev is unreachable
-- **WHEN** the operator runs `uv run update_pins.py`
+- **WHEN** the operator runs `uv run scripts/update_pins.py`
 - **THEN** the Go reminder states that the latest stable version could not be
   resolved
 - **AND** the run continues and exits on the same status it otherwise would
