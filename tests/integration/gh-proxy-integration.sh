@@ -27,7 +27,7 @@
 #        contains the token, and the name run.sh prints matches the running
 #        container.
 #   4.5  two concurrent sessions get distinct networks/sidecars/CA roots, both
-#        work, and teardown leaves no claude-gh-* resources.
+#        work, and teardown leaves no claude-auth-* resources.
 #   4.6  --gh-direct forwards the real token with no sidecar; --gh with no
 #        discoverable host token starts no sidecar and stays silent; --gh
 #        --gh-direct together is rejected; a bad CLAUDE_DOCKER_PROXY_IMAGE
@@ -35,6 +35,12 @@
 #   #22  release-asset HEAD probes leave the sidecar with no Authorization
 #        header while the GET on the same path keeps the injected Basic one,
 #        and UV_SYSTEM_CERTS=1 reaches the agent container.
+#   phase 5 (openspec/changes/auth-proxy-glab-api): --glab and --api share one
+#        sidecar; placeholders in the agent env, fake credentials absent from
+#        /proc/1/environ and the audit log, Bearer on GitLab /api/, Basic on
+#        git paths, nothing on web paths, URL-encoded project DELETE blocked
+#        before the mock, gateway path prefix kept with the key injected and
+#        a stray bearer dropped.
 #
 # Known deviations / assumptions (see the final report to the orchestrator for
 # the full list):
@@ -119,6 +125,8 @@ FAKE1="ghp_fakeMainSessionToken0000000000000001"
 FAKE_A="ghp_fakeConcurrentSessionTokenA00000001"
 FAKE_B="ghp_fakeConcurrentSessionTokenB00000002"
 FAKE_DIRECT="ghp_fakeGhDirectToken000000000000000001"
+FAKE_GLAB="glpat-fakeGlabProxyToken00000000000001"
+FAKE_API="sk-ant-fakeApiProxyKey000000000000000001"
 
 # ---------------------------------------------------------------------------
 # Result bookkeeping
@@ -180,25 +188,28 @@ setup_scratch() {
   fi
 }
 
-# Removes STOPPED claude-gh-* sidecars and unused networks — mirrors run.sh's
+# Removes STOPPED claude-auth-* sidecars and unused networks — mirrors run.sh's
 # own startup prune (same prefix, same stopped-only rationale). CRITICAL: never
-# touches a RUNNING claude-gh-proxy-* container, because that almost certainly
+# touches a RUNNING claude-auth-proxy-* container, because that almost certainly
 # belongs to a concurrent live `claude-docker --gh` session on this same host
 # (e.g. the one you may be running this from) — force-removing it would sever
 # that session's GitHub access mid-flight. Network rm is best-effort and fails
 # harmlessly on an in-use network (a live session's), so only genuinely orphaned
 # networks are removed. Called at pre-flight (so a prior crashed run of THIS
 # harness can't confuse discovery) and from the exit trap (backstop only).
-sweep_stale_claude_gh() {
-  local cid nid
-  docker ps -aq --filter "name=^claude-gh-proxy-" \
-      --filter "status=exited" --filter "status=created" --filter "status=dead" \
-      2>/dev/null | while IFS= read -r cid; do
-    [ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true
-  done || true
-  docker network ls -q --filter "name=^claude-gh-" 2>/dev/null | while IFS= read -r nid; do
-    [ -z "$nid" ] || docker network rm "$nid" >/dev/null 2>&1 || true
-  done || true
+sweep_stale_claude_auth() {
+  local prefix cid nid
+  # claude-gh-* is the name the sidecar had before it served --glab / --api.
+  for prefix in claude-auth claude-gh; do
+    docker ps -aq --filter "name=^$prefix-proxy-" \
+        --filter "status=exited" --filter "status=created" --filter "status=dead" \
+        2>/dev/null | while IFS= read -r cid; do
+      [ -z "$cid" ] || docker rm -f "$cid" >/dev/null 2>&1 || true
+    done || true
+    docker network ls -q --filter "name=^$prefix-" 2>/dev/null | while IFS= read -r nid; do
+      [ -z "$nid" ] || docker network rm "$nid" >/dev/null 2>&1 || true
+    done || true
+  done
 }
 
 # Signals $1 and all its descendants, children first. Killing the process
@@ -228,7 +239,7 @@ cleanup() {
   fi
   wait 2>/dev/null || true
   [ -z "$MOCK_CID" ] || docker rm -f "$MOCK_CID" >/dev/null 2>&1 || true
-  sweep_stale_claude_gh
+  sweep_stale_claude_auth
   # Keep the scratch dir (session transcripts, captured sidecar/mock logs,
   # results files) whenever anything failed — it's the only debugging
   # evidence, and several artifacts in it can't be regenerated after the
@@ -241,7 +252,7 @@ cleanup() {
   fi
 }
 
-# Baseline: claude-gh-* resources that already exist AFTER the sweep — i.e. a
+# Baseline: claude-auth-* resources that already exist AFTER the sweep — i.e. a
 # concurrent live `claude-docker --gh` session's network/sidecar on this host
 # (the sweep leaves running sidecars alone). They legitimately persist for the
 # whole run, so teardown assertions must judge "clean" as "nothing NEW beyond
@@ -250,12 +261,12 @@ cleanup() {
 BASELINE_NETS=" "
 BASELINE_SIDECARS=" "
 capture_baseline() {
-  echo "Pre-flight: sweeping any stale claude-gh-* resources from a previous run..."
-  sweep_stale_claude_gh
-  BASELINE_NETS=" $(snapshot_claude_gh_nets)"
-  BASELINE_SIDECARS=" $({ docker ps -a --filter 'name=claude-gh-proxy-' --format '{{.Names}}' 2>/dev/null || true; } | tr '\n' ' ')"
+  echo "Pre-flight: sweeping any stale claude-auth-* resources from a previous run..."
+  sweep_stale_claude_auth
+  BASELINE_NETS=" $(snapshot_claude_auth_nets)"
+  BASELINE_SIDECARS=" $({ docker ps -a --filter 'name=claude-auth-proxy-' --format '{{.Names}}' 2>/dev/null || true; } | tr '\n' ' ')"
   if [ -n "$(printf '%s' "$BASELINE_NETS" | tr -d ' ')" ]; then
-    echo "Pre-flight: detected pre-existing claude-gh-* resources (likely a live --gh session) — excluding from teardown checks:$BASELINE_NETS"
+    echo "Pre-flight: detected pre-existing claude-auth-* resources (likely a live --gh session) — excluding from teardown checks:$BASELINE_NETS"
   fi
 }
 
@@ -330,36 +341,36 @@ wait_for_container_running() {
   return 1
 }
 
-# Space-separated list of claude-gh-* resources that exist now but were NOT in
+# Space-separated list of claude-auth-* resources that exist now but were NOT in
 # the pre-existing baseline — i.e. resources this harness created and failed to
 # clean up. Empty means clean. A concurrent live session (in the baseline) is
 # correctly ignored.
-new_claude_gh_leftovers() {
+new_claude_auth_leftovers() {
   local n c out=""
-  for n in $(docker network ls --filter 'name=claude-gh-' --format '{{.Name}}' 2>/dev/null); do
+  for n in $(docker network ls --filter 'name=claude-auth-' --format '{{.Name}}' 2>/dev/null); do
     case "$BASELINE_NETS" in *" $n "*) ;; *) out="$out net:$n" ;; esac
   done
-  for c in $(docker ps -a --filter 'name=claude-gh-proxy-' --format '{{.Names}}' 2>/dev/null); do
+  for c in $(docker ps -a --filter 'name=claude-auth-proxy-' --format '{{.Names}}' 2>/dev/null); do
     case "$BASELINE_SIDECARS" in *" $c "*) ;; *) out="$out container:$c" ;; esac
   done
   printf '%s' "${out# }"
 }
 
-no_new_claude_gh_resources() {
-  [ -z "$(new_claude_gh_leftovers)" ]
+no_new_claude_auth_resources() {
+  [ -z "$(new_claude_auth_leftovers)" ]
 }
 
-wait_for_absence_claude_gh() {
+wait_for_absence_claude_auth() {
   local timeout="$1" i=0
   while [ "$i" -lt "$timeout" ]; do
-    no_new_claude_gh_resources && return 0
+    no_new_claude_auth_resources && return 0
     i=$((i + 1))
     sleep 1
   done
   return 1
 }
 
-# Polls `docker network ls` for a claude-gh-* network not already named in
+# Polls `docker network ls` for a claude-auth-* network not already named in
 # $2 (space-separated). Session ids are mktemp suffixes chosen by run.sh
 # itself and unknowable ahead of time, so discovery is the only option; the
 # pre-flight sweep above plus this exclude-list keep concurrent-session
@@ -367,7 +378,7 @@ wait_for_absence_claude_gh() {
 poll_new_network() {
   local timeout="$1" exclude="$2" i=0 candidates line
   while [ "$i" -lt "$timeout" ]; do
-    candidates=$(docker network ls --filter "name=claude-gh-" --format '{{.Name}}' 2>/dev/null) || candidates=""
+    candidates=$(docker network ls --filter "name=claude-auth-" --format '{{.Name}}' 2>/dev/null) || candidates=""
     while IFS= read -r line; do
       [ -z "$line" ] && continue
       case " $exclude " in
@@ -382,14 +393,14 @@ poll_new_network() {
   return 1
 }
 
-# Space-delimited snapshot of the claude-gh-* networks that exist RIGHT NOW.
+# Space-delimited snapshot of the claude-auth-* networks that exist RIGHT NOW.
 # Captured immediately before launching a run.sh and fed to poll_new_network as
 # the exclude list, so a network stranded by an earlier interrupted run (which
 # the pre-flight sweep cannot remove while a wedged sidecar still holds it)
 # can never be misidentified as this session's freshly-created network — the
 # failure mode that otherwise cascades into wrong-network mock attachment.
-snapshot_claude_gh_nets() {
-  { docker network ls --filter "name=claude-gh-" --format '{{.Name}}' 2>/dev/null || true; } | tr '\n' ' '
+snapshot_claude_auth_nets() {
+  { docker network ls --filter "name=claude-auth-" --format '{{.Name}}' 2>/dev/null || true; } | tr '\n' ' '
 }
 
 # Builds a PATH whose first entry holds an always-failing `gh` stub, for the
@@ -427,6 +438,7 @@ gen_assert_script() {
     printf 'set -uo pipefail\n'
     printf 'MODE=%q\n' "$mode"
     printf 'FAKE_TOKEN=%q\n' "$fake"
+    printf 'FAKE_API=%q\n' "$FAKE_API"
     printf 'POLICY_EXT=%q\n' "$policy_ext"
     printf 'RESULTS=%q\n' "$results"
     printf 'DONE_MARKER=%q\n' "$done_marker"
@@ -603,7 +615,76 @@ run_concurrent_check() {
   fi
 }
 
+# --glab + --api through one sidecar. The GitLab host is gitlab.example.test
+# (redirected to the sidecar by --add-host, upstream repointed at the mock via
+# CLAUDE_DOCKER_GLAB_UPSTREAM); the model endpoint is the mock at /gw.
+run_glabapi_checks() {
+  [ "${GITLAB_TOKEN:-}" = "claude-docker-proxy" ] \
+    && pass "glab: placeholder GITLAB_TOKEN in agent env" \
+    || fail "glab: GITLAB_TOKEN expected 'claude-docker-proxy', got '${GITLAB_TOKEN:-<unset>}'"
+  [ "${ANTHROPIC_API_KEY:-}" = "claude-docker-proxy" ] \
+    && pass "api: placeholder ANTHROPIC_API_KEY in agent env" \
+    || fail "api: ANTHROPIC_API_KEY expected 'claude-docker-proxy', got '${ANTHROPIC_API_KEY:-<unset>}'"
+  [ "${ANTHROPIC_BASE_URL:-}" = "http://claude-docker-api-proxy:8080" ] \
+    && pass "api: ANTHROPIC_BASE_URL points at the sidecar" \
+    || fail "api: ANTHROPIC_BASE_URL is '${ANTHROPIC_BASE_URL:-<unset>}'"
+  if grep -aq -e "$FAKE_TOKEN" -e "$FAKE_API" /proc/1/environ 2>/dev/null; then
+    fail "glab/api: a fake host credential is in /proc/1/environ"
+  else
+    pass "glab/api: neither fake host credential is in /proc/1/environ"
+  fi
+
+  local i=0 out=""
+  while [ "$i" -lt 40 ]; do
+    out=$(curl -sS --max-time 5 -H 'PRIVATE-TOKEN: claude-docker-proxy' https://gitlab.example.test/api/v4/user 2>/dev/null) && break
+    out=""; i=$((i + 1)); sleep 1
+  done
+  case "$out" in
+    *"\"authorization\":\"Bearer $FAKE_TOKEN\""*'"private_token":""'*) pass "glab: /api/ got the injected Bearer header and no PRIVATE-TOKEN (TLS verified, no -k)" ;;
+    *) fail "glab: unexpected echo for /api/v4/user: ${out:-<no response>}" ;;
+  esac
+  if command -v glab >/dev/null 2>&1; then
+    out=$(GLAB_CHECK_UPDATE=false glab api /user 2>&1)
+    case "$out" in
+      *"Bearer $FAKE_TOKEN"*) pass "glab: the glab CLI reached the sidecar and got the injected header" ;;
+      *) fail "glab: glab api /user: $out" ;;
+    esac
+  else
+    skip "glab: glab not on PATH in this image"
+  fi
+  out=$(curl -sS --max-time 10 https://gitlab.example.test/g/p.git/info/refs?service=git-upload-pack 2>/dev/null)
+  case "$out" in
+    *'"authorization":"Basic '*) pass "glab: git smart-HTTP path got the injected Basic header" ;;
+    *) fail "glab: git path echo: $out" ;;
+  esac
+  out=$(curl -sS --max-time 10 -H 'Authorization: Bearer stray' https://gitlab.example.test/g/p/-/tree/main 2>/dev/null)
+  case "$out" in
+    *'"authorization":""'*) pass "glab: web path carries no credential" ;;
+    *) fail "glab: web path echo: $out" ;;
+  esac
+  local code
+  code=$(curl -sS --max-time 10 -o /tmp/glab_del.$$ -w '%{http_code}' -X DELETE 'https://gitlab.example.test/api/v4/projects/g%2Fp' 2>/dev/null)
+  if [ "$code" = 403 ] && grep -q "claude-docker glab-proxy policy" /tmp/glab_del.$$; then
+    pass "glab: default policy blocks DELETE /api/v4/projects/g%2Fp"
+  else
+    fail "glab: DELETE /api/v4/projects/g%2Fp got $code"
+  fi
+  rm -f /tmp/glab_del.$$
+
+  out=$(curl -sS --max-time 10 -X POST -H 'x-api-key: claude-docker-proxy' -H 'Authorization: Bearer oauth-from-volume' \
+    -d '{}' http://claude-docker-api-proxy:8080/v1/messages 2>/dev/null)
+  case "$out" in
+    *'"path":"/gw/v1/messages"'*'"authorization":""'*"\"x_api_key\":\"$FAKE_API\""*) pass "api: prefix kept, key injected, stray bearer dropped" ;;
+    *) fail "api: unexpected echo for /v1/messages: ${out:-<no response>}" ;;
+  esac
+}
+
 case "$MODE" in
+  glabapi)
+    run_glabapi_checks
+    touch "$DONE_MARKER"
+    wait_for_release
+    ;;
   main)
     run_main_checks
     touch "$DONE_MARKER"
@@ -668,7 +749,7 @@ start_mock() {
 		format json
 	}
 
-	respond "{\"method\":\"{http.request.method}\",\"path\":\"{http.request.uri.path}\",\"query\":\"{http.request.uri.query}\",\"authorization\":\"{http.request.header.Authorization}\"}" 200
+	respond "{\"method\":\"{http.request.method}\",\"host\":\"{http.request.host}\",\"path\":\"{http.request.uri.path}\",\"query\":\"{http.request.uri.query}\",\"authorization\":\"{http.request.header.Authorization}\",\"private_token\":\"{http.request.header.PRIVATE-TOKEN}\",\"x_api_key\":\"{http.request.header.X-Api-Key}\"}" 200
 }
 CADDYFILE
 
@@ -715,7 +796,7 @@ phase1_main_session() {
 respond @claude_docker_test_policy_ext "claude-docker gh-proxy policy (test extension): destructive ref deletion blocked" 403
 POLICY
 
-  pre=$(snapshot_claude_gh_nets)
+  pre=$(snapshot_claude_auth_nets)
   run_wrapped "$log" env \
     GH_TOKEN="$FAKE1" \
     CLAUDE_DOCKER_RUNTIME=docker \
@@ -729,15 +810,15 @@ POLICY
 
   net=$(poll_new_network 30 "$pre") || net=""
   if [ -n "$net" ]; then
-    record_pass "setup: session network '$net' appeared (task 2.1 naming: claude-gh-<id>)"
+    record_pass "setup: session network '$net' appeared (task 2.1 naming: claude-auth-<id>)"
     if docker network connect --alias ghmock "$net" "$MOCK_CID" 2>/dev/null; then
       record_pass "setup: mock attached to $net as alias 'ghmock'"
     else
       record_fail "setup: could not attach mock to $net"
     fi
-    sidecar="claude-gh-proxy-${net#claude-gh-}"
+    sidecar="claude-auth-proxy-${net#claude-auth-}"
     if wait_for_container_running "$sidecar" 15; then
-      record_pass "4.4 sidecar '$sidecar' is running (task 2.1 naming: claude-gh-proxy-<id>)"
+      record_pass "4.4 sidecar '$sidecar' is running (task 2.1 naming: claude-auth-proxy-<id>)"
     else
       record_fail "4.4 derived sidecar name '$sidecar' never appeared as a running container"
       sidecar=""
@@ -858,7 +939,7 @@ POLICY
 # $2 fake token. Sets PID and NET (empty when the network never appeared).
 start_concurrent_session() {
   local ws_name="$1" fake="$2" pre
-  pre=$(snapshot_claude_gh_nets)
+  pre=$(snapshot_claude_auth_nets)
   run_wrapped "$SCRATCH/run-$ws_name.log" env \
     GH_TOKEN="$fake" \
     CLAUDE_DOCKER_RUNTIME=docker \
@@ -908,11 +989,11 @@ phase2_concurrent() {
   fi
 
   if [ -n "$net_a" ]; then
-    sidecar_a="claude-gh-proxy-${net_a#claude-gh-}"
+    sidecar_a="claude-auth-proxy-${net_a#claude-auth-}"
     if wait_for_file "$ws_a/checks-done" 90; then ok_a=1; fi
   fi
   if [ -n "$net_b" ]; then
-    sidecar_b="claude-gh-proxy-${net_b#claude-gh-}"
+    sidecar_b="claude-auth-proxy-${net_b#claude-auth-}"
     if wait_for_file "$ws_b/checks-done" 90; then ok_b=1; fi
   fi
 
@@ -953,10 +1034,10 @@ phase2_concurrent() {
   ingest_results_file "$ws_a/results.txt" "concurrent-A"
   ingest_results_file "$ws_b/results.txt" "concurrent-B"
 
-  if wait_for_absence_claude_gh 20; then
-    record_pass "4.5 teardown: no claude-gh-* containers or networks remain after both sessions exit"
+  if wait_for_absence_claude_auth 20; then
+    record_pass "4.5 teardown: no claude-auth-* containers or networks remain after both sessions exit"
   else
-    record_fail "4.5 teardown: harness-created claude-gh-* leftovers remain (baseline/live-session resources excluded): [$(new_claude_gh_leftovers)]"
+    record_fail "4.5 teardown: harness-created claude-auth-* leftovers remain (baseline/live-session resources excluded): [$(new_claude_auth_leftovers)]"
   fi
 }
 
@@ -974,7 +1055,7 @@ run_wrapped_wait() {
 
 # ===========================================================================
 # Phase 3 (task 4.6): --gh-direct, no-token silence, flag conflict, bad image.
-# Run only after phase 1/2 have fully torn down, so "no claude-gh-* resources"
+# Run only after phase 1/2 have fully torn down, so "no claude-auth-* resources"
 # checks below aren't confused by an unrelated leftover from an earlier phase.
 # ===========================================================================
 phase3_flags() {
@@ -995,10 +1076,10 @@ phase3_flags() {
     bash "$RUN_SH" --gh-direct "$ws"
   record_rc_zero "$RC" "4.6 --gh-direct session"
   ingest_results_file "$ws/results.txt" "gh-direct"
-  if no_new_claude_gh_resources; then
-    record_pass "4.6 --gh-direct started no claude-gh-* sidecar or network"
+  if no_new_claude_auth_resources; then
+    record_pass "4.6 --gh-direct started no claude-auth-* sidecar or network"
   else
-    record_fail "4.6 --gh-direct unexpectedly left claude-gh-* resources behind"
+    record_fail "4.6 --gh-direct unexpectedly left claude-auth-* resources behind"
   fi
 
   # 4.6.b: --gh with no discoverable host token — silent, no sidecar.
@@ -1021,10 +1102,10 @@ phase3_flags() {
     record_pass "4.6 --gh with no host token printed no error-like output"
   fi
   ingest_results_file "$ws/results.txt" "gh-no-token"
-  if no_new_claude_gh_resources; then
+  if no_new_claude_auth_resources; then
     record_pass "4.6 --gh with no host token started no sidecar or network"
   else
-    record_fail "4.6 --gh with no host token unexpectedly left claude-gh-* resources behind"
+    record_fail "4.6 --gh with no host token unexpectedly left claude-auth-* resources behind"
   fi
 
   # 4.6.c: --gh and --gh-direct together are rejected before anything starts.
@@ -1043,10 +1124,10 @@ phase3_flags() {
   else
     record_fail "4.6 --gh --gh-direct rejection message doesn't clearly name both flags (see $log)"
   fi
-  if no_new_claude_gh_resources; then
+  if no_new_claude_auth_resources; then
     record_pass "4.6 --gh --gh-direct started no container or sidecar"
   else
-    record_fail "4.6 --gh --gh-direct unexpectedly left claude-gh-* resources behind"
+    record_fail "4.6 --gh --gh-direct unexpectedly left claude-auth-* resources behind"
   fi
 
   # 4.6.d: sidecar start failure (unresolvable pinned image) fails closed.
@@ -1072,10 +1153,91 @@ phase3_flags() {
   else
     record_pass "4.6 agent container never started when the sidecar failed to start (fail-closed)"
   fi
-  if no_new_claude_gh_resources; then
-    record_pass "4.6 sidecar start failure left no claude-gh-* resources behind"
+  if no_new_claude_auth_resources; then
+    record_pass "4.6 sidecar start failure left no claude-auth-* resources behind"
   else
-    record_fail "4.6 sidecar start failure left claude-gh-* resources behind"
+    record_fail "4.6 sidecar start failure left claude-auth-* resources behind"
+  fi
+}
+
+# ===========================================================================
+# Phase 5: --glab and --api through the same sidecar (glab-auth-proxy,
+# api-auth-proxy). The mock answers for GitLab and the model gateway too.
+# ===========================================================================
+phase5_glab_api() {
+  echo
+  echo "=== Phase 5: --glab + --api through one sidecar ==="
+
+  local ws="$SCRATCH/ghtest-glabapi" log="$SCRATCH/run5.log" home="$SCRATCH/home5"
+  local pre net sidecar="" pid rc=0
+  mkdir -p "$ws" "$home"
+  gen_assert_script "$ws/assert.sh" glabapi "$FAKE_GLAB" "0"
+  pre=$(snapshot_claude_auth_nets)
+  # A HOME of its own, so host glab config can't change which host is proxied.
+  run_wrapped "$log" env \
+    HOME="$home" \
+    GITLAB_TOKEN="$FAKE_GLAB" \
+    GITLAB_HOST=gitlab.example.test \
+    ANTHROPIC_API_KEY="$FAKE_API" \
+    ANTHROPIC_BASE_URL="http://ghmock:8080/gw" \
+    CLAUDE_DOCKER_RUNTIME=docker \
+    CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
+    CLAUDE_DOCKER_GLAB_UPSTREAM="http://ghmock:8080" \
+    CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-glabapi/assert.sh" \
+    bash "$RUN_SH" --ephemeral --glab --api "$ws" &
+  pid=$!
+  BG_PIDS+=("$pid")
+
+  net=$(poll_new_network 30 "$pre") || net=""
+  if [ -n "$net" ]; then
+    docker network connect --alias ghmock "$net" "$MOCK_CID" 2>/dev/null \
+      || record_fail "phase 5: could not attach mock to $net"
+    sidecar="claude-auth-proxy-${net#claude-auth-}"
+    if wait_for_container_running "$sidecar" 15; then
+      record_pass "phase 5: one sidecar '$sidecar' serves --glab and --api"
+    else
+      record_fail "phase 5: sidecar '$sidecar' never ran"
+      sidecar=""
+    fi
+    if [ "$({ docker ps --filter "name=^claude-auth-proxy-${net#claude-auth-}$" -q 2>/dev/null || true; } | wc -l | tr -d ' ')" = 1 ]; then
+      record_pass "phase 5: exactly one sidecar container for the session"
+    else
+      record_fail "phase 5: expected exactly one sidecar for the session"
+    fi
+    wait_for_file "$ws/checks-done" 90 || record_fail "phase 5: in-container checks never finished"
+    if [ -n "$sidecar" ]; then docker logs "$sidecar" >"$SCRATCH/sidecar5.log" 2>&1 || true; fi
+    docker logs "$MOCK_CID" >"$SCRATCH/mock-phase5.log" 2>&1 || true
+    docker network disconnect "$net" "$MOCK_CID" >/dev/null 2>&1 || true
+    touch "$ws/release"
+  else
+    record_fail "phase 5: session network never appeared within 30s"
+  fi
+  wait "$pid" || rc=$?
+  record_rc_zero "$rc" "phase 5: run.sh" "$log"
+  ingest_results_file "$ws/results.txt" "glab+api-session"
+  if [ -f "$SCRATCH/sidecar5.log" ]; then
+    if grep -qF -e "$FAKE_GLAB" -e "$FAKE_API" "$SCRATCH/sidecar5.log"; then
+      record_fail "phase 5: sidecar audit log leaks a fake credential"
+    else
+      record_pass "phase 5: sidecar audit log contains neither fake credential"
+    fi
+    if grep -q '"host":"gitlab.example.test"' "$SCRATCH/sidecar5.log"; then
+      record_pass "phase 5: audit log names the GitLab host"
+    else
+      record_fail "phase 5: audit log has no gitlab.example.test entry"
+    fi
+  fi
+  # grep -c, not -q: under pipefail an early-exiting -q can SIGPIPE the first grep.
+  if [ -f "$SCRATCH/mock-phase5.log" ] \
+     && [ "$(grep -F '"uri":"/api/v4/projects/g%2Fp"' "$SCRATCH/mock-phase5.log" | grep -cF '"method":"DELETE"' || true)" != 0 ]; then
+    record_fail "phase 5: the blocked project DELETE reached the mock"
+  else
+    record_pass "phase 5: the blocked project DELETE never reached the mock"
+  fi
+  if wait_for_absence_claude_auth 20; then
+    record_pass "phase 5: teardown left no claude-auth-* resources"
+  else
+    record_fail "phase 5: claude-auth-* leftovers: [$(new_claude_auth_leftovers)]"
   fi
 }
 
@@ -1103,6 +1265,7 @@ main() {
   phase1_main_session
   phase2_concurrent
   phase3_flags
+  phase5_glab_api
   summary
 }
 
