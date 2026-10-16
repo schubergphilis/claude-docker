@@ -1,0 +1,5 @@
+---
+# Every markdownlint rule is off for this folder (default: false).
+# Archived OpenSpec changes are history, in OpenSpec's own format: delta
+# specs start at "## ADDED Requirements" and proposals at "## Why".
+default: false

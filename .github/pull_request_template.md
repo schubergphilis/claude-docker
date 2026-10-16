@@ -1,3 +1,7 @@
+<!-- MD041 (first line must be a top-level heading) is off for the next line
+only: GitHub pastes this template into the PR description, under the PR
+title, so it starts at a section heading. -->
+<!-- markdownlint-disable-next-line MD041 -->
 ## Summary
 
 <!-- What changes and why. If an issue exists for it, write `Closes #N`: only
