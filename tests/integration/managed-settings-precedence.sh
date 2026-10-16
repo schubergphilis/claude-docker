@@ -13,11 +13,11 @@
 # proves nothing. Re-run it when the claude-code pin moves: precedence and the
 # set of backends are Claude Code's, not ours.
 #
-# Usage: IMAGE=<tag> bash tests/managed-settings-precedence.sh
+# Usage: IMAGE=<tag> bash tests/integration/managed-settings-precedence.sh
 set -euo pipefail
 
 IMAGE="${IMAGE:-claude-code:local}"
-REPO="$(cd "$(dirname "$0")/.." && pwd)"
+REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 

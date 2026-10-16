@@ -184,7 +184,7 @@ jobs:
         # proves, against the image's pinned claude-code, that they beat every
         # project override (settings.json, settings.local.json, --settings) and
         # the Bedrock/Vertex/Foundry backends. --network none; loopback only.
-        run: IMAGE=claude-docker:ci bash tests/managed-settings-precedence.sh
+        run: IMAGE=claude-docker:ci bash tests/integration/managed-settings-precedence.sh
 
       - name: Tag the --egress-lock proxy image for scanning
         # run.sh built it during the egress smoke above, named by its
