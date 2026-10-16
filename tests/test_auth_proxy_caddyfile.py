@@ -233,9 +233,34 @@ class SidecarBehaviourTest(unittest.TestCase):
         else:
             self.fail("caddy did not become ready:\n" + self.log.read_text())
         self.glab_ctx = ssl.create_default_context(cafile=str(root))
+        # The root exists before the site's leaf is issued; a handshake in
+        # between gets TLSV1_ALERT_INTERNAL_ERROR. Ready means one succeeds.
+        while True:
+            try:
+                with socket.create_connection(("127.0.0.1", self.glab_port), timeout=2) as sock:
+                    self.glab_ctx.wrap_socket(sock, server_hostname="gl.example.test").close()
+                break
+            except (OSError, ssl.SSLError) as e:
+                self.assertIsNone(proc.poll(), self.log.read_text())
+                if time.time() >= deadline:
+                    self.fail(f"caddy never completed a TLS handshake ({e}):\n" + self.log.read_text())
+                time.sleep(0.1)
         return caddy_dir
 
     # -- helpers --
+
+    def audit_log(self, want, timeout=5):
+        """Poll the log until an access entry satisfies want; returns (log text, entries)."""
+        deadline = time.time() + timeout
+        while True:
+            log = self.log.read_text()
+            # Complete lines only: Caddy may be mid-write on the last one.
+            entries = [json.loads(line) for line in log.split("\n")[:-1] if '"handled request"' in line]
+            if any(want(e) for e in entries):
+                return log, entries
+            if time.time() >= deadline:
+                self.fail("no matching access log entry:\n" + log)
+            time.sleep(0.05)
 
     def glab(self, method, path, headers=None):
         """Request through the glab site; returns (status, upstream echo or body)."""
@@ -344,12 +369,9 @@ class SidecarBehaviourTest(unittest.TestCase):
 
     def test_glab_audit_log_has_requests_but_no_secrets(self):
         self._start()
-        self.glab("GET", "/api/v4/user", {"PRIVATE-TOKEN": "claude-docker-proxy"})
-        time.sleep(0.2)
-        log = self.log.read_text()
-        entries = [json.loads(line) for line in log.splitlines() if '"handled request"' in line]
-        self.assertTrue(any(e["request"]["host"].startswith("gl.example.test")
-                            and e["request"]["uri"] == "/api/v4/user" and e["status"] == 200 for e in entries))
+        self.assertEqual(self.glab("GET", "/api/v4/user", {"PRIVATE-TOKEN": "claude-docker-proxy"})[0], 200)
+        log, entries = self.audit_log(lambda e: e["request"]["host"].startswith("gl.example.test")
+                                      and e["request"]["uri"] == "/api/v4/user" and e["status"] == 200)
         self.assertTrue(all("headers" not in e["request"] for e in entries))
         self.assertNotIn("glpat-real", log)
         self.assertNotIn("claude-docker-proxy", log)
@@ -390,11 +412,8 @@ class SidecarBehaviourTest(unittest.TestCase):
 
     def test_api_audit_log_has_no_secrets(self):
         self._start(api_ca=True)
-        self.api("/v1/messages", {"x-api-key": "claude-docker-proxy", "X-Custom": "custom-secret"})
-        time.sleep(0.2)
-        log = self.log.read_text()
-        entries = [json.loads(line) for line in log.splitlines() if '"handled request"' in line]
-        self.assertTrue(any(e["request"]["method"] == "POST" and e["status"] == 200 for e in entries))
+        self.assertEqual(self.api("/v1/messages", {"x-api-key": "claude-docker-proxy", "X-Custom": "custom-secret"})[0], 200)
+        log, _ = self.audit_log(lambda e: e["request"]["method"] == "POST" and e["status"] == 200)
         for secret in ("sk-real", "custom-secret"):
             self.assertNotIn(secret, log)
 
