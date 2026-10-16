@@ -661,7 +661,7 @@ check_egress() {
   assert_eq "egress-provider: CONNECT claude.ai refused by proxy" \
     "$(egress_code http_connect https://claude.ai/)" "403"
   # Claude Code's managed settings pin the endpoint over any project setting
-  # (tests/managed-settings-precedence.sh proves the precedence). Here: they
+  # (tests/integration/managed-settings-precedence.sh proves the precedence). Here: they
   # are present, name this session's endpoint and switch the other backends
   # off, and the agent can neither change them nor add a file beside them.
   local ms=/etc/claude-code/managed-settings.json ms_json
