@@ -42,7 +42,7 @@ Credential flags (`--aws`, `--gh`, …) are covered in [Credential opt-in](auth.
 | `--ephemeral` | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
 | `--ro`        | Mount every workspace read-only. Prevents the agent from modifying your code.                                               |
 
-`--ro` does **not** block credential flags or restrict network egress — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
+`--ro` does **not** block credential flags or restrict network egress (only `--egress-lock` does, see [API egress lock](auth.md#api-egress-lock)) — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
 
 ```bash
 claude-docker --ephemeral --ro ~/untrusted-repo
@@ -90,7 +90,7 @@ The chosen dir takes the place of `~/.claude` for every item in the parity table
 
 ### Statusline tag for active opt-ins
 
-`run.sh` exports `CLAUDE_DOCKER_FLAGS` into the container with the comma-separated list of active opt-ins (`aws`, `gh`, `gh-direct`, `glab`, `glab-direct`, `tfe`, `az`, `registry`, `api`, `api-direct`, `ephemeral`, `ro`) and wraps the host statusline script so a yellow `docker:<flags>` tag is prepended to whatever your personal statusline renders. The variable is set by the wrapper for the statusline to read — not a user-tunable knob. `--yolo` / `--dangerously-skip-permissions` is not surfaced here — Claude Code's own mode indicator already makes it obvious. The wrapper is a no-op passthrough when no opt-ins are active, so your statusline looks unchanged on a plain `claude-docker ~/repo`.
+`run.sh` exports `CLAUDE_DOCKER_FLAGS` into the container with the comma-separated list of active opt-ins (`aws`, `gh`, `gh-direct`, `glab`, `glab-direct`, `tfe`, `az`, `registry`, `api`, `api-direct`, `egress-lock`, `ephemeral`, `ro`) and wraps the host statusline script so a yellow `docker:<flags>` tag is prepended to whatever your personal statusline renders. The variable is set by the wrapper for the statusline to read — not a user-tunable knob. `--yolo` / `--dangerously-skip-permissions` is not surfaced here — Claude Code's own mode indicator already makes it obvious. The wrapper is a no-op passthrough when no opt-ins are active, so your statusline looks unchanged on a plain `claude-docker ~/repo`.
 
 The image sets `IS_SANDBOX=1` — historically required to let `--yolo` / `--dangerously-skip-permissions` work when claude ran as root. The entrypoint now drops to the host UID before exec'ing claude, so the root-user check no longer triggers in steady state; `IS_SANDBOX=1` remains as a safety net for the legacy `HOST_UID=0` fall-through path. OS-level hardening comes from `--cap-drop ALL` (with `CHOWN`, `SETUID`, `SETGID`, `DAC_READ_SEARCH` re-added for transient entrypoint use only), `--security-opt no-new-privileges`, the Docker default seccomp profile, `--init` (tini reaps subprocess zombies), and the bind-mount layout. See [File ownership](#file-ownership) below and [Threat model](security.md#threat-model).
 
@@ -139,7 +139,7 @@ The container uses the host's DNS server but not the host's `/etc/hosts`, so a f
 export CLAUDE_DOCKER_ADD_HOSTS=gitlab.example.com:10.1.2.3,devops.example.com:10.1.2.4
 ```
 
-Each entry is passed to the runtime as `--add-host`, and so lands in the container's `/etc/hosts`; the `--gh` auth-proxy sidecar gets them too. Under `--gh`, entries for `github.com`, `api.github.com` and `uploads.github.com` are skipped for the agent container with a warning, since those must resolve to the sidecar. An entry that isn't `host:ip` stops `claude-docker` before any container starts.
+Each entry is passed to the runtime as `--add-host`, and so lands in the container's `/etc/hosts`; the `--gh` auth-proxy sidecar gets them too, and so does the `--egress-lock` proxy, which resolves every name the session connects to. Under `--gh`, entries for `github.com`, `api.github.com` and `uploads.github.com` are skipped for the agent container with a warning, since those must resolve to the sidecar. An entry that isn't `host:ip` stops `claude-docker` before any container starts.
 
 ## Pasting images
 

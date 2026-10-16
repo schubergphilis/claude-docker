@@ -618,6 +618,152 @@ check_entrypoint_reached() {
 }
 
 # ---------------------------------------------------------------------------
+# 8. --egress-lock (EXPECT_EGRESS=1, driven by smoke/egress.sh via run.sh)
+# ---------------------------------------------------------------------------
+# The proxy-unaware probes are the load-bearing ones. A proxy-aware client
+# failing to reach a blocked host only proves the proxy is configured. It says
+# nothing about whether a raw socket can walk around it, and the --internal
+# network exists to stop exactly that. smoke/egress.sh's fake gateway is
+# example.com; any other non-provider host (example.org) must stay reachable.
+
+# HTTP status for $2 via curl; $1 is the -w variable. Prints 000 on failure.
+egress_code() {
+  local out
+  out=$(curl -s -o /dev/null -m 20 -w "%{$1}" "${@:3}" "$2" 2>/dev/null) || true
+  printf '%s' "${out:-000}"
+}
+
+# entrypoint.sh approved the ANTHROPIC_API_KEY the agent sees (under --api,
+# the sidecar's placeholder), so a fresh ~/.claude.json doesn't send onboarding
+# to api.anthropic.com for a connectivity check. Claude Code stores the key's
+# last 20 characters, or all of a shorter one: the placeholder
+# `claude-docker-proxy` is 19, and bash's ${var: -20} would be empty for it.
+check_egress_api_key() {
+  local key_id="${ANTHROPIC_API_KEY:-}"
+  [ "${#key_id}" -gt 20 ] && key_id="${key_id: -20}"
+  if [ -n "${ANTHROPIC_API_KEY:-}" ] \
+     && jq -e --arg id "$key_id" '.customApiKeyResponses.approved | index([$id])' \
+          "$ROOT_HOME/.claude.json" >/dev/null 2>&1; then
+    pass "egress-api-key: ANTHROPIC_API_KEY approved in ~/.claude.json"
+  else
+    fail "egress-api-key: ANTHROPIC_API_KEY not approved in ~/.claude.json"
+  fi
+}
+
+check_egress() {
+  if [ -n "${https_proxy:-}" ] && [ "${https_proxy:-}" = "${HTTPS_PROXY:-}" ]; then
+    pass "egress-env: https_proxy/HTTPS_PROXY set ($https_proxy)"
+  else
+    fail "egress-env: https_proxy/HTTPS_PROXY missing or inconsistent"
+  fi
+
+  if [ -n "${EXPECT_EGRESS_ENDPOINT_PORT:-}" ]; then
+    # The endpoint is github.com on an SSH port (tests/smoke/egress.sh --endpoint-port):
+    # squid tunnels to it (http_connect 200; the TLS handshake with sshd then
+    # fails, which doesn't matter), while the same port on any other host stays
+    # refused. Both are squid's decision, so 403 means a rule refused it.
+    local ep_port="$EXPECT_EGRESS_ENDPOINT_PORT"
+    assert_eq "egress-endpoint-port: CONNECT to the endpoint's own port (github.com:$ep_port) allowed" \
+      "$(egress_code http_connect "https://github.com:$ep_port/")" "200"
+    assert_eq "egress-endpoint-port: the same port on another host (example.org:$ep_port) refused" \
+      "$(egress_code http_connect "https://example.org:$ep_port/")" "403"
+  else
+    assert_eq "egress-endpoint: the model endpoint (example.com) via proxy" \
+      "$(egress_code http_code https://example.com/)" "200"
+  fi
+  if [ "${EXPECT_EGRESS_API_PROXY:-0}" = "1" ]; then
+    # --api: squid passes the plain-HTTP hop to the auth-proxy sidecar on its
+    # port 8080. Whatever the upstream answers, a 403 is squid refusing it and
+    # 000 a broken chain.
+    local api_code
+    api_code=$(egress_code http_code http://claude-docker-api-proxy:8080/)
+    case "$api_code" in
+      403|000) fail "egress-api-proxy: the --api auth-proxy sidecar via proxy (HTTP $api_code)" ;;
+      *) pass "egress-api-proxy: the --api auth-proxy sidecar via proxy (HTTP $api_code)" ;;
+    esac
+  fi
+  assert_eq "egress-open: a non-model host (example.org) via proxy" \
+    "$(egress_code http_code https://example.org/)" "200"
+  assert_eq "egress-provider: CONNECT api.anthropic.com refused by proxy" \
+    "$(egress_code http_connect https://api.anthropic.com/)" "403"
+  assert_eq "egress-provider: CONNECT claude.ai refused by proxy" \
+    "$(egress_code http_connect https://claude.ai/)" "403"
+  # Claude Code's managed settings pin the endpoint over any project setting
+  # (tests/integration/managed-settings-precedence.sh proves the precedence). Here: they
+  # are present, name this session's endpoint and switch the other backends
+  # off, and the agent can neither change them nor add a file beside them.
+  local ms=/etc/claude-code/managed-settings.json ms_json
+  ms_json=$(jq -c '.env' "$ms" 2>/dev/null) || ms_json=""
+  assert_eq "egress-managed: managed settings pin the endpoint, other backends off" "$ms_json" \
+    "{\"ANTHROPIC_BASE_URL\":\"${EXPECT_EGRESS_MANAGED_URL:-}\",\"CLAUDE_CODE_USE_BEDROCK\":\"0\",\"CLAUDE_CODE_USE_VERTEX\":\"0\",\"CLAUDE_CODE_USE_FOUNDRY\":\"0\"}"
+  if ( : >>"$ms" ) 2>/dev/null; then
+    fail "egress-managed-ro: the agent can write $ms"
+  else
+    pass "egress-managed-ro: $ms is read-only to the agent"
+  fi
+  if ( : >/etc/claude-code/extra.json ) 2>/dev/null; then
+    fail "egress-managed-dir: the agent can add files to /etc/claude-code"
+  else
+    pass "egress-managed-dir: /etc/claude-code is not writable by the agent"
+  fi
+
+  check_egress_api_key
+
+  if [ "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" = "1" ]; then
+    pass "egress-telemetry: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"
+  else
+    fail "egress-telemetry: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC not set"
+  fi
+  if [ "${CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL:-}" = "1" ]; then
+    pass "egress-marketplace: CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1"
+  else
+    fail "egress-marketplace: CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL not set"
+  fi
+
+  # No route: a public IP, without the proxy.
+  if curl -s -o /dev/null -m 10 --noproxy '*' http://1.1.1.1/ 2>/dev/null; then
+    fail "egress-bypass: proxy-unaware curl reached 1.1.1.1 by IP"
+  else
+    pass "egress-bypass: proxy-unaware curl to a public IP fails"
+  fi
+  if getent hosts example.org >/dev/null 2>&1; then
+    fail "egress-dns: example.org resolves inside the agent container (DNS side channel)"
+  else
+    pass "egress-dns: external names do not resolve inside the agent container"
+  fi
+
+  # Denies above the allows. no_proxy is cleared for the localhost probe so
+  # curl sends it to the proxy (where 'localhost' resolves to the proxy's own
+  # loopback) instead of dialling the agent's own loopback.
+  assert_eq "egress-metadata: 169.254.169.254 refused by proxy" \
+    "$(egress_code http_code http://169.254.169.254/latest/meta-data/)" "403"
+  assert_eq "egress-loopback: a name resolving to the proxy's loopback refused" \
+    "$(no_proxy='' NO_PROXY='' egress_code http_code http://localhost/)" "403"
+  assert_eq "egress-port: CONNECT to a non-443 port refused" \
+    "$(egress_code http_connect https://example.com:8443/)" "403"
+
+  if [ "${EXPECT_EGRESS_GH:-0}" = "1" ]; then
+    # --cacert replaces the default bundle, so a completed handshake proves the
+    # auth-proxy sidecar terminated TLS (squid routed api.github.com to it). /user needs
+    # a token and this probe sends none, so GitHub's 401 message tells the two
+    # apart: "Bad credentials" means the sidecar injected smoke's fake token,
+    # "Requires authentication" means it did not. A 502 would be the sidecar
+    # failing upstream, 000 the chain broken.
+    local gh_out gh_code gh_body
+    gh_out=$(curl -s -m 20 -w '\n%{http_code}' \
+      --cacert /usr/local/share/ca-certificates/claude-docker-auth-proxy.crt \
+      https://api.github.com/user 2>/dev/null) || true
+    gh_code=${gh_out##*$'\n'}
+    gh_body=${gh_out%$'\n'*}
+    if [ "$gh_code" = "401" ] && [[ "$gh_body" == *'"Bad credentials"'* ]]; then
+      pass "egress-gh: api.github.com via proxy → auth-proxy sidecar → GitHub, token injected (401 Bad credentials)"
+    else
+      fail "egress-gh: api.github.com via proxy → auth-proxy sidecar did not inject the token (HTTP ${gh_code:-000}: $(printf '%s' "$gh_body" | tr -d '\n' | cut -c1-120))"
+    fi
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -625,6 +771,23 @@ main() {
   set -euo pipefail
 
   echo "=== assert-in-container starting (UID=$(id -u) GID=$(id -g)) ==="
+
+  if [ "${EXPECT_EGRESS:-0}" = "1" ]; then
+    # run.sh-driven cell: only the checks that hold for a run.sh session. The
+    # capability check stays in: the egress boundary must not cost a capability.
+    check_entrypoint_reached
+    check_identity
+    check_security
+    check_egress
+    echo "==="
+    echo "Results: ${PASS_COUNT} passed, ${FAIL_COUNT} failed"
+    if [ "$FAIL_COUNT" -gt 0 ]; then
+      echo "RESULT: FAIL"
+      exit 1
+    fi
+    echo "RESULT: PASS"
+    return 0
+  fi
 
   check_entrypoint_reached
   check_identity
