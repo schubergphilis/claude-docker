@@ -633,6 +633,23 @@ egress_code() {
   printf '%s' "${out:-000}"
 }
 
+# entrypoint.sh approved the ANTHROPIC_API_KEY the agent sees (under --api,
+# the sidecar's placeholder), so a fresh ~/.claude.json doesn't send onboarding
+# to api.anthropic.com for a connectivity check. Claude Code stores the key's
+# last 20 characters, or all of a shorter one: the placeholder
+# `claude-docker-proxy` is 19, and bash's ${var: -20} would be empty for it.
+check_egress_api_key() {
+  local key_id="${ANTHROPIC_API_KEY:-}"
+  [ "${#key_id}" -gt 20 ] && key_id="${key_id: -20}"
+  if [ -n "${ANTHROPIC_API_KEY:-}" ] \
+     && jq -e --arg id "$key_id" '.customApiKeyResponses.approved | index([$id])' \
+          "$ROOT_HOME/.claude.json" >/dev/null 2>&1; then
+    pass "egress-api-key: ANTHROPIC_API_KEY approved in ~/.claude.json"
+  else
+    fail "egress-api-key: ANTHROPIC_API_KEY not approved in ~/.claude.json"
+  fi
+}
+
 check_egress() {
   if [ -n "${https_proxy:-}" ] && [ "${https_proxy:-}" = "${HTTPS_PROXY:-}" ]; then
     pass "egress-env: https_proxy/HTTPS_PROXY set ($https_proxy)"
@@ -690,17 +707,7 @@ check_egress() {
     pass "egress-managed-dir: /etc/claude-code is not writable by the agent"
   fi
 
-  # entrypoint.sh approved the forwarded ANTHROPIC_API_KEY (its last 20
-  # characters, as Claude Code stores it), so a fresh ~/.claude.json doesn't
-  # send onboarding to api.anthropic.com for a connectivity check.
-  local key_id="${ANTHROPIC_API_KEY: -20}"
-  if [ -n "${ANTHROPIC_API_KEY:-}" ] \
-     && jq -e --arg id "$key_id" '.customApiKeyResponses.approved | index([$id])' \
-          /root/.claude.json >/dev/null 2>&1; then
-    pass "egress-api-key: ANTHROPIC_API_KEY approved in ~/.claude.json"
-  else
-    fail "egress-api-key: ANTHROPIC_API_KEY not approved in ~/.claude.json"
-  fi
+  check_egress_api_key
 
   if [ "${CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC:-}" = "1" ]; then
     pass "egress-telemetry: CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"

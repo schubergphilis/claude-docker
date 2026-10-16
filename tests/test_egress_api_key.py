@@ -66,6 +66,13 @@ class ApproveKey(unittest.TestCase):
         self.assertEqual(json.loads(self.cfg.read_text())["customApiKeyResponses"]["approved"],
                          [KEY_ID])
 
+    def test_short_placeholder_is_approved_whole(self):
+        # Under --api the agent sees the sidecar's 19-character placeholder;
+        # Claude Code stores all of a key shorter than 20.
+        self.assert_ok(self.run_block(key="claude-docker-proxy"))
+        self.assertEqual(json.loads(self.cfg.read_text())["customApiKeyResponses"]["approved"],
+                         ["claude-docker-proxy"])
+
     def test_noop_without_lock_or_key(self):
         for lock, key in (("", KEY), ("1", "")):
             with self.subTest(lock=lock, key=key):
