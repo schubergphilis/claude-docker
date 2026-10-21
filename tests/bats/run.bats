@@ -279,7 +279,7 @@ http_access allow all" ]
   [ "$status" -eq 0 ]
   # Exactly these keys, as Claude Code reads them: valid JSON, env strings.
   [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')" = \
-    '{"env": {"ANTHROPIC_BASE_URL": "https://u:p@gw.eu:8443/v1?a=1&b=%20", "CLAUDE_CODE_USE_BEDROCK": "0", "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_VERTEX": "0"}}' ]
+    '{"env": {"ANTHROPIC_BASE_URL": "https://u:p@gw.eu:8443/v1?a=1&b=%20", "CLAUDE_CODE_USE_ANTHROPIC_AWS": "0", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "0", "CLAUDE_CODE_USE_BEDROCK": "0", "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_GATEWAY": "0", "CLAUDE_CODE_USE_MANTLE": "0", "CLAUDE_CODE_USE_VERTEX": "0"}}' ]
 }
 
 @test "validate_opts: missing CLAUDE_DOCKER_AZ_CA is fatal" {

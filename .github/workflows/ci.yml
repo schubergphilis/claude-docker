@@ -183,7 +183,8 @@ jobs:
         # --egress-lock pins Claude Code's endpoint with managed settings. This
         # proves, against the image's pinned claude-code, that they beat every
         # project override (settings.json, settings.local.json, --settings) and
-        # the Bedrock/Vertex/Foundry backends. --network none; loopback only.
+        # every backend switch, and fails on a backend switch in the bundle
+        # that the managed settings don't pin off. --network none; loopback only.
         run: IMAGE=claude-docker:ci bash tests/integration/managed-settings-precedence.sh
 
       - name: Tag the --egress-lock proxy image for scanning

@@ -695,7 +695,7 @@ check_egress() {
   local ms=/etc/claude-code/managed-settings.json ms_json
   ms_json=$(jq -c '.env' "$ms" 2>/dev/null) || ms_json=""
   assert_eq "egress-managed: managed settings pin the endpoint, other backends off" "$ms_json" \
-    "{\"ANTHROPIC_BASE_URL\":\"${EXPECT_EGRESS_MANAGED_URL:-}\",\"CLAUDE_CODE_USE_BEDROCK\":\"0\",\"CLAUDE_CODE_USE_VERTEX\":\"0\",\"CLAUDE_CODE_USE_FOUNDRY\":\"0\"}"
+    "{\"ANTHROPIC_BASE_URL\":\"${EXPECT_EGRESS_MANAGED_URL:-}\",\"CLAUDE_CODE_USE_GATEWAY\":\"0\",\"CLAUDE_CODE_USE_BEDROCK\":\"0\",\"CLAUDE_CODE_USE_FOUNDRY\":\"0\",\"CLAUDE_CODE_USE_ANTHROPIC_AWS\":\"0\",\"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD\":\"0\",\"CLAUDE_CODE_USE_MANTLE\":\"0\",\"CLAUDE_CODE_USE_VERTEX\":\"0\"}"
   if ( : >>"$ms" ) 2>/dev/null; then
     fail "egress-managed-ro: the agent can write $ms"
   else

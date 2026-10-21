@@ -641,8 +641,10 @@ EOF
 # settings beat the environment, the project's .claude/settings.json and
 # settings.local.json, and --settings, so a workspace can't move Claude Code's
 # model traffic off the endpoint. The URL alone isn't enough: a project that
-# switches on Bedrock, Vertex or Foundry sends the traffic to that backend's
-# own base URL, so all three are pinned off. Mounted read-only; the agent
+# switches on another backend sends the traffic to that backend's own base
+# URL, so every backend switch is pinned off, in Claude Code's selection
+# order. tests/integration/managed-settings-precedence.sh fails when a Claude
+# Code release adds one this list lacks. Mounted read-only; the agent
 # can't replace it, and /etc/claude-code is root's. ANTHROPIC_BASE_URL has
 # passed validate_opts' URL character check, so it needs no JSON escaping.
 gen_egress_managed_settings() {
@@ -653,9 +655,13 @@ gen_egress_managed_settings() {
   [ "$API_SIDECAR_ACTIVE" = "1" ] && url="http://claude-docker-api-proxy:8080"
   printf '{\n  "env": {\n'
   printf '    "ANTHROPIC_BASE_URL": "%s",\n' "$url"
+  printf '    "CLAUDE_CODE_USE_GATEWAY": "0",\n'
   printf '    "CLAUDE_CODE_USE_BEDROCK": "0",\n'
-  printf '    "CLAUDE_CODE_USE_VERTEX": "0",\n'
-  printf '    "CLAUDE_CODE_USE_FOUNDRY": "0"\n'
+  printf '    "CLAUDE_CODE_USE_FOUNDRY": "0",\n'
+  printf '    "CLAUDE_CODE_USE_ANTHROPIC_AWS": "0",\n'
+  printf '    "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "0",\n'
+  printf '    "CLAUDE_CODE_USE_MANTLE": "0",\n'
+  printf '    "CLAUDE_CODE_USE_VERTEX": "0"\n'
   printf '  }\n}\n'
 }
 

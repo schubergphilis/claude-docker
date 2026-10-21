@@ -9,9 +9,11 @@
 # Runs the image with --network none and two loopback logging servers: the
 # managed settings point Claude Code at :9001, each project override at :9002.
 # A case passes when a model request reaches :9001 and none reaches :9002. A
-# control run without the managed settings must reach :9002, or the harness
-# proves nothing. Re-run it when the claude-code pin moves: precedence and the
-# set of backends are Claude Code's, not ours.
+# control run of every case without the managed settings must reach :9002, or
+# the harness proves nothing. The managed run also fails on any backend switch
+# in the bundle that the managed settings don't pin off. CI runs it on every
+# PR, the claude-code pin refresh included: precedence and the set of backends
+# are Claude Code's, not ours.
 #
 # Usage: IMAGE=<tag> bash tests/integration/managed-settings-precedence.sh
 set -euo pipefail
@@ -85,16 +87,41 @@ check() {
   fi
 }
 
-if [ "$mode" = "control" ]; then
-  check settings settings.json "$over"
-else
-  check settings       settings.json       "$over"
-  check settings-local settings.local.json "$over"
-  check settings-flag  --settings          "$over"
-  check bedrock settings.json '"CLAUDE_CODE_USE_BEDROCK":"1","CLAUDE_CODE_SKIP_BEDROCK_AUTH":"1","AWS_REGION":"us-east-1","ANTHROPIC_BEDROCK_BASE_URL":"http://127.0.0.1:9002"'
-  check vertex  settings.json '"CLAUDE_CODE_USE_VERTEX":"1","CLAUDE_CODE_SKIP_VERTEX_AUTH":"1","ANTHROPIC_VERTEX_PROJECT_ID":"p","CLOUD_ML_REGION":"us-east5","ANTHROPIC_VERTEX_BASE_URL":"http://127.0.0.1:9002"'
-  check foundry settings.json '"CLAUDE_CODE_USE_FOUNDRY":"1","CLAUDE_CODE_SKIP_FOUNDRY_AUTH":"1","ANTHROPIC_FOUNDRY_API_KEY":"x","ANTHROPIC_FOUNDRY_BASE_URL":"http://127.0.0.1:9002"'
-fi
+# Every CLAUDE_CODE_USE_* switch the bundle knows is either pinned off in the
+# managed settings or listed here as picking no model backend. A Claude Code
+# release that adds a backend fails here until gen_egress_managed_settings
+# pins it, instead of leaving a route the cases below don't cover.
+not_backends=" CCR_V2 COWORK_PLUGINS NATIVE_FILE_SEARCH POWERSHELL_TOOL "
+check_switches() {
+  local pkg sw n=0
+  pkg="$(npm root -g)/@anthropic-ai/claude-code"
+  for sw in $(grep -raohE 'CLAUDE_CODE_USE_[A-Z0-9_]+' "$pkg" | sort -u); do
+    n=$((n + 1))
+    case "$not_backends" in *" ${sw#CLAUDE_CODE_USE_} "*) continue ;; esac
+    if jq -e --arg k "$sw" '.env[$k] == "0"' /etc/claude-code/managed-settings.json >/dev/null; then
+      echo "PASS: switch $sw is pinned off"
+    else
+      echo "FAIL: switch $sw is not pinned off: add it to gen_egress_managed_settings, or to not_backends if it picks no backend"
+      fails=$((fails + 1))
+    fi
+  done
+  # Guard against a vacuous pass if the bundle moves out of $pkg.
+  [ "$n" -gt 0 ] || { echo "FAIL: no CLAUDE_CODE_USE_* switch found under $pkg"; fails=$((fails + 1)); }
+}
+
+# Both modes run every case: the control proves each override, backends
+# included, really moves the traffic without managed settings.
+[ "$mode" = "managed" ] && check_switches
+check settings       settings.json       "$over"
+check settings-local settings.local.json "$over"
+check settings-flag  --settings          "$over"
+check bedrock settings.json '"CLAUDE_CODE_USE_BEDROCK":"1","CLAUDE_CODE_SKIP_BEDROCK_AUTH":"1","AWS_REGION":"us-east-1","ANTHROPIC_BEDROCK_BASE_URL":"http://127.0.0.1:9002"'
+check vertex  settings.json '"CLAUDE_CODE_USE_VERTEX":"1","CLAUDE_CODE_SKIP_VERTEX_AUTH":"1","ANTHROPIC_VERTEX_PROJECT_ID":"p","CLOUD_ML_REGION":"us-east5","ANTHROPIC_VERTEX_BASE_URL":"http://127.0.0.1:9002"'
+check foundry settings.json '"CLAUDE_CODE_USE_FOUNDRY":"1","CLAUDE_CODE_SKIP_FOUNDRY_AUTH":"1","ANTHROPIC_FOUNDRY_API_KEY":"x","ANTHROPIC_FOUNDRY_BASE_URL":"http://127.0.0.1:9002"'
+check anthropic-aws settings.json '"CLAUDE_CODE_USE_ANTHROPIC_AWS":"1","CLAUDE_CODE_SKIP_ANTHROPIC_AWS_AUTH":"1","AWS_REGION":"us-east-1","ANTHROPIC_AWS_BASE_URL":"http://127.0.0.1:9002"'
+check anthropic-google-cloud settings.json '"CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD":"1","CLAUDE_CODE_SKIP_ANTHROPIC_GOOGLE_CLOUD_AUTH":"1","ANTHROPIC_GOOGLE_CLOUD_PROJECT":"p","ANTHROPIC_GOOGLE_CLOUD_LOCATION":"global","ANTHROPIC_GOOGLE_CLOUD_BASE_URL":"http://127.0.0.1:9002"'
+check mantle settings.json '"CLAUDE_CODE_USE_MANTLE":"1","CLAUDE_CODE_SKIP_MANTLE_AUTH":"1","AWS_REGION":"us-east-1","ANTHROPIC_BEDROCK_MANTLE_BASE_URL":"http://127.0.0.1:9002"'
+check gateway settings.json '"CLAUDE_CODE_USE_GATEWAY":"1","ANTHROPIC_AUTH_TOKEN":"x",'"$over"
 exit "$fails"
 IN
 chmod +x "$TMP/in-container.sh"
