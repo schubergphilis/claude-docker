@@ -102,13 +102,19 @@ Under `--egress-lock`, `run.sh` SHALL exit 1 before creating any container resou
 
 ### Requirement: Claude Code's endpoint can't be moved by the workspace
 
-Under `--egress-lock`, `run.sh` SHALL refuse an `ANTHROPIC_BASE_URL` with any character outside RFC 3986's unreserved, reserved (except `[` and `]`) and `%`. It SHALL mount Claude Code managed settings read-only at `/etc/claude-code/managed-settings.json` whose `env` sets `ANTHROPIC_BASE_URL` to the session's endpoint (under `--api`, to `http://claude-docker-api-proxy:8080`, the auth-proxy sidecar whose only upstream is that endpoint) and `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX` and `CLAUDE_CODE_USE_FOUNDRY` to `0`. Sessions without `--egress-lock` SHALL NOT get this file.
+Under `--egress-lock`, `run.sh` SHALL refuse an `ANTHROPIC_BASE_URL` with any character outside RFC 3986's unreserved, reserved (except `[` and `]`) and `%`. It SHALL mount Claude Code managed settings read-only at `/etc/claude-code/managed-settings.json` whose `env` sets `ANTHROPIC_BASE_URL` to the session's endpoint (under `--api`, to `http://claude-docker-api-proxy:8080`, the auth-proxy sidecar whose only upstream is that endpoint) and every `CLAUDE_CODE_USE_*` switch that selects a model backend to `0`: `CLAUDE_CODE_USE_GATEWAY`, `CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_FOUNDRY`, `CLAUDE_CODE_USE_ANTHROPIC_AWS`, `CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD`, `CLAUDE_CODE_USE_MANTLE` and `CLAUDE_CODE_USE_VERTEX` as of Claude Code 2.1.302. Sessions without `--egress-lock` SHALL NOT get this file. CI SHALL fail when the image's Claude Code knows a `CLAUDE_CODE_USE_*` switch that is neither pinned off nor listed as selecting no backend.
 
 #### Scenario: A project setting doesn't move the model traffic
 
-- **GIVEN** an `--egress-lock` session whose workspace `.claude/settings.json` sets `ANTHROPIC_BASE_URL` to another host, or switches on Bedrock, Vertex or Foundry with a base URL of its own
+- **GIVEN** an `--egress-lock` session whose workspace `.claude/settings.json` sets `ANTHROPIC_BASE_URL` to another host, or switches on any backend (gateway, Bedrock, Foundry, Anthropic on AWS, Anthropic on Google Cloud, Mantle or Vertex) with a base URL of its own
 - **WHEN** Claude Code sends a model request
 - **THEN** the request goes to the session's endpoint, not to the project's host
+
+#### Scenario: A Claude Code release adds a backend
+
+- **GIVEN** a claude-code pin whose bundle knows a `CLAUDE_CODE_USE_*` switch that the managed settings don't pin off and that isn't listed as selecting no backend
+- **WHEN** CI runs `tests/integration/managed-settings-precedence.sh` against the image
+- **THEN** it fails and names the switch
 
 #### Scenario: Under --api the pin is the sidecar
 
@@ -146,17 +152,32 @@ The agent image SHALL NOT contain squid. The proxy sidecar SHALL run squid from 
 
 ### Requirement: The session's egress log is saved on the host
 
-When an `--egress-lock` session whose proxy was started exits, the EXIT trap SHALL, before removing the proxy, write the proxy's access log to `<state>/claude-docker/egress/<start>-<id>.log` and a `<start>-<id>.meta` file of `key=value` lines (`start`, `end`, `user`, `host`, `workspace`, `image`, `image_id`, `proxy_image`, `proxy_image_id`, `endpoint`), where `<state>` is `$XDG_STATE_HOME` or `~/.local/state`. That directory SHALL NOT be mounted into any container. `run.sh` SHALL NOT rotate or delete saved logs.
+When an `--egress-lock` session whose proxy was started exits, the EXIT trap SHALL, before removing the proxy, write the proxy's access log to `<state>/claude-docker/egress/<start>-<id>.log` and a `<start>-<id>.meta` file of `key=value` lines (`start`, `end`, `user`, `host`, `workspace`, `image`, `image_id`, `proxy_image`, `proxy_image_id`, `endpoint`), where `<state>` is `$XDG_STATE_HOME` or `~/.local/state`. That directory SHALL NOT be mounted into any container. `run.sh` SHALL NOT rotate or delete saved logs. `run.sh` SHALL check the copy: when the engine's log command fails, or the proxy had been accepting connections but the engine's output lacks squid's `Accepting HTTP Socket connections` startup line, it SHALL print that the log in that file is missing or incomplete, with the reason, and SHALL NOT report it saved. The check SHALL NOT fail the teardown.
 
 #### Scenario: Log saved
 
 - **WHEN** an `--egress-lock` session that connected to `example.org` exits
 - **THEN** a `.log` file under the state directory contains the `CONNECT example.org:443` line
 - **AND** its `.meta` file contains `endpoint=` followed by the `ANTHROPIC_BASE_URL` host
+- **AND** `run.sh` reports the log saved
 
-### Requirement: The network is the boundary, so the proxy log is complete
+#### Scenario: The copy fails
 
-A client inside the agent container that ignores proxy settings SHALL NOT reach any external address, whether it dials by name or by IP. External DNS names SHALL NOT resolve inside the agent container. This makes the proxy's access log a complete record of the session's connections.
+- **GIVEN** an `--egress-lock` session whose engine can't return the proxy's log (for example, a log driver that doesn't support reading)
+- **WHEN** the session exits
+- **THEN** `run.sh` prints that the log in the `.log` file is missing or incomplete, with the engine's error
+- **AND** it doesn't print "egress log saved"
+
+#### Scenario: The log driver rotated the log
+
+- **GIVEN** an `--egress-lock` session whose engine kept only the end of the proxy's log (`max-size` in `daemon.json`)
+- **WHEN** the session exits
+- **THEN** `run.sh` prints that the log in the `.log` file is incomplete because squid's startup line is gone
+- **AND** it doesn't print "egress log saved"
+
+### Requirement: The network is the boundary
+
+A client inside the agent container that ignores proxy settings SHALL NOT reach any external address, whether it dials by name or by IP. External DNS names SHALL NOT resolve inside the agent container. The agent container's only ways off its internal network SHALL be the egress proxy, which logs every connection it carries, and, when active, the auth-proxy sidecar, which forwards only to its fixed upstreams (the GitHub hosts under `--gh`, the proxied GitLab host under `--glab`, `ANTHROPIC_BASE_URL` under `--api`). A request the agent sends straight to the auth-proxy sidecar is in the sidecar's audit log, not the egress proxy's.
 
 #### Scenario: Proxy-unaware client to a reachable host
 
