@@ -53,6 +53,7 @@ fake_session() {
 claude-docker: egress proxy 'claude-egress-proxy-a1B2c3' is active
 RESULT: PASS
 claude-docker: egress proxy blocked: api.anthropic.com example.org:22 
+claude-docker: egress log saved to $dir/s.log
 TXT
   printf '%s\n' "1 0 1 TCP_TUNNEL/200 0 CONNECT example.org:443 - HIER_DIRECT/x -" \
     "1 0 1 TCP_TUNNEL/200 0 CONNECT github.com:22 - HIER_DIRECT/x -" > "$dir/s.log"
@@ -195,6 +196,15 @@ TXT
   run assert_evidence
   [ "$status" -eq 1 ]
   [[ "$output" == *"no egress log/meta saved"* ]]
+}
+
+@test "assert_evidence fails when run.sh reports the log incomplete" {
+  setup_cell
+  fake_session
+  sed -i 's/^claude-docker: egress log saved to .*/claude-docker: the egress log in s.log is incomplete: squid'"'"'s startup line is gone/' "$transcript"
+  run assert_evidence
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"reported the egress log missing or incomplete"* ]]
 }
 
 @test "assert_evidence fails when the agent image has squid" {
