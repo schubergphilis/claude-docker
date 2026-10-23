@@ -132,6 +132,10 @@ assert_evidence() {
     || die "end-of-session summary does not name api.anthropic.com"
   logf=$(find "$TMPROOT/state/claude-docker/egress" -name "*.log" 2>/dev/null | head -1)
   [ -n "$logf" ] && [ -f "${logf%.log}.meta" ] || die "no egress log/meta saved under $TMPROOT/state"
+  # run.sh checks the copy against the engine: "saved" means `logs` succeeded
+  # and squid's startup line came back with it.
+  grep -q "egress log saved to " "$transcript" \
+    || die "run.sh reported the egress log missing or incomplete, not saved"
   grep -q "TCP_TUNNEL/200 .* CONNECT example.org:443" "$logf" || die "saved log lacks the example.org CONNECT"
   grep -q "^endpoint=$endpoint_host\$" "${logf%.log}.meta" || die "meta does not name the endpoint"
   # Under --api the agent's model traffic reaches squid as plain HTTP to the

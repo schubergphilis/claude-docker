@@ -256,6 +256,7 @@ EGRESS_IMAGE=""
 egress_api_host=""
 egress_api_port=""
 egress_started=""
+egress_ready=""
 agent_image_id=""
 egress_proxy_image_id=""
 
@@ -699,16 +700,21 @@ ensure_egress_image() {
 # The log dir is never mounted into the agent container. It and the files are
 # owner-only: the log lists every host the session contacted and the full URL
 # of plain-HTTP requests. squid's default format on stdout: field 4 is the
-# result/status, field 7 the URL (host:port for CONNECT).
+# result/status, field 7 the URL (host:port for CONNECT). The copy is checked:
+# a failed `logs`, or a proxy that was ready (egress_ready) whose startup line
+# is gone because the log driver rotated or dropped it, is reported as missing
+# or incomplete evidence instead of "saved". squid's startup lines are on
+# stderr, but an engine that merges the streams puts them in the .log, so both
+# are searched.
 # ponytail: a SIGKILLed run.sh never runs the trap and loses the session log;
 # bind-mount squid's access_log to the host if that matters.
 egress_save_log() {
   [ -n "${egress_started:-}" ] || return 0
-  local base="$EGRESS_LOG_DIR/$egress_started-$proxy_sid" denied old_umask
+  local base="$EGRESS_LOG_DIR/$egress_started-$proxy_sid" denied old_umask errs copy_rc=0
   mkdir -p "$EGRESS_LOG_DIR" && chmod 700 "$EGRESS_LOG_DIR" || return 0
   old_umask=$(umask)
   umask 077
-  "$RUNTIME" logs "$EGRESS_SIDECAR" >"$base.log" 2>/dev/null || true
+  errs=$("$RUNTIME" logs "$EGRESS_SIDECAR" 2>&1 >"$base.log") || copy_rc=$?
   printf 'start=%s\nend=%s\nuser=%s\nhost=%s\nworkspace=%s\nimage=%s\nimage_id=%s\nproxy_image=%s\nproxy_image_id=%s\nendpoint=%s\n' \
     "$egress_started" "$(date -u +%Y%m%dT%H%M%SZ)" "$(id -un)" "$(uname -n)" \
     "${WORKSPACES[*]}" "$IMAGE" "$agent_image_id" "$EGRESS_IMAGE" "$egress_proxy_image_id" \
@@ -720,7 +726,14 @@ egress_save_log() {
     | sed -e 's#^[A-Za-z]*://##' -e 's#[/?].*##' -e 's#:443$##' -e 's#:80$##' \
     | sort -u | tr '\n' ' ') || true
   [ -n "$denied" ] && echo "claude-docker: egress proxy blocked: ${denied}" >&2
-  echo "claude-docker: egress log saved to $base.log" >&2
+  if [ "$copy_rc" != "0" ]; then
+    echo "claude-docker: the egress log in $base.log is missing or incomplete: '$RUNTIME logs' failed (exit $copy_rc): ${errs##*$'\n'}" >&2
+  elif [ -n "$egress_ready" ] && [[ "$errs" != *'Accepting HTTP Socket connections'* ]] \
+       && ! grep -q 'Accepting HTTP Socket connections' "$base.log"; then
+    echo "claude-docker: the egress log in $base.log is incomplete: squid's startup line is gone, so the engine's log driver rotated or dropped the start of the session (check its max-size)" >&2
+  else
+    echo "claude-docker: egress log saved to $base.log" >&2
+  fi
   return 0
 }
 
@@ -1774,6 +1787,7 @@ start_egress_sidecar() {
 
     egress_wait=0
     wait_sidecar "$EGRESS_SIDECAR" egress_listening || egress_wait=$?
+    [ "$egress_wait" = "0" ] && egress_ready=1
     if [ "$egress_wait" != "0" ]; then
       if [ "$egress_wait" = "2" ]; then
         echo "claude-docker: the --egress-lock proxy exited during startup — aborting (the agent container was never started). squid's own error follows:" >&2

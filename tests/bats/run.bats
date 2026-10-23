@@ -24,9 +24,10 @@ setup() {
   # Knobs for the docker stub: STUB_FAIL names subcommands that fail ("run",
   # or "network:connect" for one sub-subcommand), STUB_PS is the
   # stopped-container list, STUB_ALIVE the running sidecar id, STUB_LOGS what
-  # `logs` prints (what the sidecar has logged so far).
+  # `logs` prints (what the sidecar has logged so far), STUB_LOGS_ERR what it
+  # prints on stderr (the container's stderr, e.g. squid's cache_log).
   STUB_FAIL="" STUB_PS="" STUB_ALIVE="cid" STUB_IP="10.0.0.2"
-  STUB_LOGS="serving initial configuration"
+  STUB_LOGS="serving initial configuration" STUB_LOGS_ERR=""
   docker() {
     echo "docker $*" >>"$CALLS"
     case " $STUB_FAIL " in *" $1 "*|*" $1:${2:-} "*) return 1 ;; esac
@@ -37,7 +38,9 @@ setup() {
       network) [ "$2" = "ls" ] && echo "net1"; return 0 ;;
       cp) echo "CA" >"$3" ;;
       inspect) echo "$STUB_IP" ;;
-      logs) printf '%s\n' "$STUB_LOGS" ;;
+      logs)
+        printf '%s\n' "$STUB_LOGS"
+        [ -z "$STUB_LOGS_ERR" ] || printf '%s\n' "$STUB_LOGS_ERR" >&2 ;;
     esac
     return 0
   }
@@ -65,7 +68,7 @@ lines_of() { printf '%s\n' "$@"; }
 # functions.
 export_stubs() {
   export -f docker podman gh glab git sleep
-  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP STUB_LOGS
+  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP STUB_LOGS STUB_LOGS_ERR
 }
 run_script() {
   export_stubs
@@ -850,6 +853,53 @@ http_access allow all" ]
   [ "$(stat -c %a "$EGRESS_LOG_DIR")" = 700 ]
   [ "$(stat -c %a "$EGRESS_LOG_DIR/20260101T000000Z-abc.log")" = 600 ]
   [ "$(stat -c %a "$EGRESS_LOG_DIR/20260101T000000Z-abc.meta")" = 600 ]
+}
+
+@test "egress_save_log: a ready proxy's log with squid's startup line on stderr is saved, without the stderr" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_LOGS="1.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -"
+  STUB_LOGS_ERR="2026/01/01 00:00:00| Accepting HTTP Socket connections at conn1 local=[::]:3128 remote=[::] FD 10 flags=9"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [ "$(cat "$EGRESS_LOG_DIR/20260101T000000Z-abc.log")" = "$STUB_LOGS" ]
+  [[ "$output" == *"egress log saved to"* ]]
+  [[ "$output" != *"incomplete"* ]]
+}
+
+@test "egress_save_log: an engine that merges squid's stderr into the log still counts as complete" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_LOGS="2026/01/01 00:00:00| Accepting HTTP Socket connections at conn1 local=[::]:3128 remote=[::] FD 10 flags=9"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"egress log saved to"* ]]
+}
+
+@test "egress_save_log: a rotated log (startup line gone) is reported incomplete, not saved" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_LOGS="9.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [ "$(cat "$EGRESS_LOG_DIR/20260101T000000Z-abc.log")" = "$STUB_LOGS" ]
+  [[ "$output" == *"the egress log in $EGRESS_LOG_DIR/20260101T000000Z-abc.log is incomplete: squid's startup line is gone"* ]]
+  [[ "$output" != *"egress log saved"* ]]
+}
+
+@test "egress_save_log: a failed copy is reported missing, not saved, and keeps the meta" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_FAIL="logs"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the egress log in $EGRESS_LOG_DIR/20260101T000000Z-abc.log is missing or incomplete: 'docker logs' failed (exit 1)"* ]]
+  [[ "$output" != *"egress log saved"* ]]
+  [ -s "$EGRESS_LOG_DIR/20260101T000000Z-abc.meta" ]
+}
+
+@test "egress_save_log: a proxy that never got ready isn't held to the startup line" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
+  STUB_LOGS=""
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"egress log saved to"* ]]
 }
 
 @test "egress_save_log: an unwritable log dir never fails the teardown" {
