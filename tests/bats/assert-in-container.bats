@@ -14,7 +14,7 @@ setup() {
   SEED_SETTINGS="${BATS_TEST_TMPDIR}/seed.json"
   mkdir -p "$ROOT_HOME"
   unset EXPECT_OPTINS EXPECT_EPHEMERAL AWS_PROFILE GITLAB_TOKEN TF_TOKEN_app_terraform_io \
-    AZURE_DEVOPS_EXT_PAT ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN EXPECT_SETTINGS EXPECT_SETTINGS_SENTINEL
+    AZURE_DEVOPS_EXT_PAT ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY EXPECT_SETTINGS EXPECT_SETTINGS_SENTINEL
   # A writable fixture can't produce EROFS; that check needs a real :ro mount.
   assert_write_fails_ro() { pass "$1: stubbed"; }
 }
@@ -304,6 +304,30 @@ write_mounts() {
 }
 
 # --- check_settings ----------------------------------------------------------
+
+@test "check_egress_api_key: the short --api placeholder is matched whole" {
+  ANTHROPIC_API_KEY=claude-docker-proxy
+  printf '{"customApiKeyResponses":{"approved":["claude-docker-proxy"]}}' >"$ROOT_HOME/.claude.json"
+  check_egress_api_key >/dev/null
+  [ "$PASS_COUNT" -eq 1 ] && [ "$FAIL_COUNT" -eq 0 ]
+}
+
+@test "check_egress_api_key: a long key is matched on its last 20 characters" {
+  ANTHROPIC_API_KEY=sk-fake-egress-smoke-api-key-0123456789
+  printf '{"customApiKeyResponses":{"approved":["-api-key-0123456789"]}}' >"$ROOT_HOME/.claude.json"
+  check_egress_api_key >/dev/null
+  [ "$PASS_COUNT" -eq 0 ] && [ "$FAIL_COUNT" -eq 1 ]
+  printf '{"customApiKeyResponses":{"approved":["e-api-key-0123456789"]}}' >"$ROOT_HOME/.claude.json"
+  check_egress_api_key >/dev/null
+  [ "$PASS_COUNT" -eq 1 ]
+}
+
+@test "check_egress_api_key: no approval fails" {
+  ANTHROPIC_API_KEY=claude-docker-proxy
+  printf '{}' >"$ROOT_HOME/.claude.json"
+  run check_egress_api_key
+  [[ "$output" == "FAIL: egress-api-key: ANTHROPIC_API_KEY not approved in ~/.claude.json" ]]
+}
 
 @test "check_settings: sentinel mismatch reports size, not content" {
   mkdir -p "${ROOT_HOME}/.claude"
