@@ -46,9 +46,10 @@ GHCR](docs/installation.md#prebuilt-image-from-ghcr).
 In scope: the `run.sh` wrapper, `entrypoint.sh`, the `Dockerfile` and the image
 it produces, the credential opt-in model, the privilege drop and capability set,
 the `gh` auth-proxy sidecar, the `--egress-lock` (model traffic reaching
-anything but `ANTHROPIC_BASE_URL`, a connection that bypasses the proxy or its
-saved log, reaching metadata, or leaking data over DNS, in an `--egress-lock`
-session), and the persistent named-volume model.
+anything but `ANTHROPIC_BASE_URL`, a connection that leaves the session's
+internal network other than through the proxy or to the auth-proxy sidecar's
+fixed upstreams, reaching metadata, or leaking data over DNS, in an
+`--egress-lock` session), and the persistent named-volume model.
 
 Out of scope, because they are documented properties rather than defects — read
 the [threat model](docs/security.md#threat-model) before reporting:

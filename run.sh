@@ -125,7 +125,8 @@ Wrapper flags:
                       --internal network and goes out only via a squid sidecar
                       (HTTPS via CONNECT, no TLS interception) that refuses
                       *.anthropic.com / *.claude.ai / *.claude.com and logs
-                      every connection. Other hosts stay reachable. The log
+                      every connection it carries. Other hosts stay
+                      reachable. The log
                       is saved on the host when the session ends. Claude
                       Code's managed settings pin the endpoint, so a project's
                       .claude/settings.json can't move it.
@@ -371,10 +372,11 @@ validate_opts() {
       exit 1
     fi
   done
-  # --egress-lock: every connection goes through a logging squid sidecar
-  # (see api-egress-policy), and model traffic may reach only the configured
-  # endpoint. Its own opt-in, not part of --api, because most gateway users
-  # don't need the sidecar or a log of every connection; it needs --api or
+  # --egress-lock: every connection goes through a logging squid sidecar,
+  # except requests to the auth-proxy sidecar's fixed upstreams that skip the
+  # proxy env (see api-egress-policy), and model traffic may reach only the
+  # configured endpoint. Its own opt-in, not part of --api, because most
+  # gateway users don't need the sidecar or a log of every connection; it needs --api or
   # --api-direct for the endpoint and token forwarding. Under --api the model
   # traffic goes agent → squid → auth-proxy sidecar → endpoint, so the
   # endpoint below is the sidecar's upstream. Everything else stays open: only model traffic has to stay in the
@@ -1827,7 +1829,7 @@ start_egress_sidecar() {
     )
     via=""
     [ "$API_SIDECAR_ACTIVE" = "1" ] && via=" (via the auth-proxy sidecar)"
-    echo "claude-docker: egress proxy '$EGRESS_SIDECAR' is active; model traffic goes only to $egress_api_host$via, every connection is logged to $EGRESS_LOG_DIR" >&2
+    echo "claude-docker: egress proxy '$EGRESS_SIDECAR' is active; model traffic goes only to $egress_api_host$via, connections through it are logged to $EGRESS_LOG_DIR" >&2
   fi
 }
 
