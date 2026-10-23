@@ -12,7 +12,8 @@ putting stubs ahead of the real tools on PATH:
   cygpath  -m maps a POSIX path P to "W:P"; -u maps it back
   id       reports Git Bash's synthetic SID-derived IDs
   git      answers core.autocrlf lookups, records the -C path it was given
-  docker   records every invocation's argv; `run --rm` also snapshots the
+  docker   records every invocation's argv and answers the auth-proxy
+           sidecar's readiness polls; `run --rm` also snapshots the
            .git/config overlay, since run.sh's EXIT trap deletes the stage dir
 
 "W:" is a deliberately fake drive so a host path that skipped hostpath() is
@@ -67,6 +68,7 @@ STUBS = {
         unwin() { printf '%s' "${1#W:}"; }
         case "$1" in
           ps)      [ "$2" = "-q" ] && echo running ;;
+          logs)    echo '{"msg":"serving initial configuration"}' ;;
           inspect) echo 10.0.0.2 ;;
           cp)      dest=$(unwin "$3"); [ -d "$(dirname "$dest")" ] && echo CA >"$dest" ;;
           run)
@@ -185,7 +187,15 @@ class GitBashTest(unittest.TestCase):
         cps = [c for c in self.h.calls() if c[0] == "cp"]
         self.assertTrue(cps, "run.sh never extracted the sidecar CA")
         self.assertTrue(cps[0][2].startswith("W:"), cps[0])
-        self.assertTrue(cps[0][2].endswith("/gh-proxy/root.crt"), cps[0])
+        self.assertTrue(cps[0][2].endswith("/auth-proxy/root.crt"), cps[0])
+
+    def test_auth_proxy_config_mount_is_windows_form(self):
+        self.start("--gh", GH_TOKEN="ghp_fake")
+        sidecar = [c for c in self.h.calls() if c[:2] == ["run", "-d"]]
+        self.assertTrue(sidecar, "run.sh never started the sidecar")
+        mounts = pairs(sidecar[0], "-v")
+        self.assertEqual(len(mounts), 1, mounts)
+        self.assertTrue(mounts[0].startswith("W:") and mounts[0].endswith("/auth-proxy/caddy:/etc/caddy:ro"), mounts)
 
     def test_appdata_credential_lookups(self):
         a = self.h.appdata

@@ -31,6 +31,7 @@ PROC_MOUNTS="${PROC_MOUNTS:-/proc/self/mounts}"
 ROOT_HOME="${ROOT_HOME:-/root}"
 SEED_SETTINGS="${SEED_SETTINGS:-/run/claude-docker/settings.json}"
 API_CA="${API_CA:-/usr/local/share/ca-certificates/claude-docker-api.crt}"
+AUTH_PROXY_CA="${AUTH_PROXY_CA:-/usr/local/share/ca-certificates/claude-docker-auth-proxy.crt}"
 CA_BUNDLE="${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}"
 
 PASS_COUNT=0
@@ -359,6 +360,20 @@ check_credentials() {
           fail "optin-${optin}-env: ${env_var} expected but not set (forwarding regression)"
         fi
       fi
+      # --glab keeps the token in the auth-proxy sidecar: the agent sees only
+      # the placeholder, and the session CA it reaches GitLab through is trusted.
+      if [ "$optin" = "glab" ]; then
+        if [ "${GITLAB_TOKEN:-}" = "claude-docker-proxy" ]; then
+          pass "optin-glab-proxy: GITLAB_TOKEN is the auth-proxy placeholder"
+        else
+          fail "optin-glab-proxy: GITLAB_TOKEN is not the placeholder (real token forwarded?)"
+        fi
+        if [ -f "$AUTH_PROXY_CA" ]; then
+          pass "optin-glab-proxy-ca: the auth-proxy session CA is mounted"
+        else
+          fail "optin-glab-proxy-ca: auth-proxy session CA missing"
+        fi
+      fi
     else
       # Config path must be absent or masked (empty tmpfs from run.sh).
       if [ ! -e "$config_path" ]; then
@@ -464,17 +479,22 @@ check_aws_state_masking() {
 }
 
 # --api has no config path, so it can't ride check_credentials' shape. What
-# matters: the endpoint env arrives, and the mounted private CA made it into
-# the system bundle (the entrypoint's update-ca-certificates step) — without
-# that, a TLS-terminating gateway fails on the first request.
+# matters: Claude Code is pointed at the auth-proxy sidecar with a placeholder
+# credential (the real one stays in the sidecar), and the mounted private CA
+# made it into the system bundle (the entrypoint's update-ca-certificates step).
 check_api() {
   local ca="$API_CA" bundle="$CA_BUNDLE" ca_line=""
   case ",${EXPECT_OPTINS:-}," in
     *,api,*)
-      if [ -n "${ANTHROPIC_BASE_URL:-}" ]; then
-        pass "optin-api-env: ANTHROPIC_BASE_URL is forwarded"
+      if [ "${ANTHROPIC_BASE_URL:-}" = "http://claude-docker-api-proxy:8080" ]; then
+        pass "optin-api-env: ANTHROPIC_BASE_URL points at the auth-proxy sidecar"
       else
-        fail "optin-api-env: ANTHROPIC_BASE_URL expected but not set"
+        fail "optin-api-env: ANTHROPIC_BASE_URL is '${ANTHROPIC_BASE_URL:-<unset>}', not the sidecar"
+      fi
+      if [ "${ANTHROPIC_AUTH_TOKEN:-}" = "claude-docker-proxy" ]; then
+        pass "optin-api-proxy: ANTHROPIC_AUTH_TOKEN is the auth-proxy placeholder"
+      else
+        fail "optin-api-proxy: ANTHROPIC_AUTH_TOKEN is not the placeholder (real token forwarded?)"
       fi
       # Line 2 is the first base64 line of the PEM body — unique to this CA.
       # It must be non-empty: grep -F "" matches any bundle.
