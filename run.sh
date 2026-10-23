@@ -107,6 +107,8 @@ Wrapper flags:
 Separator:
   --                  Ends wrapper-flag parsing. Everything after is passed
                       to `claude`, e.g. `claude-docker ~/repo -- --resume`.
+                      Resume a past session with `-- --resume` (picker),
+                      `-- --resume <session-id>` or `-- --continue` (latest).
 
 Environment:
   CLAUDE_DOCKER_TMUX       1  → plain tmux wrapper (same as --tmux).

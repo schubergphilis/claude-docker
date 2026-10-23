@@ -683,6 +683,12 @@ run_statusline() {
   grep -q "^docker run --rm -it .*-v $WS:/workspaces/repo .*CLAUDE_DOCKER_FLAGS=aws,ephemeral -w /workspaces/repo claude-code:local claude --resume$" "$CALLS"
 }
 
+@test "main: -- --resume <session-id> reaches claude unchanged" {
+  run_script "$WS" -- --resume 0b5c1e2a-6f3d-4c8e-9a71-2d4f6b8e0c13
+  [ "$status" -eq 0 ]
+  grep -q "^docker run --rm -it .* -w /workspaces/repo claude-code:local claude --resume 0b5c1e2a-6f3d-4c8e-9a71-2d4f6b8e0c13$" "$CALLS"
+}
+
 @test "main: a bad workspace stops before any docker call" {
   run_script "$BATS_TEST_TMPDIR/missing"
   [ "$status" -eq 1 ]

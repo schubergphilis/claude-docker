@@ -77,7 +77,7 @@ Only `docker` and `podman` are accepted; any other value is rejected before anyt
 claude-docker                             # current dir as workspace
 claude-docker ~/repo-a ~/repo-b           # multi-workspace
 claude-docker --yolo ~/repo               # alias for --dangerously-skip-permissions
-claude-docker ~/repo -- --resume          # any claude flag after --
+claude-docker ~/repo -- --resume          # resume a past session (any claude flag goes after --)
 ```
 
 `claude-docker --help` (or `-h`) prints every wrapper flag with a one-line explanation — the canonical reference.
@@ -114,9 +114,21 @@ claude-docker --ephemeral --ro ~/untrusted-repo
 
 For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](docs/usage.md#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](docs/security.md#threat-model) for what it does and doesn't protect.
 
-### Resuming sessions across workspaces
+### Resuming sessions
 
-Conversation history persists in the shared `claude-code-home` volume (skipped under `--ephemeral`), so `claude --resume` followed by `Ctrl+A` lists sessions from every workspace you've ever used — not just the one you're currently in.
+The container starts `claude` directly, so there is no shell to type `claude --resume` in. Pass the flag through the wrapper instead, after `--`:
+
+```bash
+claude-docker ~/repo -- --resume                # pick from this workspace's sessions
+claude-docker ~/repo -- --resume <session-id>   # resume a specific session
+claude-docker ~/repo -- --continue              # resume the most recent session
+```
+
+Inside a running session, `/resume` opens the same picker. In the picker, `Ctrl+A` lists sessions from every workspace you've used, not just the current one.
+
+Sessions are listed per container path, `/workspaces/<basename>` of the first workspace. A session started from `~/repo` shows up without `Ctrl+A` only when you launch with a first workspace named `repo` again; two host directories with the same basename share one list.
+
+Conversation history persists in the shared `claude-code-home` volume. Under `--ephemeral` it doesn't, so there is nothing to resume.
 
 ## Documentation
 
