@@ -17,7 +17,7 @@ SHELL ["/bin/bash", "-eo", "pipefail", "-c"]
 # it alone and only reminds the operator to check it.
 # NODE_VERSION format is NodeSource's: <upstream>-1nodesource1.
 # Bump with: curl -fsSL https://deb.nodesource.com/node_24.x/dists/nodistro/main/binary-amd64/Packages.gz | gunzip | grep -E '^(Package|Version):' | head -4
-ARG NODE_VERSION=24.20.0-1nodesource1
+ARG NODE_VERSION=24.22.1-1nodesource1
 
 # task (go-task) is the same class of MANUAL pin as nodejs above: it installs from
 # a signed apt repo (Cloudsmith), and update_pins.py only knows how to pin direct
@@ -210,12 +210,11 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 # assumes are one tree).
 # MANUAL pin, like NODE_VERSION above and NOT a pins/ fragment: go.dev's release
 # JSON carries no publish dates, so update_pins.py cannot evaluate its soak
-# window for Go — it only reminds the operator to look. 1.26.9 was pinned on
-# 2026-10-09, one day after its 2026-10-08 tag, i.e. INSIDE the 7-day soak, on
-# purpose: it fixes two stdlib CVEs (CVE-2026-78667 net/http, CVE-2026-97031
-# crypto/tls) that fail the Trivy gate, and .trivyignore must not hide a
-# finding a bump can fix. Both hashes were checked against locally downloaded
-# tarballs. The next bump goes back to the normal soak.
+# window for Go — it only reminds the operator to look. 1.26.10 was pinned on
+# 2026-10-22, INSIDE the 7-day soak, on purpose: it fixes a stdlib CVE
+# (CVE-2026-111943 crypto/x509) that fails the Trivy gate, and .trivyignore
+# must not hide a finding a bump can fix. Both hashes were checked against
+# locally downloaded tarballs. The next bump goes back to the normal soak.
 # Bump with (version + both hashes in one shot):
 #   curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r '.[] | select(.stable) |
 #     .version, (.files[] | select(.os=="linux" and .kind=="archive" and
@@ -228,9 +227,9 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 # api/ (the stdlib API compatibility lists for Go's own release checks), test/
 # (the compiler's regression suite) and every src/**/testdata are only read by
 # tests of Go itself, never by building or testing user code, so they go.
-ARG GO_VERSION=1.26.9
-ARG GO_SHA256_AMD64=42d158b4d8f7b61ac0a830567c940a86098fb7aac52e467a5ebec03ef5cc2f8d
-ARG GO_SHA256_ARM64=4a97373d49fcacdcf3694fea368a500b00ee3e963974f3e7514132717632f052
+ARG GO_VERSION=1.26.10
+ARG GO_SHA256_AMD64=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5
+ARG GO_SHA256_ARM64=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797
 RUN ARCH=$(dpkg --print-architecture); \
     case "$ARCH" in \
       amd64) SHA="${GO_SHA256_AMD64}" ;; \
