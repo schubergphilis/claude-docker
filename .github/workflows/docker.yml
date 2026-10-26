@@ -14,23 +14,26 @@ name: Docker
 # a re-run or a stray dispatch cannot replace what a published version pulls.
 # A defect in a published image is fixed by cutting a new version.
 #
-# No `pull_request` trigger on purpose. ci.yml's `Docker build (validate, no
-# push)` already builds the image on every PR, with a gha layer cache this
-# action does not use, and now builds one architecture where this builds two —
-# the second under QEMU. Running both on every PR pays 3-4x the build time for a
-# second answer to "does it build". A branch that needs the scan before merge
-# gets it from `workflow_dispatch`; otherwise the first run is on main, before
-# any tag exists to publish.
+# Runs on every pull request too, without publishing: the action pushes only
+# on a `push` or `workflow_dispatch` on a tag ref. This is the only workflow
+# that runs dockle, dive and grype, so a change that breaks them (such as a pin
+# bump that moves a bundled dependency out of a version-scoped .grype.yaml
+# rule) would otherwise first fail on main and on the tag meant to publish it.
+# It costs a second, two-architecture build next to ci.yml's, and stays out of
+# the required checks: see the note on the job.
 "on":
   push:
     branches: [main]
     tags: [v*]
+  # Every base branch, so a PR in a stack is scanned too.
+  pull_request: {}
   workflow_dispatch: {}
 
 concurrency:
   group: docker-${{ github.ref }}
-  # Never cancel in flight: a superseded run may be mid-push to ghcr.
-  cancel-in-progress: false
+  # A superseded pull-request run is cancelled, since it never publishes. Any
+  # other run is never cancelled in flight: it may be mid-push to ghcr.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 permissions:
   contents: read
