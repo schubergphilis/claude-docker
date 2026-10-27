@@ -1,0 +1,86 @@
+---
+# Git hooks that run CI's checks before a commit or push reaches CI. Install
+# once per clone with `prek install` (or `pre-commit install`); this installs
+# all three stages below. Each tool is pinned to the version CI runs, and
+# .markdownlint.yaml and .yamllint.yaml mirror mcvs-general-action's configs,
+# so a hook and its CI job agree.
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
+default_stages: [pre-commit]
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # openspec/specs/ is generated and openspec/changes/archive/ is
+      # history: neither is edited by hand (AGENTS.md), so no fixer rewrites
+      # them either. markdownlint skips them for the same reason.
+      - id: trailing-whitespace
+        exclude: ^openspec/(specs|changes/archive)/
+      - id: end-of-file-fixer
+        exclude: ^openspec/(specs|changes/archive)/
+      - id: check-merge-conflict
+      - id: detect-private-key
+
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: [--baseline, .secrets.baseline]
+
+  # CI: ci.yml's ShellCheck step (v0.11.0, severity warning).
+  - repo: https://github.com/shellcheck-py/shellcheck-py
+    rev: v0.11.0.1
+    hooks:
+      - id: shellcheck
+        args: [--severity=warning]
+
+  # CI: ci.yml's Hadolint step (hadolint-action v3.5.0 runs hadolint 2.15.1).
+  - repo: https://github.com/AleksaC/hadolint-py
+    rev: v2.15.1
+    hooks:
+      - id: hadolint
+        args: [--config, .hadolint.yaml, --failure-threshold, warning]
+
+  # CI: general.yml's yamllint job (yamllint 1.38.0).
+  - repo: https://github.com/adrienverge/yamllint
+    rev: v1.38.0
+    hooks:
+      - id: yamllint
+        args: [-c, .yamllint.yaml]
+
+  # CI: general.yml's markdownlint job (markdownlint-cli2 0.23.2).
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.23.2
+    hooks:
+      - id: markdownlint-cli2
+
+  # CI: general.yml's lint-action job, and the zizmor workflow.
+  - repo: https://github.com/zizmorcore/zizmor-pre-commit
+    rev: v1.31.1
+    hooks:
+      - id: zizmor
+        args: [--min-severity, low]
+
+  # CI: general.yml's lint-commit job (commitlint, config-conventional).
+  - repo: https://github.com/jorisroovers/gitlint
+    rev: v0.19.1
+    hooks:
+      - id: gitlint
+
+  # CI: ci.yml's unit-test and BATS steps. bats is not pip-installable, so
+  # it must be on PATH (see CONTRIBUTING.md).
+  - repo: local
+    hooks:
+      - id: unit-tests
+        name: unit tests
+        entry: python3 -m unittest discover -s tests -p "test_*.py"
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+      - id: bats
+        name: BATS tests
+        entry: bats tests/bats
+        language: system
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true

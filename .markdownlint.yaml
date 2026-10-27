@@ -1,0 +1,11 @@
+---
+# Mirrors mcvs-general-action's configs/mcvs.markdownlint.yaml (v0.11.1,
+# pinned in general.yml). CI passes that file with --config, which takes the
+# place of this one; this copy makes a local markdownlint-cli2 run and the
+# pre-commit hook agree with CI. Re-sync on an action bump.
+# Prose here is hand-wrapped and tables cannot wrap at all.
+MD013: false
+# The logo needs an <img> tag for its width attribute.
+MD033:
+  allowed_elements:
+    - img

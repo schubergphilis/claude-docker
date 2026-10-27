@@ -51,6 +51,35 @@ having to do it.
 
 ## Local checks before opening a PR
 
+### Git hooks
+
+[`.pre-commit-config.yaml`](.pre-commit-config.yaml) runs most of CI's checks
+as git hooks, so a problem shows up before you push. Install them once per
+clone with [prek](https://github.com/j178/prek) (or
+[pre-commit](https://pre-commit.com), which reads the same file):
+
+```bash
+prek install    # installs the pre-commit, commit-msg and pre-push hooks
+```
+
+- **pre-commit** (on the staged files): whitespace and merge-conflict checks,
+  secret scanning, ShellCheck, hadolint, yamllint, markdownlint and zizmor.
+- **commit-msg**: Conventional Commits, like CI's `lint-commit` job.
+- **pre-push**: the unit tests and the BATS tests. `bats` has to be on your
+  `PATH` (e.g. `brew install bats-core` or `apt-get install bats`).
+
+Each hook runs the version CI runs, and `.markdownlint.yaml` and
+`.yamllint.yaml` mirror the configs `mcvs-general-action` passes in CI. Run
+everything over the whole repo with `prek run --all-files`. A secret
+scanner false positive goes into `.secrets.baseline`:
+`detect-secrets scan --baseline .secrets.baseline` (detect-secrets 1.5.0),
+then mark it with `detect-secrets audit .secrets.baseline`.
+
+The hooks don't build the image, run the smoke tests or check links; CI
+still does.
+
+### Manual checks
+
 CI runs these on every PR; running them locally first is faster:
 
 ```bash

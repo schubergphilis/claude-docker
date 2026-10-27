@@ -1,0 +1,15 @@
+---
+# Mirrors mcvs-general-action's configs/yamllint.yaml (v0.11.1, pinned in
+# general.yml), which CI passes with -c. Kept here so a local `yamllint .`
+# and the pre-commit hook agree with CI. Re-sync on an action bump.
+extends: default
+ignore:
+  - openspec
+rules:
+  comments:
+    min-spaces-from-content: 1
+  document-start:
+    level: error
+  quoted-strings:
+    quote-type: double
+    required: only-when-needed

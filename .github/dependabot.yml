@@ -21,3 +21,21 @@ updates:
       github-actions-all:
         patterns:
           - "*"
+  - package-ecosystem: pre-commit
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      pre-commit-all:
+        patterns:
+          - "*"
+    ignore:
+      # Pinned to the version CI runs, so a hook and its CI job agree; each
+      # moves with its CI pin (ci.yml, or mcvs-general-action in general.yml),
+      # not on its own. Dependabot names a hook by its repo URL.
+      - dependency-name: https://github.com/shellcheck-py/shellcheck-py
+      - dependency-name: https://github.com/AleksaC/hadolint-py
+      - dependency-name: https://github.com/adrienverge/yamllint
+      - dependency-name: https://github.com/DavidAnson/markdownlint-cli2

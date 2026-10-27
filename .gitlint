@@ -1,0 +1,5 @@
+# Conventional Commits, like general.yml's lint-commit job (commitlint with
+# config-conventional). Like CI, body line length is not checked.
+[general]
+contrib=contrib-title-conventional-commits
+ignore=body-max-line-length
