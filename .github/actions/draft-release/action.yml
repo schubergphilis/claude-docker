@@ -1,7 +1,7 @@
 # yamllint disable rule:line-length
 ---
-name: 'Draft Release'
-description: 'Drafts a GitHub release from the Conventional Commit subjects merged since the last published release'
+name: Draft Release
+description: Drafts a GitHub release from the Conventional Commit subjects merged since the last published release
 
 inputs:
   github_token:
@@ -14,7 +14,7 @@ inputs:
 
   repository:
     required: false
-    description: 'Repository to draft the release in, in <owner>/<name> format.'
+    description: Repository to draft the release in, in <owner>/<name> format.
     default: ${{ github.repository }}
 
   head:
@@ -44,17 +44,17 @@ inputs:
       release becomes the baseline (v2.0.0-beta.1 is counted from, not v1.4.0), and a tag
       counts by its MAJOR.MINOR.PATCH, so a fix on top of v0.2.0-rc.1 drafts v0.2.1 rather
       than finalising v0.2.0. Pass this input to override either.
-    default: ''
+    default: ""
 
   version_prefix:
     required: false
-    description: 'Prefix in front of the version number in a tag, for example the v in v3.3.0.'
-    default: 'v'
+    description: Prefix in front of the version number in a tag, for example the v in v3.3.0.
+    default: v
 
   first_version:
     required: false
-    description: 'Version to draft when the repository has no published release to count from.'
-    default: 'v0.1.0'
+    description: Version to draft when the repository has no published release to count from.
+    default: v0.1.0
 
   minor_types:
     required: false
@@ -63,7 +63,7 @@ inputs:
       Every other type bumps the patch version; a ! marker, or a `BREAKING CHANGE: ` footer
       at the start of a line in the pull request body, bumps the major version whatever the
       type is. Naming the marker mid-sentence or inside a fenced block does not.
-    default: 'feat'
+    default: feat
 
   pre_major:
     required: false
@@ -72,7 +72,7 @@ inputs:
       moves the minor, everything else the patch, and nothing reaches 1.0.0 on its own.
       Set to false to let a breaking change below 1.0.0 draft 1.0.0. Has no effect from
       1.0.0 onwards.
-    default: 'true'
+    default: "true"
 
   categories:
     required: false
@@ -90,8 +90,8 @@ inputs:
 
   other_category:
     required: false
-    description: 'Heading for entries that match no category.'
-    default: 'Other changes'
+    description: Heading for entries that match no category.
+    default: Other changes
 
   prerelease:
     required: false
@@ -99,38 +99,38 @@ inputs:
       Mark the draft as a prerelease, for a repository where publishing a prerelease means
       something (a deploy that stops at acceptance, say). The flag is written on every run,
       so a draft cannot keep a flag it picked up once: set it here rather than by hand.
-    default: 'false'
+    default: "false"
 
   dry_run:
     required: false
     description: >-
       Render the notes and the next version, and write them to the job summary, without
       creating or updating anything on GitHub.
-    default: 'false'
+    default: "false"
 
 outputs:
   version:
-    description: 'Tag the draft carries, for example v3.4.0. Empty when there was nothing to draft.'
+    description: Tag the draft carries, for example v3.4.0. Empty when there was nothing to draft.
     value: ${{ steps.draft.outputs.version }}
 
   previous_tag:
-    description: 'Release the notes were counted from. Empty when the repository had no published release.'
+    description: Release the notes were counted from. Empty when the repository had no published release.
     value: ${{ steps.draft.outputs.previous_tag }}
 
   bump:
-    description: 'Version bump the changes add up to: major, minor or patch. Empty when there was nothing to draft.'
+    description: "Version bump the changes add up to: major, minor or patch. Empty when there was nothing to draft."
     value: ${{ steps.draft.outputs.bump }}
 
   changes:
-    description: 'Number of entries in the notes.'
+    description: Number of entries in the notes.
     value: ${{ steps.draft.outputs.changes }}
 
   release_url:
-    description: 'URL of the draft release. Empty on a dry run or when there was nothing to draft.'
+    description: URL of the draft release. Empty on a dry run or when there was nothing to draft.
     value: ${{ steps.draft.outputs.release_url }}
 
 runs:
-  using: "composite"
+  using: composite
 
   steps:
     - name: Draft the release
