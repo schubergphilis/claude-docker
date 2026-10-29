@@ -11,10 +11,11 @@
 
 ## Quickstart
 
-On macOS or Linux with Homebrew, no clone or build needed:
+With Homebrew on macOS or Linux, there is nothing to build:
 
 ```bash
-brew install schubergphilis/tap/claude-docker
+brew tap schubergphilis/claude-docker https://github.com/schubergphilis/claude-docker
+brew install claude-docker
 claude-docker ~/repo
 ```
 

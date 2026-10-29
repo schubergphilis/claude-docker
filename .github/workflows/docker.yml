@@ -42,7 +42,7 @@ jobs:
     # only-fixed=false, so an unrelated upstream CVE can turn this red.
     name: Docker build, scan and publish
     runs-on: ubuntu-24.04
-    # Only this job pushes to ghcr; the Homebrew job below gets no write.
+    # Only this job pushes to ghcr; the Homebrew job below cannot.
     permissions:
       contents: read
       packages: write
@@ -125,15 +125,15 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
   # Runs only once the image above is published, so a failed scan, which
-  # publishes nothing, also opens no tap pull request. homebrew.yml skips any
-  # tag that is not a stable vX.Y.Z.
+  # publishes nothing, also opens no formula pull request. homebrew.yml skips
+  # any tag that is not a stable vX.Y.Z.
   homebrew:
     needs: docker
     if: startsWith(github.ref, 'refs/tags/v')
+    # Pushes the bump branch and opens its pull request; no packages access.
     permissions:
-      contents: read
+      contents: write
+      pull-requests: write
     uses: $/.github/workflows/homebrew.yml
     with:
       tag: ${{ github.ref_name }}
-    secrets:
-      HOMEBREW_TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

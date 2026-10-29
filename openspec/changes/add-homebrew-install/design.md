@@ -8,37 +8,68 @@ image defaults to `claude-code:local`, overridable with `CLAUDE_DOCKER_IMAGE`.
 Every stable release tag is published to `ghcr.io/schubergphilis/claude-docker`
 for `linux/amd64` and `linux/arm64`, and the package pulls anonymously. A tag
 whose `docker.yml` run fails publishes nothing. `release.yml` creates the tag
-and dispatches `docker.yml`; release candidates are tagged and published the
-same way, by hand.
+from Conventional Commits (`feat` minor, `fix`/`perf` patch, nothing else
+releases) and dispatches `docker.yml`. Release candidates are tagged and
+published the same way, by hand.
 
-`schubergphilis/homebrew-tap` exists, is public, and holds one formula
-(`grawsp`). It has no CI.
+`schubergphilis/homebrew-tap` exists and holds one formula (`grawsp`), but has
+had no commit since 2024 and its creator has left.
 
 ## Goals / Non-Goals
 
-**Goals:** `brew install schubergphilis/tap/claude-docker` gives a working
-`claude-docker` with no clone and no build; a Homebrew install runs the image
-published for its own version; the formula follows stable releases without a
-hand edit; nothing changes for a clone.
+**Goals:** two `brew` commands give a working `claude-docker` with no build; a
+Homebrew install runs the image published for its own version; the formula
+follows stable releases without a hand edit or an outside maintainer; nothing
+changes for a clone.
 
 **Non-Goals:** homebrew-core; a Windows package; a bottle (there is nothing to
 compile); attaching extra release assets.
 
 ## Decisions
 
-### D1: Install from the release's source archive
+### D1: This repository is the tap
+
+`Formula/claude-docker.rb` lives here. Homebrew taps any Git repository given
+its URL:
+
+```bash
+brew tap schubergphilis/claude-docker https://github.com/schubergphilis/claude-docker
+brew install claude-docker
+```
+
+No homebrew-core formula is named `claude-docker`, so the short name resolves
+to this one. The formula is maintained and reviewed with the code it installs,
+its bump needs no token outside this repository, and no other team has to
+merge anything.
+
+Alternatives rejected:
+
+- `schubergphilis/homebrew-tap`, which gives the shorter
+  `brew install schubergphilis/tap/claude-docker`. It is unmaintained, so every
+  release would wait on a merge nobody is there to make, and its bump would
+  need a token stored here with fork-and-PR rights there.
+- A dedicated `schubergphilis/homebrew-claude-docker`. The same one-step
+  install by name, but a second repository to own for one file.
+
+Cost: `brew tap` keeps a clone of this repository (about 7 MB) inside
+Homebrew, and the install is two commands with a URL.
+
+### D2: Install from the release's source archive
 
 The formula's `url` is
 `https://github.com/schubergphilis/claude-docker/archive/refs/tags/vX.Y.Z.tar.gz`,
 which GitHub serves for every tag. It is about 1.7 MB, of which the formula
 keeps `run.sh`.
 
-Alternative: upload `run.sh` as a release asset and point the formula at it.
-Smaller download, but one more step in the release job that can fail between
-the tag and the image, and a second artifact to keep in step with the tag.
+The formula cannot be part of the release it names, since that release's
+archive would contain its own checksum. So `url` and `sha256` on `main` name
+the latest stable release, and move after it (D5).
+
+Alternative: upload `run.sh` as a release asset. Smaller download, but one
+more step in the release job that can fail between the tag and the image.
 Revisit if the archive grows.
 
-### D2: A launcher sets the default image; `run.sh` is untouched
+### D3: A launcher sets the default image; `run.sh` is untouched
 
 ```bash
 #!/bin/bash
@@ -64,72 +95,61 @@ Alternatives rejected:
 - Changing `run.sh`'s default to GHCR for everyone: drops the local-build
   default the spec keeps, and `run.sh` does not know its own version.
 
-### D3: No hard dependency on a container runtime
+### D4: No hard dependency on a container runtime
 
 `run.sh` supports Docker Desktop, Colima's `docker` and Podman, and picks the
 runtime itself. `depends_on "docker"` would install a CLI the Docker Desktop
 and Podman users don't use. The formula states the requirement in `caveats`.
 No `depends_on "bash"` either: `run.sh` targets bash 3.2.
 
-### D4: The tap is bumped after the image is published, for stable tags only
+### D5: The formula is bumped by pull request after the image is published
 
 `.github/workflows/homebrew.yml` is a reusable workflow. `docker.yml` calls it
-as a `homebrew` job that `needs` the publishing job, on tag refs only. A tag
-whose publish failed has no image, and the job is then skipped, so the formula
-never points at one that does not exist. `homebrew.yml` goes on only for a tag
-matching `^v[0-9]+\.[0-9]+\.[0-9]+$`: `-rc.N` tags are published to GHCR on
-purpose but are not supported, so they never reach Homebrew.
+as a `homebrew` job that `needs` the publishing job, on tag refs only.
 
-It is also `workflow_dispatch`able with a tag input, for when a bump is missed.
-Re-running `docker.yml` cannot do that, since it refuses a tag that is already
-published. A dispatch is held to the same tag rule and also checks the tag's
-image is published before bumping.
+- **Only after the image is published.** A tag whose publish failed has no
+  image, and the job is then skipped, so the formula never points at one that
+  does not exist.
+- **Only stable tags.** It goes on only for a tag matching
+  `^v[0-9]+\.[0-9]+\.[0-9]+$`. `-rc.N` tags are published to GHCR on purpose
+  but are not supported, so they never reach Homebrew.
+- **The bump itself.** It checks out `main` and rewrites `url` and `sha256`
+  to the tag's archive. It pushes `homebrew/<tag>` and opens a
+  `chore(homebrew): claude-docker <version>` pull request with `GITHUB_TOKEN`,
+  as `pins-updater.yml` does. `chore` cuts no release, so merging the bump
+  does not loop.
+- **Never backwards.** A tag older than the one the formula names is a no-op,
+  so a dispatch for an old tag cannot downgrade users.
+- **Manual fallback.** It is also `workflow_dispatch`able with a tag input,
+  for when a bump is missed. Re-running `docker.yml` cannot do that, since it
+  refuses a tag that is already published. A dispatch is held to the same tag
+  rule and also checks the tag's image is published before bumping.
 
-The publishing job keeps `packages: write`, now at job level, and the Homebrew
-job gets `contents: read` only.
+The publishing job keeps `packages: write`, now at job level. The Homebrew job
+gets `contents: write` and `pull-requests: write` and no package access.
 
 Alternatives rejected:
 
+- Pushing the bump straight to `main`: skips review of a file every Homebrew
+  user runs.
 - A step in `release.yml` after the dispatch: the dispatch returns before the
   image is built or scanned.
 - `workflow_run` on the Docker workflow: same ordering, but it is a trigger
-  that runs with secrets on another workflow's behalf, which zizmor (run by
-  CI at `min-severity: low`) reports as dangerous.
-
-### D5: Pull requests from a fork, with a token that can fork
-
-The tap is changed only by pull request, from a fork: no one on this project
-needs write access to it, and its maintainers review every formula change. The
-first formula is opened that way by hand.
-
-For releases the workflow uses `mislav/bump-homebrew-formula-action`, pinned
-by SHA. When its token cannot push to the tap it forks the tap into the
-token's account and opens the pull request from there. `GITHUB_TOKEN` can
-do neither in another repository, so the workflow reads a repository secret,
-`HOMEBREW_TAP_TOKEN`: a token for a machine account (not a person's) with
-`public_repo` scope, so it survives people leaving.
-
-If the tap maintainers would rather grant push access, a GitHub App installed
-on the tap replaces the secret and the fork; the workflow change is the token
-step only.
+  that runs with write access on another workflow's behalf, which zizmor (run
+  by CI at `min-severity: low`) reports as dangerous.
 
 ## Risks / Trade-offs
 
-- **Each release waits on a tap merge.** Until a maintainer merges the tap
-  pull request, `brew upgrade` stays on the previous version. Acceptable: the
-  previous version and its image keep working, and published tags are
-  immutable.
+- **Each release waits on a merge here.** Until the bump merges,
+  `brew upgrade` stays on the previous version. Acceptable: the previous
+  version and its image keep working, and published tags are immutable.
 - **Apple Silicon gets the arm64 image, which the publish scans skip.** This
   is the existing gap, but Homebrew makes it the default for most Mac users.
   The Homebrew docs repeat it rather than link to it.
 - **The archive checksum could change.** GitHub has said source-archive
   checksums are stable; if one changes, `brew install` fails closed on the
   mismatch, and the fix is a formula update.
-- **A token with fork-and-PR rights on public repositories.** Scoped to
-  `public_repo` on an account that owns nothing else; used only in a workflow
-  with no checkout of untrusted code.
-
-## Open Questions
-
-- Who on the tap side merges release pull requests, and is a machine account
-  available for `HOMEBREW_TAP_TOKEN`, or should we ask for a GitHub App now?
+- **The formula on `main` is live.** Any merged change to it reaches every
+  user on their next `brew update`, not on a release. It is a small file,
+  reviewed like the rest, and `tests/test_homebrew_workflow.py` checks its
+  `url`, `sha256` and launcher default.

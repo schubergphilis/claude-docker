@@ -4,33 +4,28 @@
 - [x] 1.2 MODIFIED `image-distribution`: *The distribution channel is documented*
 - [x] 1.3 `openspec validate add-homebrew-install --strict` passes
 
-## 2. Tap access
+## 2. Formula (this repository is the tap, design D1)
 
-- [ ] 2.1 A tap maintainer merges the formula pull request, and release pull requests from then on
-- [ ] 2.2 Machine account and `HOMEBREW_TAP_TOKEN` repository secret (`public_repo`), or a GitHub App on the tap (design D5)
+- [x] 2.1 `Formula/claude-docker.rb` at the current stable release: source-archive `url` and `sha256`, `run.sh` in `libexec`, the `bin/claude-docker` launcher (design D3), `caveats` naming the runtimes, `livecheck` on GitHub's latest release, `test do` on `--help`
+- [x] 2.2 Tapped from this repository by path: install, `brew test`, `brew audit --strict --online`, `brew style`
+- [x] 2.3 Launcher image selection with a stub `docker`: default is `ghcr.io/schubergphilis/claude-docker:v1.1.0`, `CLAUDE_DOCKER_IMAGE` wins, `run.sh` from a checkout still runs `claude-code:local`; through macOS `/bin/bash` 3.2
+- [ ] 2.4 End-to-end on a Mac after merge: tap by URL, a real session on Colima and on Docker Desktop
 
-## 3. Formula (pull request on `schubergphilis/homebrew-tap`, from a fork)
+## 3. Release workflow
 
-- [x] 3.1 `Formula/claude-docker.rb` at the current stable release: source-archive `url` and `sha256`, `run.sh` in `libexec`, the `bin/claude-docker` launcher (design D2), `caveats` naming the runtimes, `livecheck` on GitHub's latest release, `test do` on `--help`
-- [x] 3.2 Locally: install from a local tap, `brew test`, `brew audit --strict --new --online`, `brew style`
-- [x] 3.3 Launcher image selection with a stub `docker`: default is `ghcr.io/schubergphilis/claude-docker:v1.1.0`, `CLAUDE_DOCKER_IMAGE` wins, `run.sh` from a checkout still runs `claude-code:local`; through macOS `/bin/bash` 3.2
-- [ ] 3.4 End-to-end on a Mac with no checkout: a real session on Colima and on Docker Desktop
-- [ ] 3.5 Open the pull request from a fork; merged by a tap maintainer
+- [x] 3.1 `.github/workflows/homebrew.yml`: reusable, called by a `homebrew` job in `docker.yml` that needs the publishing job, tag refs only; stable `vX.Y.Z` only; image checked before bumping; never backwards; `workflow_dispatch` with a tag input (design D5)
+- [x] 3.2 Bump on a branch with a `chore(homebrew)` pull request opened with `GITHUB_TOKEN`; `packages: write` moved to the publishing job
+- [x] 3.3 The bump script, run in Ubuntu 24.04: an older tag and the current tag leave the formula alone; v1.0.0 → v1.1.0 writes v1.1.0's url and sha256
+- [x] 3.4 `tests/test_homebrew_workflow.py`: the tag filter rejects `-rc.N`, the image check precedes the bump, the bump is a `chore` pull request and never a push to `main`, the formula names a stable release of this repository and the launcher default, only the publishing job can write packages
+- [x] 3.5 zizmor (offline, `min-severity: low` as CI) and yamllint clean over the changed workflows; actionlint clean on `homebrew.yml` (it does not know the `$/` self-repository syntax in `docker.yml` yet; not run in CI)
 
-## 4. Release workflow
+## 4. Docs
 
-- [x] 4.1 `.github/workflows/homebrew.yml`: reusable, called by a `homebrew` job in `docker.yml` that needs the publishing job, tag refs only; stable `vX.Y.Z` only; image checked before bumping; `workflow_dispatch` with a tag input (design D4)
-- [x] 4.2 Bump with `mislav/bump-homebrew-formula-action`, pinned by SHA with a matching version comment, using `HOMEBREW_TAP_TOKEN`; `create-pullrequest: true`; `packages: write` moved to the publishing job
-- [x] 4.3 `tests/test_homebrew_workflow.py`: the tag filter rejects `-rc.N`, the image check precedes the bump, the job needs the publishing job, only the publishing job can write packages
-- [x] 4.4 zizmor (offline, `min-severity: low` as CI) and yamllint clean over the changed workflows; actionlint 1.7.12, not run in CI, does not know the `$/` self-repository syntax zizmor requires yet
+- [x] 4.1 `README.md` Quickstart: Homebrew first, building from a clone still supported
+- [x] 4.2 `docs/installation.md`: tap, install, upgrade and uninstall; default image and override; arm64 scan gap; release candidates never offered
+- [x] 4.3 `docs/maintenance.md`: how the bump works, what to do when a release opened no pull request, testing a formula change
 
-## 5. Docs
+## 5. Archive
 
-- [x] 5.1 `README.md` Quickstart: Homebrew first, building from a clone still supported
-- [x] 5.2 `docs/installation.md`: Homebrew install, upgrade and uninstall; default image and override; arm64 scan gap; release candidates never offered
-- [x] 5.3 `docs/maintenance.md`: the tap, the token, what to do when a release opened no tap pull request, testing a formula change
-
-## 6. Archive
-
-- [ ] 6.1 `/opsx:archive` (syncs `openspec/specs/`)
-- [ ] 6.2 First release after merge: tag → image → tap pull request → `brew upgrade` picks it up
+- [ ] 5.1 `/opsx:archive` (syncs `openspec/specs/`)
+- [ ] 5.2 First release after merge: tag → image → bump pull request → `brew upgrade` picks it up

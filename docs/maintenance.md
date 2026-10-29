@@ -46,23 +46,26 @@ The [API egress lock](auth.md#api-egress-lock)'s proxy image is the same kind of
 
 ## Homebrew tap
 
-The `claude-docker` formula lives in [`schubergphilis/homebrew-tap`](https://github.com/schubergphilis/homebrew-tap) and is only changed by pull request. After `docker.yml` publishes a tag's image, its `homebrew` job calls [`homebrew.yml`](../.github/workflows/homebrew.yml). For a stable `vX.Y.Z` tag, that runs [`mislav/bump-homebrew-formula-action`](https://github.com/mislav/bump-homebrew-formula-action), which moves the formula's `url` and `sha256` to the tag's source archive and opens the pull request. Any other tag is skipped, and a tag whose image is not published fails the job. A tap maintainer reviews and merges the pull request.
+This repository is its own Homebrew tap: [`Formula/claude-docker.rb`](../Formula/claude-docker.rb) is what `brew install claude-docker` reads, from `main`. Its `url` and `sha256` name the latest stable release. A release cannot name its own archive's checksum, so the formula moves in a pull request after each release:
 
-The `HOMEBREW_TAP_TOKEN` repository secret is a classic token with `public_repo` scope. It belongs to a machine account, not a person, so it outlives whoever set it up. The account has no push access to the tap: the action forks the tap into it and opens the pull request from the fork. When it expires, the next release's `homebrew` job fails; see below.
+1. After `docker.yml` publishes a tag's image, its `homebrew` job calls [`homebrew.yml`](../.github/workflows/homebrew.yml).
+2. For a stable `vX.Y.Z` tag, that checks the image is published, rewrites `url` and `sha256` to the tag's source archive, pushes a `homebrew/<tag>` branch and opens a `chore(homebrew): claude-docker <version>` pull request. Any other tag is skipped. `chore` keeps the merge from cutting another release.
+3. Like the pins refresh, the pull request is opened with `GITHUB_TOKEN`, so its checks wait until a maintainer approves the run. Merge it, and `brew upgrade` picks the release up.
 
-**A release opened no tap pull request.** Check the `homebrew` job of that tag's Docker run:
+**A release opened no Homebrew pull request.** Check the `homebrew` job of that tag's Docker run:
 
 - **Skipped:** the publishing job failed, so there is no image to point at. Fix that first (see [Prebuilt image from GHCR](installation.md#prebuilt-image-from-ghcr)).
-- **Failed:** usually an expired or missing `HOMEBREW_TAP_TOKEN`. Fix the secret, then run `gh workflow run homebrew.yml -f tag=<tag>`. Re-running `docker.yml` does not help, since it refuses a tag that is already published.
+- **Failed:** see its log, then run `gh workflow run homebrew.yml -f tag=<tag>`. Re-running `docker.yml` does not help, since it refuses a tag that is already published. A dispatch never moves the formula backwards, so an old tag is a no-op.
 
-To change the formula itself, such as the launcher or the caveats, open a pull request on the tap from a fork. Before you do, test it locally:
+To change the formula itself, such as the launcher or the caveats, test it locally before opening the pull request:
 
 ```bash
-brew tap <you>/test /path/to/your/homebrew-tap/clone
-brew install <you>/test/claude-docker
+brew tap <you>/claude-docker-test "$PWD"
+brew install <you>/claude-docker-test/claude-docker
 brew test claude-docker
-brew audit --strict --online <you>/test/claude-docker
-brew style <you>/test/claude-docker
+brew audit --strict --online <you>/claude-docker-test/claude-docker
+brew style <you>/claude-docker-test/claude-docker
+brew uninstall claude-docker && brew untap <you>/claude-docker-test
 ```
 
 `brew tap` reads committed files only, so commit before tapping.

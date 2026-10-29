@@ -7,20 +7,21 @@ The [Quickstart](../README.md#quickstart) installs with Homebrew or builds the i
 ## Homebrew
 
 ```bash
-brew install schubergphilis/tap/claude-docker
+brew tap schubergphilis/claude-docker https://github.com/schubergphilis/claude-docker
+brew install claude-docker
 ```
 
-The formula lives in [`schubergphilis/homebrew-tap`](https://github.com/schubergphilis/homebrew-tap). It installs `run.sh` from the release's source archive, checked against the formula's sha256, behind a `claude-docker` launcher on your `PATH`. There is no clone and no build. You still need a container runtime: Docker Desktop, Colima or Podman (see [Container runtime](usage.md#container-runtime)). The formula installs none, since any of them works.
+This repository is its own tap: the formula is [`Formula/claude-docker.rb`](../Formula/claude-docker.rb). `brew tap` keeps a copy of the repository inside Homebrew to read the formula from; you don't work in it. The formula installs `run.sh` from the latest stable release's source archive, checked against its sha256, behind a `claude-docker` launcher on your `PATH`. There is no build. You still need a container runtime: Docker Desktop, Colima or Podman (see [Container runtime](usage.md#container-runtime)). The formula installs none, since any of them works.
 
 **The launcher runs the published image of its own version.** `claude-docker` 1.2.3 runs `ghcr.io/schubergphilis/claude-docker:v1.2.3`, pulled on first use, so the wrapper and its image always match. Set `CLAUDE_DOCKER_IMAGE` to run another, such as a local build: your value wins over the launcher's. `run.sh` from a checkout is unchanged and still defaults to `claude-code:local`.
 
 **On Apple Silicon you get the `linux/arm64` image, which the publish scans do not cover.** dockle, dive and grype only see `linux/amd64`; see [scan coverage](#prebuilt-image-from-ghcr) below. If that matters to you, build locally and point `CLAUDE_DOCKER_IMAGE` at it.
 
-**Only stable releases reach Homebrew.** Each stable `vX.Y.Z` tag whose image is published opens a pull request on the tap that moves the formula to it. A tap maintainer merges it, and `brew upgrade claude-docker` picks it up from then on. Release candidates are never offered. The image of the previous version stays published, so a formula that has not moved yet keeps working.
+**Only stable releases reach Homebrew.** Each stable `vX.Y.Z` tag whose image is published opens a pull request here that moves the formula to it. Once it merges, `brew update && brew upgrade claude-docker` picks it up. Release candidates are never offered. The image of the previous version stays published, so a formula that has not moved yet keeps working.
 
 ```bash
-brew upgrade claude-docker
-brew uninstall claude-docker
+brew update && brew upgrade claude-docker
+brew uninstall claude-docker && brew untap schubergphilis/claude-docker
 ```
 
 Uninstalling leaves the pulled images and the session volumes in your container runtime; remove them with `docker image rm` and `docker volume rm` if you want them gone.
