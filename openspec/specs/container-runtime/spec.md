@@ -172,7 +172,7 @@ SHALL NOT add any of the git configuration above.
 - **GIVEN** `run.sh` runs under a Linux or macOS shell
 - **WHEN** the wrapper builds the engine argv
 - **THEN** `HOST_UID` / `HOST_GID` equal the host's `id -u` / `id -g`
-- **AND** no `GIT_CONFIG_*` variable is passed and the `.git/config` overlay gains no `core.autocrlf` entry
+- **AND** no `safe.directory` entry is passed through `GIT_CONFIG_*` and the `.git/config` overlay gains no `core.autocrlf` entry
 
 ### Requirement: Repository files check out with LF line endings on every host
 

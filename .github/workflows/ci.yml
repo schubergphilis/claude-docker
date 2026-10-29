@@ -36,9 +36,24 @@ jobs:
           scandir: .
           version: v0.11.0
 
+      - name: Caddy binary for the auth-proxy sidecar tests
+        # Copied out of the digest-pinned image run.sh starts as the sidecar,
+        # so the tests exercise exactly that Caddy with no second pin to keep.
+        run: |
+          set -euo pipefail
+          img=$(sed -n 's/^PROXY_IMAGE="\${CLAUDE_DOCKER_PROXY_IMAGE:-\(.*\)}"$/\1/p' run.sh)
+          test -n "$img"
+          cid=$(docker create "$img")
+          docker cp "$cid:/usr/bin/caddy" "$RUNNER_TEMP/caddy"
+          docker rm "$cid" >/dev/null
+          "$RUNNER_TEMP/caddy" version
+          echo "CADDY_BIN=$RUNNER_TEMP/caddy" >> "$GITHUB_ENV"
+
       - name: Unit tests — update_pins.py helpers
         # stdlib unittest on the runner's preinstalled python3 — no install,
         # no third-party action (the suite imports only the standard library).
+        env:
+          CLAUDE_DOCKER_TEST_REQUIRE_CADDY: "1"
         run: python3 -m unittest discover -s tests -p 'test_*.py' -v
 
       - name: BATS unit tests — shell scripts
@@ -161,6 +176,73 @@ jobs:
           #     dropped process lands in exactly that primary group).
           run_cell --uid=501 --gid=501 --volstate=cold --ephemeral=0
 
+      - name: Auth-proxy integration harness
+        # Drives run.sh end to end against mock GitHub, GitLab and API
+        # upstreams with fake credentials. Lives in docker-build for the same
+        # reason as the smoke steps: it needs the image loaded above.
+        env:
+          CLAUDE_DOCKER_IMAGE: claude-docker:ci
+          GH_PROXY_IT_REQUIRE_DOCKER: "1"
+        run: bash tests/integration/gh-proxy-integration.sh
+
+      - name: API egress lock smoke (run.sh end-to-end)
+        # The --egress-lock lives entirely in run.sh (internal network, squid
+        # sidecar, proxy env, teardown). Unlike the cells above, these drive
+        # run.sh itself with the real docker, so the sidecars and their teardown
+        # are exercised as well. They prove that the endpoint and other hosts
+        # are reachable, a model provider is refused, and, the load-bearing
+        # part, that a proxy-unaware client has no route out at all. Same job as
+        # the build for the same reason as the step above.
+        #   1. plain  — endpoint checks, provider denies, DNS, saved log, teardown
+        #   2. --gh   — composition: GitHub traffic via squid → gh sidecar
+        #   3. --endpoint-port — an endpoint on a non-80/443 port is allowed,
+        #      for that endpoint only
+        run: |
+          set -euo pipefail
+          IMAGE=claude-docker:ci bash tests/smoke/egress.sh
+          IMAGE=claude-docker:ci bash tests/smoke/egress.sh --gh
+          IMAGE=claude-docker:ci bash tests/smoke/egress.sh --endpoint-port
+
+      - name: Managed settings precedence (Claude Code in the image)
+        # --egress-lock pins Claude Code's endpoint with managed settings. This
+        # proves, against the image's pinned claude-code, that they beat every
+        # project override (settings.json, settings.local.json, --settings) and
+        # every backend switch, and fails on a backend switch in the bundle
+        # that the managed settings don't pin off. --network none; loopback only.
+        run: IMAGE=claude-docker:ci bash tests/integration/managed-settings-precedence.sh
+
+      - name: Tag the --egress-lock proxy image for scanning
+        # run.sh built it during the egress smoke above, named by its
+        # Containerfile's checksum. Exactly one must exist on this fresh runner.
+        run: |
+          set -euo pipefail
+          refs=$(docker images --format '{{.Repository}}:{{.Tag}}' claude-docker-egress-proxy)
+          [ "$(printf '%s\n' "$refs" | grep -c .)" = 1 ] || { echo "expected one egress proxy image, got: $refs"; exit 1; }
+          docker tag "$refs" claude-docker-egress-proxy:ci
+
+      # The proxy image gets the same two passes as the agent image below, so
+      # squid's CVEs gate like every other package's (openspec/changes/archive/2026-10-09-egress-lock/design.md D5).
+      - name: Vulnerability scan (egress proxy) — HIGH/CRITICAL, advisory (includes unfixed)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker-egress-proxy:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          exit-code: 0
+          trivyignores: .trivyignore
+
+      - name: Vulnerability scan (egress proxy) — HIGH/CRITICAL with a fix available (gate)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          scan-ref: claude-docker-egress-proxy:ci
+          severity: HIGH,CRITICAL
+          scanners: vuln
+          ignore-unfixed: true
+          exit-code: 1
+          trivyignores: .trivyignore
+
       # Known-CVE scanning of the image, in two passes over the same artifact.
       # Like the steps above, these must live in docker-build: Trivy resolves an
       # unqualified reference against the local daemon first, and this is the
@@ -221,3 +303,42 @@ jobs:
           ignore-unfixed: true
           exit-code: 1
           trivyignores: .trivyignore
+
+      # docker.yml's publish scan, run here before the merge. It uses grype with
+      # .grype.yaml, which accepts findings differently from Trivy
+      # (.trivyignore by ID, image-wide; .grype.yaml by package, version and
+      # location), so a change can satisfy Trivy and still fail the publish
+      # scan: npm 12.2.1 moving its bundled undici out of a version-scoped rule
+      # did exactly that, and the first red was main.
+      #
+      # These two steps mirror mcvs-docker-action's: the same scan-action commit
+      # with its default grype, the image and the repo checkout, and the
+      # action's hardcoded severity-cutoff=high and only-fixed=false. So unlike
+      # Trivy's gate, these also fail on a finding with no fix: publish would
+      # fail on it too. Accept such a finding in .grype.yaml. tests/
+      # test_grype_gate.py checks the two workflows agree; bump the SHA together
+      # with docker.yml's mcvs-docker-action (docs/maintenance.md).
+      #
+      # A fixable finding must pass both gates, so it needs a .trivyignore entry
+      # (reason + expiry) as well as a .grype.yaml rule when both scanners
+      # report it. A finding only grype reports is bounded by .grype.yaml alone,
+      # which has no expiry.
+      - name: Vulnerability scan (grype) — image, HIGH/CRITICAL incl. unfixed (gate)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: claude-docker:ci
+          config: .grype.yaml
+          severity-cutoff: high
+          only-fixed: false
+          fail-build: true
+          output-format: table
+
+      - name: Vulnerability scan (grype) — repo checkout, HIGH/CRITICAL incl. unfixed (gate)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          path: .
+          config: .grype.yaml
+          severity-cutoff: high
+          only-fixed: false
+          fail-build: true
+          output-format: table

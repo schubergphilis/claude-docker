@@ -88,3 +88,25 @@ jobs:
           ignore-unfixed: true
           exit-code: 1
           trivyignores: .trivyignore
+
+      # docker.yml's publish scan, the same two grype steps as ci.yml: see the
+      # comment there. Here too, so this run blocks on what the next PR will.
+      - name: Vulnerability scan (grype) — image, HIGH/CRITICAL incl. unfixed (gate)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          image: claude-docker:ci
+          config: .grype.yaml
+          severity-cutoff: high
+          only-fixed: false
+          fail-build: true
+          output-format: table
+
+      - name: Vulnerability scan (grype) — repo checkout, HIGH/CRITICAL incl. unfixed (gate)
+        uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
+        with:
+          path: .
+          config: .grype.yaml
+          severity-cutoff: high
+          only-fixed: false
+          fail-build: true
+          output-format: table

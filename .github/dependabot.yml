@@ -21,3 +21,8 @@ updates:
       github-actions-all:
         patterns:
           - "*"
+    ignore:
+      # Pinned to the commit docker.yml's mcvs-docker-action runs, so the PR and
+      # publish scans run one grype. It moves with that pin, not on its own:
+      # see tests/test_grype_gate.py.
+      - dependency-name: anchore/scan-action

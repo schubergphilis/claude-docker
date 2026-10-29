@@ -9,11 +9,12 @@ setup() {
   PROC_STATUS="${BATS_TEST_TMPDIR}/status"
   PROC_MOUNTS="${BATS_TEST_TMPDIR}/mounts"
   API_CA="${BATS_TEST_TMPDIR}/api.crt"
+  AUTH_PROXY_CA="${BATS_TEST_TMPDIR}/auth-proxy.crt"
   CA_BUNDLE="${BATS_TEST_TMPDIR}/bundle.crt"
   SEED_SETTINGS="${BATS_TEST_TMPDIR}/seed.json"
   mkdir -p "$ROOT_HOME"
   unset EXPECT_OPTINS EXPECT_EPHEMERAL AWS_PROFILE GITLAB_TOKEN TF_TOKEN_app_terraform_io \
-    AZURE_DEVOPS_EXT_PAT ANTHROPIC_BASE_URL EXPECT_SETTINGS EXPECT_SETTINGS_SENTINEL
+    AZURE_DEVOPS_EXT_PAT ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY EXPECT_SETTINGS EXPECT_SETTINGS_SENTINEL
   # A writable fixture can't produce EROFS; that check needs a real :ro mount.
   assert_write_fails_ro() { pass "$1: stubbed"; }
 }
@@ -104,12 +105,23 @@ setup() {
 @test "check_credentials: granted opt-in with fixture and env passes" {
   mkdir -p "${ROOT_HOME}/.config/glab-cli"
   echo SMOKE-SENTINEL > "${ROOT_HOME}/.config/glab-cli/config.yml"
-  EXPECT_OPTINS=glab,az GITLAB_TOKEN=t AZURE_DEVOPS_EXT_PAT=SMOKE-SENTINEL-pat \
+  : > "$AUTH_PROXY_CA"
+  EXPECT_OPTINS=glab,az GITLAB_TOKEN=claude-docker-proxy AZURE_DEVOPS_EXT_PAT=SMOKE-SENTINEL-pat \
     run check_credentials
   [[ "$output" != *FAIL* ]]
   [[ "$output" == *"PASS: optin-glab-content"* ]]
   [[ "$output" == *"PASS: optin-glab-env"* ]]
+  [[ "$output" == *"PASS: optin-glab-proxy:"* ]]
+  [[ "$output" == *"PASS: optin-glab-proxy-ca"* ]]
   [[ "$output" == *"PASS: optin-az-env"* ]]
+}
+
+@test "check_credentials: --glab with the real token or no session CA fails" {
+  mkdir -p "${ROOT_HOME}/.config/glab-cli"
+  echo SMOKE-SENTINEL > "${ROOT_HOME}/.config/glab-cli/config.yml"
+  EXPECT_OPTINS=glab GITLAB_TOKEN=glpat-real run check_credentials
+  [[ "$output" == *"FAIL: optin-glab-proxy:"* ]]
+  [[ "$output" == *"FAIL: optin-glab-proxy-ca"* ]]
 }
 
 @test "check_credentials: granted opt-in without fixture or env fails" {
@@ -278,7 +290,44 @@ write_mounts() {
   [[ "$output" == *"PASS: optin-api-ca"* ]]
 }
 
+@test "check_api: sidecar base URL and placeholder token pass" {
+  EXPECT_OPTINS=api ANTHROPIC_BASE_URL=http://claude-docker-api-proxy:8080 \
+    ANTHROPIC_AUTH_TOKEN=claude-docker-proxy run check_api
+  [[ "$output" == *"PASS: optin-api-env"* ]]
+  [[ "$output" == *"PASS: optin-api-proxy"* ]]
+}
+
+@test "check_api: the real base URL and token fail" {
+  EXPECT_OPTINS=api ANTHROPIC_BASE_URL=https://gw.example.com ANTHROPIC_AUTH_TOKEN=sk-real run check_api
+  [[ "$output" == *"FAIL: optin-api-env: ANTHROPIC_BASE_URL is 'https://gw.example.com', not the sidecar"* ]]
+  [[ "$output" == *"FAIL: optin-api-proxy"* ]]
+}
+
 # --- check_settings ----------------------------------------------------------
+
+@test "check_egress_api_key: the short --api placeholder is matched whole" {
+  ANTHROPIC_API_KEY=claude-docker-proxy
+  printf '{"customApiKeyResponses":{"approved":["claude-docker-proxy"]}}' >"$ROOT_HOME/.claude.json"
+  check_egress_api_key >/dev/null
+  [ "$PASS_COUNT" -eq 1 ] && [ "$FAIL_COUNT" -eq 0 ]
+}
+
+@test "check_egress_api_key: a long key is matched on its last 20 characters" {
+  ANTHROPIC_API_KEY=sk-fake-egress-smoke-api-key-0123456789
+  printf '{"customApiKeyResponses":{"approved":["-api-key-0123456789"]}}' >"$ROOT_HOME/.claude.json"
+  check_egress_api_key >/dev/null
+  [ "$PASS_COUNT" -eq 0 ] && [ "$FAIL_COUNT" -eq 1 ]
+  printf '{"customApiKeyResponses":{"approved":["e-api-key-0123456789"]}}' >"$ROOT_HOME/.claude.json"
+  check_egress_api_key >/dev/null
+  [ "$PASS_COUNT" -eq 1 ]
+}
+
+@test "check_egress_api_key: no approval fails" {
+  ANTHROPIC_API_KEY=claude-docker-proxy
+  printf '{}' >"$ROOT_HOME/.claude.json"
+  run check_egress_api_key
+  [[ "$output" == "FAIL: egress-api-key: ANTHROPIC_API_KEY not approved in ~/.claude.json" ]]
+}
 
 @test "check_settings: sentinel mismatch reports size, not content" {
   mkdir -p "${ROOT_HOME}/.claude"

@@ -56,10 +56,10 @@ ignore:
   # any other copy, stays enforced. Mirrors the npm-tree half of the
   # CVE-2026-109869 .trivyignore entry.
   #
-  # Nothing on a PR runs grype: docker.yml has no pull_request trigger and
-  # ci.yml's trivy gate matches by ID, image-wide. So when a pin refresh moves
-  # a bundled version, this rule stops matching and the first red is the
-  # Docker run on main. On an npm bump, recheck the version below.
+  # When a pin refresh moves a bundled version, this rule stops matching.
+  # ci.yml's grype gate fails the PR on it, fixable or not, even though
+  # .trivyignore, which matches by ID image-wide, still accepts the CVE. On an
+  # npm bump, recheck the version below.
   - package:
       name: undici
       version: 6.29.0
