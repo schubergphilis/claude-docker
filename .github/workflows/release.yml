@@ -1,39 +1,46 @@
+# yamllint disable rule:line-length
 ---
 name: Release
-# Tags the next semver version from the Conventional Commits since the last
-# `vX.Y.Z` tag and creates a GitHub Release, see
-# https://github.com/schubergphilis/mcvs-general-action/blob/main/docs/auto-release.md
+# Keeps one draft GitHub Release up to date with the next version and its
+# notes, counted from the Conventional Commit PR titles merged since the last
+# published release (.github/actions/draft-release). Nothing is published
+# here: a maintainer publishes the draft when a release is wanted, see
+# docs/maintenance.md#releasing.
 #
-# The tag is created with GITHUB_TOKEN, which starts no workflow, so docker.yml
-# does not run for it on its own and is dispatched on the new tag instead,
-# which builds, scans and publishes the image like a tag push.
+# Publishing creates the version tag under the maintainer's account, and a tag
+# pushed by a person starts workflows, so docker.yml's `tags: [v*]` trigger
+# builds, scans and publishes the image without a dispatch from here.
 "on":
   push:
     branches:
       - main
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Render the notes in the job summary without touching the draft release
+        type: boolean
+        default: false
+# Two pushes landing together would otherwise both edit the same draft. The
+# action drafts the branch tip, so the run that survives draws the right one.
 concurrency:
-  cancel-in-progress: false
+  cancel-in-progress: true
   group: release
 permissions:
   contents: read
 jobs:
-  mcvs-general-action:
+  draft:
+    name: Draft the next release
     permissions:
-      actions: write
-      contents: write
+      contents: write  # create and update the draft release
+      pull-requests: read  # read the titles the notes are made of
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
-      # yamllint disable rule:line-length
-      - id: release
-        uses: schubergphilis/mcvs-general-action@96298a5c109d08a0dfd9047963e01e2441421a3f # v0.11.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          auto-release: "true"
-      # Empty when nothing was released. Re-running this job does not retry a
-      # failed dispatch, run `gh workflow run docker.yml --ref <tag>` instead.
-      - if: steps.release.outputs.tag != ''
-        env:
-          GH_REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.release.outputs.tag }}
-        run: gh workflow run docker.yml --ref "${TAG}"
+          persist-credentials: false
+      - name: Draft the release
+        uses: ./.github/actions/draft-release
+        with:
+          # `inputs` is empty on a push, so the dispatch default does not apply there.
+          dry_run: ${{ inputs.dry_run || 'false' }}

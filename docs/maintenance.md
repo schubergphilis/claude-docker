@@ -2,6 +2,16 @@
 
 [← Back to the README](../README.md)
 
+## Releasing
+
+A merge to `main` doesn't release anything. [`release.yml`](../.github/workflows/release.yml) keeps one draft on the [Releases](https://github.com/schubergphilis/claude-docker/releases) page up to date instead: the next version and its notes, counted from the Conventional Commit titles of the pull requests merged since the highest published release. A `feat` bumps the minor version and any other type the patch. A breaking change bumps the major version: a `!` in the title, or a `BREAKING CHANGE:` footer in the pull request description. A footer inside one of the commits doesn't count on its own, so put it in the description. Below 1.0.0 every bump shifts down one level, so 1.0.0 is never drafted on its own.
+
+To release, open the draft, check the version and the notes, and click **Publish release**. That creates the tag under your account, and `docker.yml` builds, scans and publishes the image for it (see [Prebuilt image from GHCR](installation.md#prebuilt-image-from-ghcr)).
+
+- **Another version:** edit the tag in the draft and publish straight away. The next push to `main` redraws the draft and overwrites a hand edit that hasn't been published.
+- **Preview:** run the workflow by hand with `gh workflow run release.yml -f dry_run=true`. It writes the version and notes to the run's summary and leaves the draft alone.
+- **Only the marked draft is touched:** the workflow recognises its own draft by a marker comment in the body and never changes a published release or a draft you wrote yourself. If two drafts carry the marker, it stops and asks you to delete one.
+
 ## Updating pinned tool versions
 
 `uv`, `glab`, `aws-cli`, `tfenv`, and the `azure-devops` extension wheel are downloaded directly from GitHub/GitLab/vendor sites rather than from a language package registry, so nothing else verifies the bytes. Each is pinned to a version **and** a per-architecture sha256 that the Dockerfile checks (`sha256sum -c`) before installing. The PyPI-installed `azure-cli-core` (pin `az`) and every transitive dependency are hash-locked in `pins/az-requirements.txt`, which `update_pins.py` regenerates with `uv pip compile --generate-hashes` whenever it writes `pins/az.env`. The npm-installed tools (`claude-code`, `openspec`, `pnpm`) are pinned by version only — `npm install` already verifies the tarball against the registry's `dist.integrity`, and CI additionally runs `npm audit signatures`. Those checks are about *provenance* — where the bytes came from. Whether the pinned version has a disclosed CVE is a separate question, answered by [Image vulnerability scanning](security.md#image-vulnerability-scanning).

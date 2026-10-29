@@ -1,0 +1,589 @@
+# yamllint disable rule:line-length
+---
+name: 'Draft Release'
+description: 'Drafts a GitHub release from the Conventional Commit subjects merged since the last published release'
+
+inputs:
+  github_token:
+    required: false
+    description: >-
+      Token used to read pull requests and to write the draft release. The job needs
+      `contents: write` to create or update the release and `pull-requests: read` to
+      read the titles that make up the notes.
+    default: ${{ github.token }}
+
+  repository:
+    required: false
+    description: 'Repository to draft the release in, in <owner>/<name> format.'
+    default: ${{ github.repository }}
+
+  head:
+    required: false
+    description: >-
+      What the draft describes: a branch, a tag or a commit sha, resolved to a commit when the
+      run starts. Defaults to the branch the run is on -- its tip, not the commit that woke the
+      run. Two pushes landing seconds apart can deliver their events out of order, and a run
+      for the older commit would otherwise redraw the draft from a stale range; drafting the
+      tip makes any run, stale or superseded or dispatched, produce the same correct draft.
+    default: ${{ github.ref_name }}
+
+  target:
+    required: false
+    description: >-
+      Branch the release is tagged from when it is published. Defaults to the branch the run
+      is on, so publishing always tags the tip of that branch rather than a stale commit.
+    default: ${{ github.ref_name }}
+
+  previous_tag:
+    required: false
+    description: >-
+      Release to compare against. Empty (the default) takes the highest version among the
+      published releases, a prerelease included, and counts the next version from it. Drafts
+      are ignored, so a draft never becomes its own baseline. Two consequences worth knowing
+      in a repository that keeps a prerelease channel: a prerelease ahead of the last full
+      release becomes the baseline (v2.0.0-beta.1 is counted from, not v1.4.0), and a tag
+      counts by its MAJOR.MINOR.PATCH, so a fix on top of v0.2.0-rc.1 drafts v0.2.1 rather
+      than finalising v0.2.0. Pass this input to override either.
+    default: ''
+
+  version_prefix:
+    required: false
+    description: 'Prefix in front of the version number in a tag, for example the v in v3.3.0.'
+    default: 'v'
+
+  first_version:
+    required: false
+    description: 'Version to draft when the repository has no published release to count from.'
+    default: 'v0.1.0'
+
+  minor_types:
+    required: false
+    description: >-
+      Conventional Commit types that bump the minor version, separated by spaces or commas.
+      Every other type bumps the patch version; a ! marker, or a `BREAKING CHANGE: ` footer
+      at the start of a line in the pull request body, bumps the major version whatever the
+      type is. Naming the marker mid-sentence or inside a fenced block does not.
+    default: 'feat'
+
+  pre_major:
+    required: false
+    description: >-
+      While the version is below 1.0.0, shift every bump down one level: a breaking change
+      moves the minor, everything else the patch, and nothing reaches 1.0.0 on its own.
+      Set to false to let a breaking change below 1.0.0 draft 1.0.0. Has no effect from
+      1.0.0 onwards.
+    default: 'true'
+
+  categories:
+    required: false
+    description: >-
+      Headings of the release notes, one per line, as `<heading>: <types>`. Sections are
+      rendered in the order given and a section with no entries is left out. Any type that
+      is not listed, and any subject that is not a Conventional Commit, lands under
+      `other_category`.
+    default: |
+      Features: feat
+      Fixes: fix
+      Performance: perf
+      Documentation: docs
+      Maintenance: build chore ci refactor style test revert
+
+  other_category:
+    required: false
+    description: 'Heading for entries that match no category.'
+    default: 'Other changes'
+
+  prerelease:
+    required: false
+    description: >-
+      Mark the draft as a prerelease, for a repository where publishing a prerelease means
+      something (a deploy that stops at acceptance, say). The flag is written on every run,
+      so a draft cannot keep a flag it picked up once: set it here rather than by hand.
+    default: 'false'
+
+  dry_run:
+    required: false
+    description: >-
+      Render the notes and the next version, and write them to the job summary, without
+      creating or updating anything on GitHub.
+    default: 'false'
+
+outputs:
+  version:
+    description: 'Tag the draft carries, for example v3.4.0. Empty when there was nothing to draft.'
+    value: ${{ steps.draft.outputs.version }}
+
+  previous_tag:
+    description: 'Release the notes were counted from. Empty when the repository had no published release.'
+    value: ${{ steps.draft.outputs.previous_tag }}
+
+  bump:
+    description: 'Version bump the changes add up to: major, minor or patch. Empty when there was nothing to draft.'
+    value: ${{ steps.draft.outputs.bump }}
+
+  changes:
+    description: 'Number of entries in the notes.'
+    value: ${{ steps.draft.outputs.changes }}
+
+  release_url:
+    description: 'URL of the draft release. Empty on a dry run or when there was nothing to draft.'
+    value: ${{ steps.draft.outputs.release_url }}
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: Draft the release
+      id: draft
+      shell: bash
+      # Pull request titles and bodies are author-controlled, so they only ever reach the
+      # script through files and variables, never through the shell as code.
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        REPOSITORY: ${{ inputs.repository }}
+        HEAD_SHA: ${{ inputs.head }}
+        TARGET: ${{ inputs.target }}
+        PREVIOUS_TAG: ${{ inputs.previous_tag }}
+        VERSION_PREFIX: ${{ inputs.version_prefix }}
+        FIRST_VERSION: ${{ inputs.first_version }}
+        MINOR_TYPES: ${{ inputs.minor_types }}
+        PRE_MAJOR: ${{ inputs.pre_major }}
+        CATEGORIES: ${{ inputs.categories }}
+        OTHER_CATEGORY: ${{ inputs.other_category }}
+        PRERELEASE: ${{ inputs.prerelease }}
+        DRY_RUN: ${{ inputs.dry_run }}
+      run: |
+        set -euo pipefail
+
+        # The marker is what makes the draft ours: it is how a rerun finds the draft it
+        # wrote last time instead of adding a second one, and it keeps hand-written drafts
+        # out of reach.
+        MARKER='<!-- managed by claude-docker draft-release -->'
+
+        fail() {
+          echo "::error title=$1::$2" >&2
+          exit 1
+        }
+
+        command -v gh >/dev/null 2>&1 || fail "GitHub CLI is not available" \
+          "This action shells out to gh. Install it on the runner, or run this job on a runner image that ships it."
+
+        [[ -n "${REPOSITORY}" ]] || fail "No repository" "The 'repository' input is empty."
+        [[ -n "${HEAD_SHA}" ]] || fail "No head commit" "The 'head' input is empty."
+
+        # The flag reaches the API as a JSON boolean, which only these two spellings become.
+        case "${PRERELEASE}" in
+          true|false) ;;
+          *) fail "prerelease must be true or false" "Got '${PRERELEASE}'. A workflow-level boolean input renders as true or false; quote it if YAML is turning it into something else." ;;
+        esac
+
+        normalize() {
+          printf '%s' "$1" | tr ',' ' ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'
+        }
+
+        minor_types="$(normalize "${MINOR_TYPES}")"
+
+        work="$(mktemp -d)"
+        trap 'rm -rf "${work}"' EXIT
+        entries="${work}/entries.tsv"   # type <tab> bump <tab> rendered line
+        : > "${entries}"
+
+        # --- what the draft describes --------------------------------------------------
+
+        # head is resolved to a commit before anything else, so a branch name, a tag or an
+        # abbreviated sha all work, and everything downstream deals in one full sha.
+        head_ref="${HEAD_SHA}"
+        head_err="${work}/head.err"
+        if ! HEAD_SHA="$(gh api "repos/${REPOSITORY}/commits/${head_ref}" --jq '.sha' 2>"${head_err}")" \
+          || [[ -z "${HEAD_SHA}" ]]; then
+          fail "Cannot resolve the head" \
+            "repos/${REPOSITORY}/commits/${head_ref} could not be read: $(head -n 1 "${head_err}"). 'head' takes a branch, a tag or a commit sha."
+        fi
+        if [[ "${head_ref}" != "${HEAD_SHA}" ]]; then
+          echo "Drafting ${head_ref} at ${HEAD_SHA:0:8}."
+        fi
+
+        # --- what to compare against -------------------------------------------------
+
+        # One listing of the releases serves both the baseline and the managed draft, so the
+        # two can never disagree about what is already out there. A failure here is not the
+        # same as a repository without releases: the run stops rather than treat an error as
+        # an empty repository and draft a first release on top of an existing one.
+        releases="${work}/releases.tsv"   # id, tag, draft, prerelease, managed, url
+        releases_err="${work}/releases.err"
+        # Every field is written as '-' when it would be empty. A tab is IFS whitespace, so
+        # `read` collapses a run of them: one empty field and every field after it shifts one
+        # place left. A draft made in the UI carries no tag yet, which is exactly that case.
+        if ! gh api --paginate "repos/${REPOSITORY}/releases?per_page=100" \
+          --jq "def dash: if . == null or . == \"\" then \"-\" else . end;
+                .[] | [(.id|tostring), (.tag_name|dash), (.draft|tostring), (.prerelease|tostring),
+                       (((.body // \"\") | contains(\"${MARKER}\"))|tostring), (.html_url|dash)] | @tsv" \
+          > "${releases}" 2>"${releases_err}"; then
+          fail "Cannot list the releases" \
+            "repos/${REPOSITORY}/releases could not be read: $(head -n 1 "${releases_err}")"
+        fi
+
+        previous_tag="${PREVIOUS_TAG}"
+        if [[ -z "${previous_tag}" ]]; then
+          # The baseline is the highest version among the published releases, a prerelease
+          # included. /releases/latest, which this used to read, skips prereleases by
+          # definition: a repository that gates on them then has no baseline at all, so
+          # every run drafts first_version from the whole history and the version never
+          # moves. Drafts stay excluded, so a draft never becomes its own baseline.
+          best_rank=''; baseline_prerelease=''; published=0
+          while IFS=$'\t' read -r r_id r_tag r_draft r_pre r_managed r_url; do
+            [[ "${r_draft}" == 'false' ]] || continue
+            published=$((published + 1))
+
+            core="${r_tag#"${VERSION_PREFIX}"}"
+            if [[ ! "${core}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+)(.*)$ ]]; then
+              continue
+            fi
+
+            # Fixed width, so comparing the strings orders the triples, with a plain release
+            # ahead of a prerelease carrying the same one. A suffix counts by its triple:
+            # a fix on top of v0.2.0-rc.1 drafts v0.2.1, not v0.2.0.
+            plain=1
+            if [[ -n "${BASH_REMATCH[4]}" ]]; then plain=0; fi
+            # 10# forces base 10: bash reads a leading-zero numeral as octal, so a tag like
+            # v1.08.0 would abort the run and v1.010.0 would quietly rank as 8. Semver
+            # forbids leading zeros, but a tag is whatever someone typed.
+            rank="$(printf '%05d%05d%05d%d' \
+              "$((10#${BASH_REMATCH[1]}))" "$((10#${BASH_REMATCH[2]}))" \
+              "$((10#${BASH_REMATCH[3]}))" "${plain}")"
+
+            if [[ -z "${best_rank}" || "${rank}" > "${best_rank}" ]]; then
+              best_rank="${rank}"
+              previous_tag="${r_tag}"
+              baseline_prerelease="${r_pre}"
+            fi
+          done < "${releases}"
+
+          # Silence here is what let a repository sit on its first version for days: say it.
+          if [[ -z "${previous_tag}" && "${published}" -gt 0 ]]; then
+            echo "::warning title=No release to count from::${published} published release(s) exist, none of them tagged ${VERSION_PREFIX}MAJOR.MINOR.PATCH, so this run drafts ${FIRST_VERSION} from the whole history. Pass 'previous_tag', or set 'version_prefix' to match the tags."
+          fi
+        fi
+
+        raw="${work}/raw.tsv"        # sha <tab> first parent <tab> subject
+        if [[ -n "${previous_tag}" ]]; then
+          # Which release the count starts from is said out loud, and a prerelease is named as
+          # one: a beta ahead of the last full release becomes the baseline here, and a
+          # repository that keeps a beta channel should be able to see that happen.
+          if [[ "${baseline_prerelease:-}" == 'true' ]]; then
+            echo "Counting changes since ${previous_tag}, a prerelease."
+          else
+            echo "Counting changes since ${previous_tag}."
+          fi
+          gh api --paginate "repos/${REPOSITORY}/compare/${previous_tag}...${HEAD_SHA}?per_page=100" \
+            --jq 'def dash: if . == null or . == "" then "-" else . end;
+                  .commits[] | [.sha, (.parents[0].sha|dash), (.commit.message | split("\n")[0] | dash)] | @tsv' > "${raw}" \
+            || fail "Cannot compare ${previous_tag} with the head commit" \
+                 "repos/${REPOSITORY}/compare/${previous_tag}...${HEAD_SHA} could not be read. Check that the tag exists and that the token may read this repository."
+        else
+          echo "Nothing to count from; drafting the first release."
+          gh api --paginate "repos/${REPOSITORY}/commits?sha=${HEAD_SHA}&per_page=100" \
+            --jq 'def dash: if . == null or . == "" then "-" else . end;
+                  .[] | [.sha, (.parents[0].sha|dash), (.commit.message | split("\n")[0] | dash)] | @tsv' > "${raw}" \
+            || fail "Cannot list commits" \
+                 "repos/${REPOSITORY}/commits could not be read. Check that the token may read this repository."
+        fi
+
+        # Walk head backwards along first parents. This tells the branch's own commits apart
+        # from the ones a merge pulled in: a commit pushed straight to the branch is an entry
+        # of its own, while a commit inside a merged branch belongs to the pull request that
+        # brought it and is not listed again.
+        first_parent="${work}/first_parent.tsv"
+        : > "${first_parent}"
+        # head is a full sha by now, so this is an exact match. No match means the range is
+        # empty, which is handled below.
+        cursor="$(grep -m 1 "^${HEAD_SHA}"$'\t' "${raw}" | cut -f 1 || true)"
+        remaining="$(wc -l < "${raw}" | tr -d ' ')"
+        while [[ -n "${cursor}" && "${cursor}" != '-' && "${remaining}" -gt 0 ]]; do
+          line="$(grep -m 1 "^${cursor}"$'\t' "${raw}" || true)"
+          [[ -n "${line}" ]] || break
+          IFS=$'\t' read -r walk_sha walk_parent walk_subject <<< "${line}"
+          printf '%s\t%s\n' "${walk_sha}" "${walk_subject}" >> "${first_parent}"
+          cursor="${walk_parent}"
+          remaining=$((remaining - 1))
+        done
+
+        # Entries come from the whole range, newest first, not from the first-parent line
+        # alone. A pull request merged through another pull request -- a stack merged from
+        # the top -- has its merge commit inside a branch, and it shipped all the same: it
+        # belongs in the notes and its type counts toward the version. The compare API lists
+        # oldest first and the commits API newest first, so only the former is reversed.
+        commits="${work}/commits.tsv"
+        if [[ -n "${previous_tag}" ]]; then
+          awk -F'\t' '{ line[NR] = $1 "\t" $3 } END { for (i = NR; i > 0; i--) print line[i] }' "${raw}" > "${commits}"
+        else
+          awk -F'\t' '{ print $1 "\t" $3 }' "${raw}" > "${commits}"
+        fi
+
+        # Whether a commit sits on the branch's own line, rather than inside a merged branch.
+        on_first_parent() { grep -q "^$1"$'\t' "${first_parent}"; }
+
+        # --- classify one subject ----------------------------------------------------
+
+        # Sets entry_type and entry_bump from a subject and a breaking flag.
+        classify() {
+          local subject="$1" breaking="$2" type=''
+
+          if [[ "${subject}" =~ ^([a-zA-Z]+)(\([^\)]*\))?(!)?:[[:space:]]+(.+)$ ]]; then
+            type="$(printf '%s' "${BASH_REMATCH[1]}" | tr '[:upper:]' '[:lower:]')"
+            [[ -n "${BASH_REMATCH[3]}" ]] && breaking='true'
+          fi
+
+          # A subject that is not a Conventional Commit gets '-' rather than an empty field:
+          # read splits on a tab, and a tab is whitespace, so an empty leading field would
+          # collapse and shift every field after it.
+          entry_type="${type:--}"
+          if [[ "${breaking}" == 'true' ]]; then
+            entry_bump='major'
+          elif [[ -n "${type}" ]] && [[ " ${minor_types} " == *" ${type} "* ]]; then
+            entry_bump='minor'
+          else
+            entry_bump='patch'
+          fi
+        }
+
+        # --- turn commits into entries -----------------------------------------------
+
+        seen_prs=' '
+        while IFS=$'\t' read -r sha subject; do
+          [[ -n "${sha}" ]] || continue
+
+          pr=''
+          if [[ "${subject}" =~ ^Merge[[:space:]]pull[[:space:]]request[[:space:]]#([0-9]+) ]]; then
+            # A merge commit: the change is the pull request, not this commit.
+            pr="${BASH_REMATCH[1]}"
+          elif [[ "${subject}" =~ \(#([0-9]+)\)$ ]]; then
+            # A squash merge: GitHub appends the pull request number to the subject.
+            pr="${BASH_REMATCH[1]}"
+          fi
+
+          if [[ -n "${pr}" ]]; then
+            # Under a merge commit the pull request's own commits are in the range as well,
+            # so without this every change would be listed twice.
+            [[ "${seen_prs}" == *" ${pr} "* ]] && continue
+            seen_prs="${seen_prs}${pr} "
+
+            # BREAKING CHANGE counts as a footer only: at the start of a line and followed by
+            # a colon, the way Conventional Commits defines it. Matching it anywhere in the
+            # body makes any pull request that so much as names the marker a major release.
+            # Fenced blocks are dropped first (the odd-numbered halves of a split on ```),
+            # so an example of a footer is not read as one.
+            if ! gh api "repos/${REPOSITORY}/pulls/${pr}" \
+              --jq 'def dash: if . == null or . == "" then "-" else . end;
+                     [(.title|dash), (.user.login // "unknown"),
+                     ((.body // "") | split("```") | [.[range(0; length; 2)]] | join("\n")
+                      | test("(^|\r?\n)BREAKING[ -]CHANGE: ") | tostring)] | @tsv' \
+              > "${work}/pr.tsv" 2>/dev/null; then
+              # Inside a merged branch, "(#12)" is as likely an issue as a pull request, and
+              # the commit belongs to the pull request that brought it either way: skip it.
+              on_first_parent "${sha}" || continue
+              echo "::warning title=Pull request #${pr} could not be read::Falling back to the commit subject for ${sha:0:8}."
+              classify "${subject}" 'false'
+              printf '%s\t%s\t* %s (%s)\n' "${entry_type}" "${entry_bump}" "${subject}" "${sha:0:8}" >> "${entries}"
+              continue
+            fi
+
+            IFS=$'\t' read -r pr_title pr_author pr_breaking < "${work}/pr.tsv"
+            classify "${pr_title}" "${pr_breaking}"
+            printf '%s\t%s\t* %s (#%s) @%s\n' "${entry_type}" "${entry_bump}" "${pr_title}" "${pr}" "${pr_author}" >> "${entries}"
+          else
+            # A commit pushed straight to the branch still ships, so it belongs in the notes.
+            # A commit inside a merged branch is part of its pull request and is not listed.
+            on_first_parent "${sha}" || continue
+            classify "${subject}" 'false'
+            printf '%s\t%s\t* %s (%s)\n' "${entry_type}" "${entry_bump}" "${subject}" "${sha:0:8}" >> "${entries}"
+          fi
+        done < "${commits}"
+
+        count="$(wc -l < "${entries}" | tr -d ' ')"
+
+        {
+          echo "previous_tag=${previous_tag}"
+          echo "changes=${count}"
+        } >> "${GITHUB_OUTPUT}"
+
+        if [[ "${count}" -eq 0 ]]; then
+          # Every output is declared, so a caller can read them without guarding for a run
+          # that had nothing to draft.
+          {
+            echo "version="
+            echo "bump="
+            echo "release_url="
+          } >> "${GITHUB_OUTPUT}"
+          echo "Nothing merged since ${previous_tag:-the first commit}; no draft written."
+          echo "Nothing merged since ${previous_tag:-the first commit}; no draft written." >> "${GITHUB_STEP_SUMMARY}"
+          exit 0
+        fi
+
+        # --- the version the changes add up to ---------------------------------------
+
+        bump='patch'
+        if grep -q $'\tmajor\t' "${entries}"; then
+          bump='major'
+        elif grep -q $'\tminor\t' "${entries}"; then
+          bump='minor'
+        fi
+
+        if [[ -z "${previous_tag}" ]]; then
+          version="${FIRST_VERSION}"
+        else
+          core="${previous_tag#"${VERSION_PREFIX}"}"
+          if [[ ! "${core}" =~ ^([0-9]+)\.([0-9]+)\.([0-9]+) ]]; then
+            fail "Cannot read a version from ${previous_tag}" \
+              "The previous release tag is not <prefix>MAJOR.MINOR.PATCH. Pass 'previous_tag' or 'version_prefix' to match this repository's tags."
+          fi
+          # 10# again: $((08 + 1)) is an error, $((010 + 1)) is 9.
+          major="$((10#${BASH_REMATCH[1]}))"
+          minor="$((10#${BASH_REMATCH[2]}))"
+          patch="$((10#${BASH_REMATCH[3]}))"
+
+          # Below 1.0.0 semver makes no stability promise, and reaching 1.0.0 is a decision
+          # rather than a side effect of the first breaking change. Every bump therefore
+          # shifts down one level while the major is 0: breaking moves the minor, everything
+          # else the patch. Set pre_major: false to let a breaking change reach 1.0.0.
+          if [[ "${PRE_MAJOR}" == 'true' && "${major}" -eq 0 ]]; then
+            shifted='patch'
+            if [[ "${bump}" == 'major' ]]; then
+              shifted='minor'
+            fi
+            if [[ "${shifted}" != "${bump}" ]]; then
+              echo "Below 1.0.0: applying a ${shifted} bump where the changes read as ${bump}."
+            fi
+            bump="${shifted}"
+          fi
+
+          case "${bump}" in
+            major) major=$((major + 1)); minor=0; patch=0 ;;
+            minor) minor=$((minor + 1)); patch=0 ;;
+            patch) patch=$((patch + 1)) ;;
+          esac
+          version="${VERSION_PREFIX}${major}.${minor}.${patch}"
+        fi
+
+        # --- the notes ----------------------------------------------------------------
+
+        body="${work}/body.md"
+        : > "${body}"
+
+        section() {
+          local heading="$1" lines="$2"
+          [[ -n "${lines}" ]] || return 0
+          printf '## %s\n\n%s\n\n' "${heading}" "${lines}" >> "${body}"
+        }
+
+        # A breaking change is called out on its own instead of sitting between the other
+        # entries of its type, where it is the easiest line in the notes to miss.
+        breaking_lines="$(awk -F'\t' '$2 == "major" { print $3 }' "${entries}")"
+        section "Breaking changes" "${breaking_lines}"
+
+        all_types=''
+        while IFS= read -r line; do
+          [[ -n "${line}" ]] || continue
+          heading="${line%%:*}"
+          heading="$(printf '%s' "${heading}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+          [[ -n "${heading}" && "${line}" == *:* ]] || continue
+
+          types="$(normalize "${line#*:}")"
+          all_types="${all_types}${types} "
+
+          lines=''
+          while IFS=$'\t' read -r etype ebump eline; do
+            [[ "${ebump}" == 'major' ]] && continue
+            [[ "${etype}" != '-' ]] || continue
+            [[ " ${types} " == *" ${etype} "* ]] || continue
+            lines="${lines}${eline}"$'\n'
+          done < "${entries}"
+
+          section "${heading}" "${lines%$'\n'}"
+        done <<< "${CATEGORIES}"
+
+        # Anything the categories do not claim: an unlisted type, or a subject that is not a
+        # Conventional Commit at all. Listing it beats dropping it silently.
+        other_lines=''
+        while IFS=$'\t' read -r etype ebump eline; do
+          [[ "${ebump}" == 'major' ]] && continue
+          if [[ "${etype}" == '-' || " ${all_types} " != *" ${etype} "* ]]; then
+            other_lines="${other_lines}${eline}"$'\n'
+          fi
+        done < "${entries}"
+        section "${OTHER_CATEGORY}" "${other_lines%$'\n'}"
+
+        if [[ -n "${previous_tag}" ]]; then
+          # The compare link only resolves once the draft is published and the tag exists.
+          printf '**Full Changelog**: https://github.com/%s/compare/%s...%s\n\n' \
+            "${REPOSITORY}" "${previous_tag}" "${version}" >> "${body}"
+        fi
+        printf '%s\n' "${MARKER}" >> "${body}"
+
+        {
+          echo "## Draft release ${version} (${bump} bump from ${previous_tag:-no previous release})"
+          echo
+          cat "${body}"
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+        {
+          echo "version=${version}"
+          echo "bump=${bump}"
+        } >> "${GITHUB_OUTPUT}"
+
+        if [[ "${DRY_RUN}" == 'true' ]]; then
+          echo "release_url=" >> "${GITHUB_OUTPUT}"
+          echo "Dry run: ${version} (${bump}) with ${count} change(s); nothing written to GitHub."
+          exit 0
+        fi
+
+        # --- create or update the draft -----------------------------------------------
+
+        managed="${work}/managed.tsv"
+        # Fields: 3 is draft, 5 is the marker. awk splits on a literal tab, so an empty
+        # field here does not shift the way it would in `read`.
+        awk -F'\t' '$3 == "true" && $5 == "true" { print }' "${releases}" > "${managed}"
+        managed_count="$(wc -l < "${managed}" | tr -d ' ')"
+
+        # Two managed drafts cannot be reconciled from here: whichever one this run wrote to,
+        # the other would keep the notes it happens to hold and drift further. Which is the
+        # real release is a decision, so ask for it instead of picking.
+        if [[ "${managed_count}" -gt 1 ]]; then
+          fail "More than one draft release is marked as managed" \
+            "Delete all but one and rerun. Drafts: $(cut -f 6 "${managed}" | tr '\n' ' ')"
+        fi
+
+        # Every write addresses a release by id. Addressing it by tag, as this used to,
+        # resolves to whatever release carries that tag -- including a published one, which
+        # the draft flag on the same call would then un-publish.
+        # -F body=@<file> hands the notes over as a string without the shell ever seeing
+        # them; -F turns the literal true/false into JSON booleans, which is why the
+        # prerelease input is checked against exactly those two spellings up front.
+        # A write is the one call in this script that changes something, so its failure is
+        # reported the way every other call's is rather than as bare gh output.
+        write_release() {
+          local verb="$1" endpoint="$2" err="${work}/write.err"
+          if ! gh api -X "${verb}" "${endpoint}" \
+            -f tag_name="${version}" \
+            -f name="${version}" \
+            -f target_commitish="${TARGET}" \
+            -F draft=true \
+            -F prerelease="${PRERELEASE}" \
+            -F body=@"${body}" \
+            --jq '.html_url' 2>"${err}"; then
+            fail "Cannot ${verb} the draft release" \
+              "${verb} ${endpoint} failed: $(head -n 1 "${err}"). The draft was left as it was; nothing was published."
+          fi
+        }
+
+        if [[ "${managed_count}" -eq 1 ]]; then
+          IFS=$'\t' read -r draft_id draft_tag draft_draft draft_pre draft_managed draft_url < "${managed}"
+          release_url="$(write_release PATCH "repos/${REPOSITORY}/releases/${draft_id}")"
+          echo "Updated the draft release ${draft_id}: ${draft_tag} -> ${version}."
+        else
+          release_url="$(write_release POST "repos/${REPOSITORY}/releases")"
+          echo "Created the draft release ${version}."
+        fi
+
+        echo "release_url=${release_url}" >> "${GITHUB_OUTPUT}"
+        echo "${version} (${bump}) with ${count} change(s): ${release_url}"

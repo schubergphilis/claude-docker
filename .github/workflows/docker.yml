@@ -3,9 +3,10 @@
 name: Docker
 
 # The action's push is gated on a tag ref, from a tag push or a
-# `workflow_dispatch` on a tag. release.yml dispatches this on the tags it
-# auto-releases, since a tag created with GITHUB_TOKEN starts no workflow; the
-# `tags:` filter covers tags pushed by hand. A run on main builds every
+# `workflow_dispatch` on a tag. The `tags:` filter covers a tag created by
+# publishing the draft release (it is created under the maintainer's account,
+# so it starts workflows) and a tag pushed by hand; a dispatch on a tag fills
+# in one the pipeline never ran for. A run on main builds every
 # architecture and scans one, without pushing — building is unconditional in
 # the action, only the push is tag-gated, so an arch-specific build failure
 # surfaces on main and not on the tag that was meant to release it.
