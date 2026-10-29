@@ -1,0 +1,86 @@
+# yamllint disable rule:line-length
+---
+name: Homebrew
+
+# Opens the pull request on schubergphilis/homebrew-tap that moves the
+# claude-docker formula to a release. docker.yml calls this once a tag's image
+# is published, so the formula never points at an image that was not: a tag
+# whose scan fails publishes nothing and gets no tap pull request.
+#
+# A reusable workflow called from docker.yml rather than a `workflow_run` on
+# it: same ordering, without a trigger that runs with secrets on another
+# workflow's behalf.
+#
+# The dispatch is the fallback for a tag whose bump did not happen; re-running
+# docker.yml cannot do it, since it refuses a tag that is already published.
+"on":
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to move the formula to
+        required: true
+        type: string
+    secrets:
+      HOMEBREW_TAP_TOKEN:
+        required: true
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag to move the formula to, e.g. v1.2.3
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two bumps at once would race on the same fork branch. Never cancel one in
+  # flight; it may be mid-push.
+  group: homebrew
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump the Homebrew formula
+    runs-on: ubuntu-24.04
+    steps:
+      # Release candidates are published to ghcr on purpose but are not
+      # supported, so they never reach Homebrew. Only a stable tag whose image
+      # is published goes on, and a dispatch is held to the same rule.
+      - name: Check the tag is a published stable release
+        id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "${TAG} is not a stable vX.Y.Z tag, so it does not go to Homebrew." >> "$GITHUB_STEP_SUMMARY"
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! docker buildx imagetools inspect "${IMAGE,,}:${TAG}" >/dev/null; then
+            echo "::error title=Image not published::${IMAGE,,}:${TAG} is not published, so the formula would point at an image that does not exist. Publish it first: gh workflow run docker.yml --ref ${TAG}"
+            exit 1
+          fi
+          echo "stable=true" >> "$GITHUB_OUTPUT"
+
+      # The token is a machine account's, with public_repo scope and no push
+      # access to the tap: the action forks the tap into that account and
+      # opens the pull request from the fork, and a tap maintainer merges it.
+      # create-pullrequest keeps it a pull request even if that account is
+      # later given push access.
+      - if: steps.tag.outputs.stable == 'true'
+        uses: mislav/bump-homebrew-formula-action@f865c8b0dbebd6e263cc06782a0e974c61cf12d2 # v4.2
+        with:
+          formula-name: claude-docker
+          homebrew-tap: schubergphilis/homebrew-tap
+          base-branch: main
+          tag-name: ${{ inputs.tag }}
+          download-url: https://github.com/${{ github.repository }}/archive/refs/tags/${{ inputs.tag }}.tar.gz
+          create-pullrequest: true
+          commit-message: |
+            {{formulaName}} {{version}}
+
+            Created by ${{ github.server_url }}/${{ github.repository }}/blob/main/.github/workflows/homebrew.yml
+        env:
+          COMMITTER_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}

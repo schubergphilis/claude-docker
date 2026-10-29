@@ -58,7 +58,9 @@ being pinned by hand.
 ## Impact
 
 - New: `.github/workflows/homebrew.yml`, `tests/test_homebrew_workflow.py`.
-- Changed: `README.md`, `docs/installation.md`, `docs/maintenance.md`.
+- Changed: `.github/workflows/docker.yml` (calls the bump after publishing;
+  `packages: write` moves to the publishing job), `README.md`,
+  `docs/installation.md`, `docs/maintenance.md`.
 - Outside this repository: `Formula/claude-docker.rb` in
   `schubergphilis/homebrew-tap`, by pull request from a fork.
 - A repository secret holding a token that can fork the tap and open pull

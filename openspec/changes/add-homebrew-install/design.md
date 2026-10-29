@@ -73,17 +73,28 @@ No `depends_on "bash"` either: `run.sh` targets bash 3.2.
 
 ### D4: The tap is bumped after the image is published, for stable tags only
 
-`.github/workflows/homebrew.yml` runs on `workflow_run` of the Docker workflow,
-completed with success, on a ref matching `^v[0-9]+\.[0-9]+\.[0-9]+$`. A tag
-whose publish failed has no image, so the formula never points at one that
-does not exist. `-rc.N` tags are published to GHCR on purpose but are not
-supported, so they never reach Homebrew.
+`.github/workflows/homebrew.yml` is a reusable workflow. `docker.yml` calls it
+as a `homebrew` job that `needs` the publishing job, on tag refs only. A tag
+whose publish failed has no image, and the job is then skipped, so the formula
+never points at one that does not exist. `homebrew.yml` goes on only for a tag
+matching `^v[0-9]+\.[0-9]+\.[0-9]+$`: `-rc.N` tags are published to GHCR on
+purpose but are not supported, so they never reach Homebrew.
 
-It is also `workflow_dispatch`able with a tag input, for when a run is missed,
-the same fallback `docs/installation.md` gives for `docker.yml`.
+It is also `workflow_dispatch`able with a tag input, for when a bump is missed.
+Re-running `docker.yml` cannot do that, since it refuses a tag that is already
+published. A dispatch is held to the same tag rule and also checks the tag's
+image is published before bumping.
 
-Alternative: a step in `release.yml` after the dispatch. Rejected, because the
-dispatch returns before the image is built or scanned.
+The publishing job keeps `packages: write`, now at job level, and the Homebrew
+job gets `contents: read` only.
+
+Alternatives rejected:
+
+- A step in `release.yml` after the dispatch: the dispatch returns before the
+  image is built or scanned.
+- `workflow_run` on the Docker workflow: same ordering, but it is a trigger
+  that runs with secrets on another workflow's behalf, which zizmor (run by
+  CI at `min-severity: low`) reports as dangerous.
 
 ### D5: Pull requests from a fork, with a token that can fork
 

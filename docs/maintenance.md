@@ -44,6 +44,29 @@ The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinn
 
 The [API egress lock](auth.md#api-egress-lock)'s proxy image is the same kind of manual pin: `EGRESS_PROXY_BASE` (an Alpine digest) and `EGRESS_PROXY_SQUID_MIN` (a version floor) in `run.sh`. Users build it on first use, and its tag is the checksum of the Containerfile `run.sh` generates, so changing either value builds a new image. Bumping the base means checking the generated squid config against that Alpine release's squid; the `--egress-lock` CI cells do that against the real image.
 
+## Homebrew tap
+
+The `claude-docker` formula lives in [`schubergphilis/homebrew-tap`](https://github.com/schubergphilis/homebrew-tap) and is only changed by pull request. After `docker.yml` publishes a tag's image, its `homebrew` job calls [`homebrew.yml`](../.github/workflows/homebrew.yml). For a stable `vX.Y.Z` tag, that runs [`mislav/bump-homebrew-formula-action`](https://github.com/mislav/bump-homebrew-formula-action), which moves the formula's `url` and `sha256` to the tag's source archive and opens the pull request. Any other tag is skipped, and a tag whose image is not published fails the job. A tap maintainer reviews and merges the pull request.
+
+The `HOMEBREW_TAP_TOKEN` repository secret is a classic token with `public_repo` scope. It belongs to a machine account, not a person, so it outlives whoever set it up. The account has no push access to the tap: the action forks the tap into it and opens the pull request from the fork. When it expires, the next release's `homebrew` job fails; see below.
+
+**A release opened no tap pull request.** Check the `homebrew` job of that tag's Docker run:
+
+- **Skipped:** the publishing job failed, so there is no image to point at. Fix that first (see [Prebuilt image from GHCR](installation.md#prebuilt-image-from-ghcr)).
+- **Failed:** usually an expired or missing `HOMEBREW_TAP_TOKEN`. Fix the secret, then run `gh workflow run homebrew.yml -f tag=<tag>`. Re-running `docker.yml` does not help, since it refuses a tag that is already published.
+
+To change the formula itself, such as the launcher or the caveats, open a pull request on the tap from a fork. Before you do, test it locally:
+
+```bash
+brew tap <you>/test /path/to/your/homebrew-tap/clone
+brew install <you>/test/claude-docker
+brew test claude-docker
+brew audit --strict --online <you>/test/claude-docker
+brew style <you>/test/claude-docker
+```
+
+`brew tap` reads committed files only, so commit before tapping.
+
 ## CI smoke tests
 
 The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`tests/smoke/smoke.sh`](../tests/smoke/smoke.sh) + [`tests/smoke/assert-in-container.sh`](../tests/smoke/assert-in-container.sh)), which drives the real `run.sh` with fixture credentials under a fake `$HOME`. It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.

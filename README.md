@@ -11,6 +11,17 @@
 
 ## Quickstart
 
+On macOS or Linux with Homebrew, no clone or build needed:
+
+```bash
+brew install schubergphilis/tap/claude-docker
+claude-docker ~/repo
+```
+
+The first run pulls the published image of the installed version. See [Homebrew](docs/installation.md#homebrew) for upgrades, which image that is, and how to run another one.
+
+### From a checkout
+
 ```bash
 # Build the image from your checkout (one-time; rerun after Dockerfile or tool pins change)
 docker build -t claude-code:local .
@@ -42,11 +53,11 @@ Pin the full `v`-prefixed tag — there is no `latest` and no `:0.1`. Only `linu
 ## Documentation
 
 - [Vision and scope](docs/vision-and-scope.md) — what claude-docker is for, its principles, defaults and options
-- [Installation](docs/installation.md) — BuildKit on Colima, prebuilt image from GHCR
+- [Installation](docs/installation.md) — Homebrew, BuildKit on Colima, prebuilt image from GHCR
 - [Usage](docs/usage.md) — container runtime, session flags, resuming sessions, host config parity, worktrees, split panes, extending the image
 - [Auth model](docs/auth.md) — credential opt-in flags, AWS SSO, GitHub auth proxy, Terraform Cloud, private registries, custom model endpoint, API egress lock, egress allowlist, Azure DevOps Server CA
 - [Security](docs/security.md) — threat model, image vulnerability scanning
-- [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests
+- [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests, Homebrew tap
 - [Windows](docs/windows.md) — PowerShell, WSL2 and Git Bash hosts
 - [Scope](docs/scope.md) — what claude-docker deliberately does not do
 - [License](docs/license.md) — Apache 2.0 terms and warranty disclaimer
