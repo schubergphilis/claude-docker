@@ -7,6 +7,10 @@
 # git-identity forwarding, host-config bind-mounts — without forking it.
 IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
 
+# An exported CDPATH makes `cd` to a relative directory print that directory
+# on stdout, which would land in the files staged from `( cd dir && cat … )`.
+unset CDPATH
+
 # Auth-proxy sidecar image (Caddy), used by --gh / --glab when a host token is
 # found and by --api (see openspec/specs/gh-auth-proxy and friends).
 # Digest-pinned and deliberately excluded from update_pins.py: a Caddy
@@ -880,7 +884,7 @@ cat_checked() {
 # $1 itself is resolved normally. Prints nothing and fails on any mismatch.
 cat_nofollow() {
   (
-    cd "$1" || exit 1
+    cd -- "$1" || exit 1
     rest=$2
     while :; do
       case $rest in
@@ -975,7 +979,9 @@ copy_tree_nofollow() {
         if ! l=$(readlink "$e"); then
           echo "claude-docker: skipping $PWD/$n: it changed while being copied" >&2
         elif link_stays_inside "$l" "$depth"; then
-          ln -s "$l" "$dest/$n" || exit 1
+          # -- : a relative target may start with -, which ln would read as
+          # an option and fail on, dropping the whole directory.
+          ln -s -- "$l" "$dest/$n" || exit 1
         else
           echo "claude-docker: skipping $PWD/$n: a symlink to $l, outside the copied directory" >&2
         fi
@@ -2570,13 +2576,13 @@ start_egress_sidecar() {
 }
 
 stage_host_config() {
-  local item src
+  local item src hop
   # Everything here is copied into the stage dir and the copy is mounted, never
   # the host path: a directory you also open as a workspace (a dotfiles or
   # shared-config repo your links point into) can be rewritten by a session, and
   # a bind mount or cp -RL would follow whatever link it left there. So each
-  # item and each entry directly in it may be one symlink you made; inside what
-  # those reach, a link is kept only if it stays within the copy (see
+  # item, or else each entry directly in it, may be one symlink you made; inside
+  # what that reaches, a link is kept only if it stays within the copy (see
   # copy_tree_nofollow). Anything else is skipped with a warning.
   for item in agents commands skills themes; do
     [ -e "$CLAUDE_CONFIG_DIR/$item" ] || [ -L "$CLAUDE_CONFIG_DIR/$item" ] || continue
@@ -2584,7 +2590,12 @@ stage_host_config() {
       echo "claude-docker: skipping $CLAUDE_CONFIG_DIR/$item: not a directory reached by at most one symlink" >&2
       continue
     fi
-    copy_tree_nofollow "$src" "$stage/$item" 1 0 || continue
+    # An item that is itself a link (skills -> ~/dotfiles/claude/skills) points
+    # into a directory a session may be able to write, so links directly in it
+    # are no longer the user's own: they get no hop.
+    hop=1
+    [ -L "$CLAUDE_CONFIG_DIR/$item" ] && hop=0
+    copy_tree_nofollow "$src" "$stage/$item" "$hop" 0 || continue
     MOUNT_ARGS+=("-v" "$(hostpath "$stage/$item"):/root/.claude/$item:ro")
   done
   if stage_config_file CLAUDE.md "$stage/CLAUDE.md"; then
@@ -2666,8 +2677,11 @@ stage_git_overlays() {
     # runs (cat_nofollow, #211): the workspace is writable from the container,
     # so a planted .git or .git/config link would otherwise copy an arbitrary
     # host file into the container.
+    # The stage file is created first, so a write error there (disk full,
+    # EACCES) stops the launch, and only a refused read reaches the warning.
     if [ -d "$ws_abs/.git" ] && [ ! -L "$ws_abs/.git" ] \
-       && cat_nofollow "$ws_abs" .git/config >"$stage/git-config-$ws_name"; then
+       && { : >"$stage/git-config-$ws_name" || exit 1; } \
+       && cat_nofollow "$ws_abs" .git/config >>"$stage/git-config-$ws_name"; then
       cat >>"$stage/git-config-$ws_name" <<'EOF' || exit 1
 
 [core]

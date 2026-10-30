@@ -29,7 +29,7 @@ The host config directory defaults to `~/.claude` but is configurable via `--cla
 `run.sh` SHALL copy the following host items (when present) into the stage directory and bind-mount the copies read-only into the container at the equivalent `/root/.claude/` path: `agents/`, `skills/`, `commands/`, `themes/`, `CLAUDE.md`, `statusline-command.sh` (mounted as `statusline-command.original.sh` behind the wrapper). No host path of these items SHALL be bind-mounted directly. Symlinks are handled at three levels:
 
 1. **Item**: `$CLAUDE_CONFIG_DIR/<item>` may be one symlink. Its target, with trailing slashes removed, is used when it exists, does not end in `.` or `..`, and is not itself a symlink; otherwise the item is skipped with a warning.
-2. **Entry**: each entry directly inside `agents/`, `skills/`, `commands/` or `themes/` may likewise be one symlink, to a directory or a file, which is copied in its place.
+2. **Entry**: each entry directly inside `agents/`, `skills/`, `commands/` or `themes/` may likewise be one symlink, to a directory or a file, which is copied in its place. When the item itself is a symlink, its entries SHALL get no hop of their own and SHALL be treated as rule 3 treats links inside a copied entry: the item's target may be a directory a session can write, so a link there may not be the user's.
 3. **Inside a copied entry**: no symlink SHALL be followed. A symlink SHALL be kept as a symlink only when its target is relative, consists of leading `../` components (no more than its depth below the entry) followed by plain names, and so resolves inside the copied entry; any other symlink SHALL be skipped with a warning. A `.git` entry inside a copied entry SHALL NOT be copied.
 
 Every file and directory SHALL be read without following a symlink that was swapped in while `run.sh` reads it: each directory is entered and checked to be the inode `lstat` names, and each file is opened and checked to be the inode `lstat` names. A session can write any workspace, and link targets often live in a repo the user also opens as one, so following a link there could copy another host file into the container.
@@ -78,6 +78,14 @@ Host `hooks/` and the `hooks` settings key are intentionally NOT carried over â€
 - **WHEN** user runs `claude-docker`
 - **THEN** none of those links, nor the key's contents, appear in the stage directory or the container
 - **AND** `run.sh` prints a `claude-docker: skipping` warning naming each skipped link
+
+#### Scenario: A link planted in a linked item's target is not followed
+
+- **GIVEN** `~/.claude/skills` is a symlink to `~/dotfiles/claude/skills`, and `~/dotfiles` is open as a workspace
+- **AND** a session has created `~/dotfiles/claude/skills/x` as a symlink to `~/.ssh`
+- **WHEN** user next runs `claude-docker`
+- **THEN** `x` is skipped with a warning
+- **AND** nothing from `~/.ssh` is copied into the container
 
 #### Scenario: A link chain is refused
 

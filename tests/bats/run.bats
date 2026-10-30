@@ -1621,6 +1621,38 @@ setup_linked_skill() {
   [ "$(cat "$stage/skills/foo/SKILL.md")" = body ]
 }
 
+@test "stage_host_config: an item that is a link gives its entries no hop" {
+  # skills -> a dotfiles repo the user also opens as a workspace: a link the
+  # session plants in there must not reach a host directory.
+  CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
+  stage="$BATS_TEST_TMPDIR/stage"
+  SECRET="$BATS_TEST_TMPDIR/secret"
+  DOT="$BATS_TEST_TMPDIR/dotfiles/skills"
+  mkdir -p "$CLAUDE_CONFIG_DIR" "$stage" "$SECRET" "$DOT/foo"
+  echo key >"$SECRET/id_ed25519"
+  echo body >"$DOT/foo/SKILL.md"
+  ln -s "$DOT" "$CLAUDE_CONFIG_DIR/skills"
+  ln -s "$SECRET" "$DOT/x"
+  ln -s foo "$DOT/alias"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  ! grep -rq key "$stage"
+  [ ! -e "$stage/skills/x" ]
+  [[ "$stderr" == *"skipping $DOT/x"* ]]
+  [ "$(cat "$stage/skills/foo/SKILL.md")" = body ]
+  [ "$(readlink "$stage/skills/alias")" = foo ]
+}
+
+@test "stage_host_config: a kept link whose target starts with - is recreated" {
+  setup_linked_skill
+  echo notes >"$REPO/-notes.md"
+  ln -s -- -notes.md "$REPO/dash"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$stage/skills/foo/dash")" = -notes.md ]
+  [ "$(cat "$stage/skills/foo/SKILL.md")" = body ]
+}
+
 @test "stage_host_config: a trailing-slash link to a skill swapped for a link is refused" {
   setup_linked_skill
   rm "$CLAUDE_CONFIG_DIR/skills/foo"
@@ -1769,6 +1801,19 @@ run_statusline() {
   [ "$stderr" = "claude-docker: no .git/config overlay for $WS: it is a symlink, or changed while being read; git in the container uses the host file" ]
 }
 
+@test "stage_git_overlays: a stage write error stops the launch, without the symlink warning" {
+  [ "$(id -u)" != 0 ] || skip "root can write a read-only directory"
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage" "$WS/.git"
+  echo "[core]" >"$WS/.git/config"
+  chmod 500 "$stage"
+  SEEN_NAMES=(repo) SEEN_PATHS=("$WS")
+  run --separate-stderr stage_git_overlays
+  chmod 700 "$stage"
+  [ "$status" -eq 1 ]
+  [[ "$stderr" != *"no .git/config overlay"* ]]
+}
+
 @test "stage_git_overlays: a .git dir that is a link to a dir is skipped" {
   stage="$BATS_TEST_TMPDIR/stage"
   mkdir -p "$stage" "$BATS_TEST_TMPDIR/elsewhere"
@@ -1798,6 +1843,17 @@ run_statusline() {
   echo cfg >"$WS/.git/config"
   run cat_nofollow "$WS" .git/config
   [ "$status" -eq 0 ] && [ "$output" = cfg ]
+}
+
+@test "cat_nofollow: an exported CDPATH adds nothing to a relative dir's file" {
+  # A relative --claude-dir reaches cat_nofollow as a relative directory; with
+  # CDPATH set, cd would print it into the staged file. run.sh unsets it.
+  mkdir -p "$BATS_TEST_TMPDIR/myclaude"
+  echo body >"$BATS_TEST_TMPDIR/myclaude/CLAUDE.md"
+  export CDPATH=.
+  run_script_fn "cd '$BATS_TEST_TMPDIR' && cat_nofollow myclaude CLAUDE.md"
+  unset CDPATH
+  [ "$status" -eq 0 ] && [ "$output" = body ]
 }
 
 @test "cat_nofollow: refuses a link at the file or at a directory" {
