@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# A stand-in for the GitHub CLI, first on PATH while the tests run.
+#
+# Reads are answered from a fixture directory through real jq, so the jq filters under test are
+# the action's own rather than a copy of them. Writes are recorded and never performed, so a
+# test can assert which release a run would have touched. `gh release` fails outright: the
+# action addresses releases by id through `gh api`, and a reappearance of `gh release edit
+# <tag>` is the defect this suite exists to catch.
+#
+# FIXTURES points at the directory holding the fixtures for one case:
+#   releases.json         GET /repos/{repo}/releases
+#   compare.json          GET /repos/{repo}/compare/{base}...{head}
+#   commits.json          GET /repos/{repo}/commits
+#   commit_<ref>.json     GET /repos/{repo}/commits/{ref}   (a sha-shaped ref answers itself)
+#   pull_<n>.json         GET /repos/{repo}/pulls/{n}
+#   write_fail            if present, every write fails with this file's contents
+# and receives:
+#   calls.log             one line per call: READ <url>, WRITE <verb> <url> <fields>, FORBIDDEN
+#   field_<name>          the file handed to a write as -F <name>=@<path>
+set -uo pipefail
+FIX="${FIXTURES:?FIXTURES must point at a fixture directory}"
+log() { echo "$*" >> "${FIX}/calls.log"; }
+
+case "${1:-}" in
+  api)
+    shift
+    url=''; filter=''; method='GET'; fields=''
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --paginate) ;;   # one fixture stands for every page
+        --jq) filter="$2"; shift ;;
+        -X|--method) method="$2"; shift ;;
+        -f|-F|--field|--raw-field)
+          key="${2%%=*}"; val="${2#*=}"
+          # Mirror gh: a value of @<path> is read from that file.
+          if [[ "${val}" == @* ]]; then
+            cp "${val#@}" "${FIX}/field_${key}" 2>/dev/null || true
+            val="<file:${val#@}>"
+          fi
+          fields="${fields}${key}=${val};"
+          shift ;;
+        -*) ;;
+        *) url="$1" ;;
+      esac
+      shift
+    done
+
+    if [[ "${method}" != 'GET' ]]; then
+      log "WRITE ${method} ${url} ${fields}"
+      if [[ -f "${FIX}/write_fail" ]]; then
+        echo "gh: $(cat "${FIX}/write_fail")" >&2
+        exit 1
+      fi
+      # Both POST and PATCH answer with the release; the action reads html_url from it.
+      printf '{"html_url": "https://github.com/OWNER/REPO/releases/tag/untagged-stub", "id": 999}' \
+        | jq -r "${filter:-.}"
+      exit 0
+    fi
+
+    log "READ ${url}"
+    case "${url}" in
+      *releases\?*) file="${FIX}/releases.json" ;;
+      *compare/*)   file="${FIX}/compare.json" ;;
+      */commits/*)
+        # A commit looked up by ref. A fixture commit_<ref>.json answers a name; a ref shaped
+        # like a commit id -- 7 to 40 characters of [0-9a-z], which admits the fixtures'
+        # pseudo-shas such as head0000 -- answers itself, so a case need not supply one per
+        # commit. Anything else without a fixture is a name nobody defined: 404.
+        ref="${url##*/}"
+        sha_shaped='^[0-9a-z]{7,40}$'
+        if [[ -f "${FIX}/commit_${ref}.json" ]]; then
+          file="${FIX}/commit_${ref}.json"
+        elif [[ "${ref}" =~ ${sha_shaped} ]]; then
+          printf '{"sha": "%s"}' "${ref}" | jq -r "${filter}"; exit 0
+        else
+          echo "gh: Not Found (HTTP 404) [no fixture commit_${ref}.json]" >&2; exit 1
+        fi ;;
+      */commits\?*) file="${FIX}/commits.json" ;;
+      */pulls/*)    file="${FIX}/pull_${url##*/}.json" ;;
+      *) echo "stub: no route for ${url}" >&2; exit 1 ;;
+    esac
+    # A missing fixture stands for a request that failed, which is a case worth testing.
+    [[ -f "${file}" ]] || { echo "gh: Not Found (HTTP 404) [no fixture $(basename "${file}")]" >&2; exit 1; }
+    jq -r "${filter}" < "${file}"
+    ;;
+  release)
+    log "FORBIDDEN gh release $*"
+    echo "stub: gh release is not allowed; a release must be addressed by id through gh api" >&2
+    exit 1
+    ;;
+  *)
+    echo "stub: unknown gh command ${1:-}" >&2
+    exit 1
+    ;;
+esac
