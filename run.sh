@@ -850,6 +850,189 @@ hostpath() {
   fi
 }
 
+# Reading host files a session can write. Every workspace is writable from the
+# container, so a session can plant a symlink there, or swap one in while a
+# later launch runs, to make that launch copy another host file (an SSH key, a
+# cloud credential) into its container. [ -L ] then cp is not enough: the link
+# can appear between the two. Below a starting directory the caller trusts,
+# the helpers follow no link, and pin what they checked: each directory is
+# entered and then checked to be the inode lstat named, so the shell's cwd
+# holds it; each file is opened and then checked to be the inode lstat names.
+# lstat of a link is the link's own inode, never its target's, so a swap at any
+# point fails the check. Hard links are no way round it: the session can't name
+# a host file outside its workspaces to link to. The starting directory and its
+# parents are resolved normally; docs/security.md states what that leaves open.
+
+# dev:inode of $1, following links (GNU stat, else BSD/macOS stat).
+file_id() { stat -L -c '%d:%i' "$1" 2>/dev/null || stat -L -f '%d:%i' "$1" 2>/dev/null; }
+# dev:inode of $1 itself (lstat).
+link_id() { stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null; }
+# macOS reports /dev/fd/N on the fdesc device with the file's inode, so there the
+# open file is matched by inode alone; elsewhere by dev:inode. Set by init_shell.
+FD_INODE_ONLY=0
+
+# Process-wide settings, before anything else in main.
+init_shell() {
+  # An exported CDPATH makes `cd` to a relative directory print that directory
+  # on stdout, which would land in the files staged from `( cd dir && cat … )`.
+  unset CDPATH
+  [ "$(uname -s 2>/dev/null)" = Darwin ] && FD_INODE_ONLY=1
+  return 0
+}
+
+# Print ./$1, in the current directory, if it is a regular file and, once open,
+# still the file lstat names. Opens it on fd 9 of the calling shell. A FIFO
+# swapped in between the -f test and the open would block that open: a hang,
+# not a leak, and bash has no portable non-blocking open.
+cat_checked() {
+  local fd id
+  [ -f "./$1" ] && [ ! -L "./$1" ] || return 1
+  exec 9<"./$1" || return 1
+  if fd=$(file_id /dev/fd/9) && id=$(link_id "./$1") \
+     && { [ "$fd" = "$id" ] || { [ "$FD_INODE_ONLY" = 1 ] && [ "${fd#*:}" = "${id#*:}" ]; }; }; then
+    cat <&9
+    fd=$?
+  else
+    fd=1
+  fi
+  exec 9<&-
+  return "$fd"
+}
+
+# Print file $2, a relative path under directory $1, following no symlink in $2.
+# $1 itself is resolved normally. Prints nothing and fails on any mismatch.
+cat_nofollow() {
+  (
+    cd -- "$1" || exit 1
+    rest=$2
+    while :; do
+      case $rest in
+        */*)
+          comp=${rest%%/*}
+          rest=${rest#*/}
+          id=$(link_id "./$comp") && cd "./$comp" && [ "$(file_id .)" = "$id" ] || exit 1
+          ;;
+        *) break ;;
+      esac
+    done
+    cat_checked "$rest"
+  ) 2>/dev/null
+}
+
+# Resolve one symlink hop the user made: print $1's target when $1 is a link
+# whose target exists and is not itself a link, or $1 when it is no link.
+# Further hops are refused, because the next link may sit in a workspace.
+# Trailing slashes are stripped first ([ -L dir/ ] looks through a link), and a
+# target ending in . or .. is refused.
+one_hop() {
+  local p=$1 t
+  if [ -L "$p" ]; then
+    t=$(readlink "$p") || return 1
+    case $t in /*) ;; *) t="$(dirname "$p")/$t" ;; esac
+    while :; do
+      case $t in
+        / | *[!/]) break ;;
+        *) t=${t%/} ;;
+      esac
+    done
+    case /$t in */. | */..) return 1 ;; esac
+    [ -L "$t" ] && return 1
+    p=$t
+  fi
+  [ -e "$p" ] || return 1
+  printf '%s\n' "$p"
+}
+
+# True when symlink target $1, in a directory $2 levels below a copy root,
+# resolves inside that root: relative, leading ../ only (at most $2 of them),
+# then plain names. A .. after a name could climb out through another link.
+link_stays_inside() {
+  local l=$1 up=$2
+  case $l in /* | '') return 1 ;; esac
+  while :; do
+    case $l in
+      ../*) [ "$up" -gt 0 ] || return 1; up=$((up - 1)); l=${l#../} ;;
+      ..) [ "$up" -gt 0 ]; return ;;
+      *) break ;;
+    esac
+  done
+  case "/$l/" in */../* | */./*) return 1 ;; esac
+  return 0
+}
+
+# Copy directory $1 to $2 (absolute) without following links inside it. $3=1:
+# links directly in $1 are the user's own (skills/foo -> ~/repos/x/skills/foo)
+# and get one hop, into a fresh copy root. Otherwise a link is kept as a link
+# only if it stays inside its copy root ($4 = depth below it); any other link
+# is skipped with a warning. Relative $1 is entered from the current directory,
+# which keeps the walk on the directories already checked. A directory that
+# fails its identity check is skipped with a warning, never fatal: if a
+# platform reports inodes differently, launch loses that item, not the session.
+copy_tree_nofollow() {
+  local src=$1 dest=$2 hop=$3 depth=$4 shown=$1
+  case $src in /*) ;; *) shown="$PWD/${src#./}" ;; esac
+  mkdir -p "$dest" || return 1
+  (
+    if ! id=$(link_id "$src") || ! cd "$src" || [ "$(file_id .)" != "$id" ]; then
+      echo "claude-docker: skipping $shown: it is a link now, or changed while being copied" >&2
+      exit 1
+    fi
+    for e in ./* ./.[!.]* ./..?*; do
+      [ -e "$e" ] || [ -L "$e" ] || continue
+      n=${e#./}
+      # A skill linked from a repo root would otherwise carry its whole .git,
+      # thousands of files at a few processes each, for nothing in the container.
+      [ "$n" = .git ] && continue
+      if [ -L "$e" ] && [ "$hop" = 1 ]; then
+        if ! t=$(one_hop "$PWD/$n"); then
+          echo "claude-docker: skipping $PWD/$n: a symlink to a symlink, or to nothing" >&2
+        elif [ -d "$t" ]; then
+          copy_tree_nofollow "$t" "$dest/$n" 0 0 || true
+        elif ! cat_nofollow "$(dirname "$t")" "$(basename "$t")" >"$dest/$n"; then
+          rm -f "$dest/$n"
+          echo "claude-docker: skipping $PWD/$n: its target changed while being read" >&2
+        else
+          [ ! -x "$t" ] || chmod +x "$dest/$n"
+        fi
+      elif [ -L "$e" ]; then
+        if ! l=$(readlink "$e"); then
+          echo "claude-docker: skipping $PWD/$n: it changed while being copied" >&2
+        elif link_stays_inside "$l" "$depth"; then
+          # -- : a relative target may start with -, which ln would read as
+          # an option and fail on, dropping the whole directory.
+          ln -s -- "$l" "$dest/$n" || exit 1
+        else
+          echo "claude-docker: skipping $PWD/$n: a symlink to $l, outside the copied directory" >&2
+        fi
+      elif [ -d "$e" ]; then
+        copy_tree_nofollow "./$n" "$dest/$n" 0 $((depth + 1)) || true
+      elif [ -f "$e" ]; then
+        if cat_checked "$n" >"$dest/$n" 2>/dev/null; then
+          [ ! -x "$e" ] || chmod +x "$dest/$n"
+        else
+          rm -f "$dest/$n"
+          echo "claude-docker: skipping $PWD/$n: it changed while being read" >&2
+        fi
+      fi
+    done
+  ) || { rm -rf "$dest"; return 1; }
+}
+
+# Stage host config file $CLAUDE_CONFIG_DIR/$1 (one hop allowed) as $2. Fails
+# quietly when the file is absent; warns when a link or a swap is refused.
+stage_config_file() {
+  local src="$CLAUDE_CONFIG_DIR/$1" t
+  [ -e "$src" ] || [ -L "$src" ] || return 1
+  if t=$(one_hop "$src") && [ -f "$t" ] \
+     && cat_nofollow "$(dirname "$t")" "$(basename "$t")" >"$2"; then
+    [ ! -x "$t" ] || chmod +x "$2"
+    return 0
+  fi
+  rm -f "$2"
+  echo "claude-docker: skipping $src: not a regular file reached by at most one symlink" >&2
+  return 1
+}
+
 
 # Whether the proxied --glab host carries an explicit port, which squid then
 # allows for that host only. The host:port goes into the squid config, so it
@@ -1168,23 +1351,34 @@ wait_sidecar() {
 }
 
 build_workspace_mounts() {
-  local ws_suffix ws abs real name n i j k=0
+  local ws_suffix ws abs shown link name n i j k=0
 
   # Parallel arrays (not associative) so macOS system bash 3.2 works.
   # Counter-based iteration avoids ${!arr[@]} which trips set -u on empty arrays.
   SEEN_NAMES=()
   SEEN_PATHS=()
   SEEN_RO=()
-  SEEN_REAL=()
+  SEEN_SHOWN=()
   for ws in "${WORKSPACES[@]}"; do
     # Checked up front so a typo gets a claude-docker: message, not bash's bare `cd:` error.
     if [ ! -d "$ws" ]; then
       echo "claude-docker: workspace '$ws' is not a directory" >&2
       exit 1
     fi
-    abs=$(cd "$ws" && pwd) || exit 1
-    # Symlinks resolved, for the read-only overlap check below; mounts keep $abs.
-    real=$(cd "$ws" && pwd -P) || exit 1
+    # Physical path (pwd -P): the engine follows symlinks in a mount source, so
+    # mount what it would really get and name it after that directory. A
+    # workspace that is itself a symlink is announced: a session whose
+    # workspace holds that link could have pointed it somewhere else. Links
+    # higher up (a symlinked /home or /tmp) are common and not announced.
+    # Messages name the workspace as given ($shown), symlinks unresolved.
+    abs=$(cd -P "$ws" && pwd -P) || exit 1
+    shown=$(cd "$ws" && pwd) || exit 1
+    # Every trailing slash goes first: `[ -L link/ ]` looks through the link.
+    link=$ws
+    while [ "${link%/}" != "$link" ] && [ "${link%/}" != "" ]; do link=${link%/}; done
+    if [ -L "$link" ]; then
+      echo "claude-docker: workspace '$ws' is a symlink; mounting '$abs'" >&2
+    fi
     ws_suffix=""
     { [ "$RO_WORKSPACES" = "1" ] || [ "${WORKSPACES_RO[$k]:-0}" = "1" ]; } && ws_suffix=":ro"
     k=$((k + 1))
@@ -1199,14 +1393,16 @@ build_workspace_mounts() {
     n=${#SEEN_NAMES[@]}
     i=0
     while [ "$i" -lt "$n" ]; do
-      # Same path twice, or one directory through a symlink as both read-write
-      # and read-only (the :ro mount would protect nothing).
-      if [ "${SEEN_PATHS[$i]}" = "$abs" ] \
-         || { [ "${SEEN_REAL[$i]}" = "$real" ] && [ "${SEEN_RO[$i]}" != "${ws_suffix:+1}" ]; }; then
-        if [ "${SEEN_PATHS[$i]}" = "$abs" ]; then
-          echo "claude-docker: workspace '$abs' is given more than once; pass it once, as PATH (read-write) or --ro=PATH (read-only)" >&2
+      # The same directory twice, as the same path or through a symlink: mounts
+      # are of the physical path, so both would be one mount. Read-write and
+      # read-only at once gets its own message (the :ro would protect nothing).
+      if [ "${SEEN_PATHS[$i]}" = "$abs" ]; then
+        if [ "${SEEN_SHOWN[$i]}" = "$shown" ]; then
+          echo "claude-docker: workspace '$shown' is given more than once; pass it once, as PATH (read-write) or --ro=PATH (read-only)" >&2
+        elif [ "${SEEN_RO[$i]}" != "${ws_suffix:+1}" ]; then
+          echo "claude-docker: workspaces '${SEEN_SHOWN[$i]}' and '$shown' are the same directory, one read-write and one read-only; pass it once" >&2
         else
-          echo "claude-docker: workspaces '${SEEN_PATHS[$i]}' and '$abs' are the same directory, one read-write and one read-only; pass it once" >&2
+          echo "claude-docker: workspaces '${SEEN_SHOWN[$i]}' and '$shown' are the same directory; pass it once" >&2
         fi
         exit 1
       fi
@@ -1218,7 +1414,7 @@ build_workspace_mounts() {
     done
     SEEN_NAMES+=("$name")
     SEEN_PATHS+=("$abs")
-    SEEN_REAL+=("$real")
+    SEEN_SHOWN+=("$shown")
     SEEN_RO+=("${ws_suffix:+1}")
     MOUNT_ARGS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
     CONTAINER_PATHS+=("/workspaces/$name")
@@ -1226,15 +1422,15 @@ build_workspace_mounts() {
 
   # A read-only workspace inside a writable one stays writable through the
   # writable mount; say so rather than let ro-partial overstate the protection.
-  # Compared with symlinks resolved.
+  # SEEN_PATHS are physical, so this sees through symlinks.
   n=${#SEEN_PATHS[@]}
   i=0
   while [ "$i" -lt "$n" ]; do
     j=0
     while [ -n "${SEEN_RO[$i]}" ] && [ "$j" -lt "$n" ]; do
-      case "${SEEN_REAL[$i]}" in
-        "${SEEN_REAL[$j]}"/*)
-          [ -z "${SEEN_RO[$j]}" ] && echo "claude-docker: warning: read-only workspace '${SEEN_PATHS[$i]}' is inside writable workspace '${SEEN_PATHS[$j]}', so it stays writable under ${CONTAINER_PATHS[$j]}" >&2 ;;
+      case "${SEEN_PATHS[$i]}" in
+        "${SEEN_PATHS[$j]}"/*)
+          [ -z "${SEEN_RO[$j]}" ] && echo "claude-docker: warning: read-only workspace '${SEEN_SHOWN[$i]}' is inside writable workspace '${SEEN_SHOWN[$j]}', so it stays writable under ${CONTAINER_PATHS[$j]}" >&2 ;;
       esac
       j=$((j + 1))
     done
@@ -1451,7 +1647,9 @@ discover_tokens() {
         # needs hostpath(), as for the core.autocrlf lookup in stage_git_overlays.
         _glab_cfg=$(git -C "$(hostpath "$_ws0")" rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || true
         if [ -n "$_glab_cfg" ] && [ -f "$_glab_cfg/config" ] && [ ! -L "$_glab_cfg/config" ]; then
-          _glab_remote=$(git config --file "$_glab_cfg/config" --get remote.origin.url 2>/dev/null) || true
+          # Read through cat_nofollow so a config swapped for a link mid-launch
+          # is refused too; git parses the verified bytes from stdin.
+          _glab_remote=$(cat_nofollow "$_glab_cfg" config | git config --file - --get remote.origin.url 2>/dev/null) || true
           # The port of an ssh:// or scp-style (user@host:path) remote is the SSH
           # port, not GitLab's: reduce those to the bare host here. http(s) URLs
           # keep theirs and are trimmed with the other candidates below.
@@ -2445,29 +2643,33 @@ start_egress_sidecar() {
 }
 
 stage_host_config() {
-  local item src hops link
+  local item src hop
+  # Everything here is copied into the stage dir and the copy is mounted, never
+  # the host path: a directory you also open as a workspace (a dotfiles or
+  # shared-config repo your links point into) can be rewritten by a session, and
+  # a bind mount or cp -RL would follow whatever link it left there. So each
+  # item, or else each entry directly in it, may be one symlink you made; inside
+  # what that reaches, a link is kept only if it stays within the copy (see
+  # copy_tree_nofollow). Anything else is skipped with a warning.
   for item in agents commands skills themes; do
-    src="$CLAUDE_CONFIG_DIR/$item"
-    # Resolve top-level symlink so cp -RL gets a real directory path, not a link.
-    # Hop counter guards against pathological symlink cycles (a -> b -> a).
-    hops=0
-    while [ -L "$src" ] && [ "$hops" -lt 10 ]; do
-      link=$(readlink "$src")
-      case "$link" in /*) src="$link" ;; *) src="$(dirname "$src")/$link" ;; esac
-      hops=$((hops + 1))
-    done
-    if [ -d "$src" ]; then
-      # cp -RL dereferences all symlinks within the tree so internal symlinks
-      # (e.g. skills/foo -> ~/git/repo/skills/foo) resolve inside the container.
-      cp -RL "$src" "$stage/$item" || exit 1
-      MOUNT_ARGS+=("-v" "$(hostpath "$stage/$item"):/root/.claude/$item:ro")
+    [ -e "$CLAUDE_CONFIG_DIR/$item" ] || [ -L "$CLAUDE_CONFIG_DIR/$item" ] || continue
+    if ! src=$(one_hop "$CLAUDE_CONFIG_DIR/$item") || [ ! -d "$src" ]; then
+      echo "claude-docker: skipping $CLAUDE_CONFIG_DIR/$item: not a directory reached by at most one symlink" >&2
+      continue
     fi
+    # An item that is itself a link (skills -> ~/dotfiles/claude/skills) points
+    # into a directory a session may be able to write, so links directly in it
+    # are no longer the user's own: they get no hop.
+    hop=1
+    [ -L "$CLAUDE_CONFIG_DIR/$item" ] && hop=0
+    copy_tree_nofollow "$src" "$stage/$item" "$hop" 0 || continue
+    MOUNT_ARGS+=("-v" "$(hostpath "$stage/$item"):/root/.claude/$item:ro")
   done
-  if [ -f "$CLAUDE_CONFIG_DIR/CLAUDE.md" ]; then
-    MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_CONFIG_DIR/CLAUDE.md"):/root/.claude/CLAUDE.md:ro")
+  if stage_config_file CLAUDE.md "$stage/CLAUDE.md"; then
+    MOUNT_ARGS+=("-v" "$(hostpath "$stage/CLAUDE.md"):/root/.claude/CLAUDE.md:ro")
   fi
 
-  # Statusline: mount the host script as-is, plus a thin wrapper at the canonical
+  # Statusline: mount a copy of the host script, plus a thin wrapper at the canonical
   # path that prefixes a `docker:<flags>` tag when CLAUDE_DOCKER_FLAGS is set.
   # The wrapper is a no-op passthrough when unset so non-claude-docker runs of
   # the same file would behave identically.
@@ -2479,7 +2681,7 @@ stage_host_config() {
   # executable) or 127 (shebang interpreter missing, e.g. #!/opt/homebrew/...)
   # re-runs it under bash, which also runs POSIX sh scripts. Any other exit
   # status keeps the script's output and does not re-run it.
-  if [ -f "$CLAUDE_CONFIG_DIR/statusline-command.sh" ]; then
+  if stage_config_file statusline-command.sh "$stage/statusline-command.original.sh"; then
     cat >"$stage/statusline-command.sh" <<'WRAP' || exit 1
 #!/bin/sh
 # claude-docker wrapper — prepends active opt-in flag tag to host statusline.
@@ -2497,7 +2699,7 @@ fi
 WRAP
     chmod +x "$stage/statusline-command.sh" || exit 1
     MOUNT_ARGS+=(
-      "-v" "$(hostpath "$CLAUDE_CONFIG_DIR/statusline-command.sh"):/root/.claude/statusline-command.original.sh:ro"
+      "-v" "$(hostpath "$stage/statusline-command.original.sh"):/root/.claude/statusline-command.original.sh:ro"
       "-v" "$(hostpath "$stage/statusline-command.sh"):/root/.claude/statusline-command.sh:ro"
     )
   fi
@@ -2508,8 +2710,10 @@ WRAP
   # settings change (effort, model, theme). The entrypoint copies the seed onto
   # the container filesystem so those writes work; changes last for the run and
   # are overwritten from the host file on the next start — never written back.
-  [ -f "$CLAUDE_CONFIG_DIR/settings.docker.json" ] \
-    && MOUNT_ARGS+=("-v" "$(hostpath "$CLAUDE_CONFIG_DIR/settings.docker.json"):/run/claude-docker/settings.json:ro")
+  # The seed itself is a staged copy, like the files above.
+  if stage_config_file settings.docker.json "$stage/settings.docker.json"; then
+    MOUNT_ARGS+=("-v" "$(hostpath "$stage/settings.docker.json"):/run/claude-docker/settings.json:ro")
+  fi
   return 0
 }
 
@@ -2536,12 +2740,15 @@ stage_git_overlays() {
     # Skip workspaces where .git is a worktree/submodule pointer file rather
     # than a directory — only the main repo's .git/config needs the overlay,
     # and the worktree resolves through the main repo's mount anyway.
-    # Symlinks are refused at both levels: the workspace is writable from the
-    # container, and [ -f ] / cp follow links, so a planted .git or .git/config
-    # link would copy an arbitrary host file into the container.
+    # Symlinks are refused at both levels, including one swapped in while this
+    # runs (cat_nofollow, #211): the workspace is writable from the container,
+    # so a planted .git or .git/config link would otherwise copy an arbitrary
+    # host file into the container.
+    # The stage file is created first, so a write error there (disk full,
+    # EACCES) stops the launch, and only a refused read reaches the warning.
     if [ -d "$ws_abs/.git" ] && [ ! -L "$ws_abs/.git" ] \
-       && [ -f "$ws_abs/.git/config" ] && [ ! -L "$ws_abs/.git/config" ]; then
-      cp "$ws_abs/.git/config" "$stage/git-config-$ws_name" || exit 1
+       && { : >"$stage/git-config-$ws_name" || exit 1; } \
+       && cat_nofollow "$ws_abs" .git/config >>"$stage/git-config-$ws_name"; then
       cat >>"$stage/git-config-$ws_name" <<'EOF' || exit 1
 
 [core]
@@ -2557,10 +2764,17 @@ EOF
       # git.exe is native and argv conversion is off, so -C needs hostpath().
       if [ "$IS_MSYS" = "1" ] \
          && ws_autocrlf=$(git -C "$(hostpath "$ws_abs")" config --get core.autocrlf 2>/dev/null) \
-         && [ -n "$ws_autocrlf" ]; then
+         && case $ws_autocrlf in true | false | input) ;; *) false ;; esac; then
         printf '[core]\n\tautocrlf = %s\n' "$ws_autocrlf" >>"$stage/git-config-$ws_name" || exit 1
       fi
       MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config")
+    else
+      rm -f "$stage/git-config-$ws_name"
+      # Quiet for a workspace with no repo, or a worktree/submodule pointer.
+      if [ -d "$ws_abs/.git" ] && [ ! -L "$ws_abs/.git" ] \
+         && { [ -e "$ws_abs/.git/config" ] || [ -L "$ws_abs/.git/config" ]; }; then
+        echo "claude-docker: no .git/config overlay for $ws_abs: it is a symlink, or changed while being read; git in the container uses the host file" >&2
+      fi
     fi
     i=$((i + 1))
   done
@@ -2703,6 +2917,7 @@ run_container() {
 
 main() {
   set -euo pipefail
+  init_shell
   parse_args "$@"
   validate_opts
   select_runtime

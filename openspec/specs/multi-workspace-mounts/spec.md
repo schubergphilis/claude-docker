@@ -220,7 +220,9 @@ The overlay mount SHALL be writable (not `:ro`), so container-side operations th
 
 The overlay SHALL NOT be created for workspaces where `.git` is a pointer file rather than a directory (worktrees, submodules). Worktrees mounted alongside their main repo resolve through the main repo's overlay; worktrees mounted standalone (without their main repo) fall back to the existing `git worktree repair` workflow.
 
-The overlay SHALL NOT be created when `<ws>/.git` or `<ws>/.git/config` is a symbolic link, and `run.sh` SHALL NOT follow such a link when deciding whether to overlay or when copying. The workspace is writable from inside the container, so a link planted there in one session would otherwise make the next launch copy an arbitrary host file — one outside every passed workspace — into the container.
+The overlay SHALL NOT be created when `<ws>/.git` or `<ws>/.git/config` is a symbolic link, and `run.sh` SHALL NOT follow such a link when deciding whether to overlay or when copying — including a link swapped in while `run.sh` reads the file. `run.sh` SHALL enter `.git` and check it is the inode `lstat` named, then open `config` and check it is the inode `lstat` names, and copy only from that open file. The workspace is writable from inside the container, so a link planted there in one session, or swapped in by a running session while another launches, would otherwise make the launch copy an arbitrary host file — one outside every passed workspace — into the container. The same read SHALL be used for the `--glab` origin-host lookup.
+
+On Windows hosts, the host's `core.autocrlf` value SHALL be carried into the overlay only when it is `true`, `false` or `input`.
 
 #### Scenario: Container-created nested worktree is portable to the host
 
@@ -256,3 +258,28 @@ The overlay SHALL NOT be created when `<ws>/.git` or `<ws>/.git/config` is a sym
 - **WHEN** the user runs `claude-docker <workspace>`
 - **THEN** no bind mount SHALL be created at `/workspaces/<name>/.git/config`
 - **AND** the link target's contents SHALL NOT be copied into the stage directory
+
+#### Scenario: A link swapped in during launch is not followed
+
+- **GIVEN** a process keeps replacing `<ws>/.git/config`, or `<ws>/.git`, with a symbolic link to another host file or directory and back, while `run.sh` starts
+- **WHEN** `run.sh` copies the overlay
+- **THEN** the stage copy holds the workspace's own `.git/config`, or no overlay is created
+- **AND** the other file's contents never reach the stage directory
+
+### Requirement: Workspaces mount their physical path
+
+`run.sh` SHALL resolve each workspace to its physical path (`cd -P` / `pwd -P`) and mount that path at `/workspaces/<basename of the physical path>`, since the engine follows symlinks in a mount source anyway. When the workspace argument itself is a symbolic link, `run.sh` SHALL print a one-line notice to stderr naming the directory it mounts, because a session whose workspace holds that link could have repointed it.
+
+#### Scenario: A symlinked workspace is mounted as its target and announced
+
+- **GIVEN** `~/link-ws` is a symbolic link to `~/real-target`
+- **WHEN** the user runs `claude-docker ~/link-ws`
+- **THEN** `~/real-target` is mounted at `/workspaces/real-target`
+- **AND** stderr names `~/real-target` as the mounted directory
+
+#### Scenario: One directory through a symlink in the same mode is refused
+
+- **GIVEN** `~/repo-link` is a symbolic link to `~/repo`
+- **WHEN** the user runs `claude-docker ~/repo ~/repo-link`
+- **THEN** `run.sh` exits non-zero with a message naming both paths as the same directory, since both would be the same physical mount
+- **AND** no container is started
