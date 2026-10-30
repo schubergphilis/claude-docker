@@ -29,7 +29,7 @@ Let users discover every `claude-docker` wrapper flag directly from the terminal
 
 The help output SHALL include a one-line description for each of the following, grouped so wrapper flags are visually distinct from the `--` passthrough contract:
 
-- Wrapper flags: `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--api`, `--egress-lock`, `--egress-allowlist`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`/`--help`. The `--egress-lock` description SHALL state that it requires `--api` or `--api-direct` and `ANTHROPIC_BASE_URL`, locks model traffic to that endpoint and logs every connection its proxy carries. The `--egress-allowlist` description SHALL state that it requires `--egress-lock`, takes `=FILE` or `CLAUDE_DOCKER_EGRESS_ALLOWLIST`, and refuses every host except the model endpoint and the hosts in the file.
+- Wrapper flags: `--yolo`, `--ephemeral`, `--ro`, `--ro=PATH`, `--aws`, `--gh`, `--glab`, `--api`, `--egress-lock`, `--egress-allowlist`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`/`--help`. The `--egress-lock` description SHALL state that it requires `--api` or `--api-direct` and `ANTHROPIC_BASE_URL`, locks model traffic to that endpoint and logs every connection its proxy carries. The `--egress-allowlist` description SHALL state that it requires `--egress-lock`, takes `=FILE` or `CLAUDE_DOCKER_EGRESS_ALLOWLIST`, and refuses every host except the model endpoint and the hosts in the file.
 - The `--` separator and its passthrough semantics for `claude` flags.
 - Positional workspace arguments and the default-to-`$PWD` behaviour.
 - The `CLAUDE_DOCKER_TMUX` environment variable and its accepted values (`1`, `cc`).
@@ -44,7 +44,7 @@ The help output SHALL include a one-line description for each of the following, 
 #### Scenario: All wrapper flags documented
 
 - **WHEN** user runs `claude-docker --help`
-- **THEN** the output contains each of `--yolo`, `--ephemeral`, `--ro`, `--aws`, `--gh`, `--glab`, `--api`, `--egress-lock`, `--egress-allowlist`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`, `--help`, `--`, `CLAUDE_DOCKER_TMUX`, `CLAUDE_DOCKER_CONFIG_DIR`, `CLAUDE_DOCKER_API_CA`, `CLAUDE_DOCKER_AZ_CA`, `CLAUDE_DOCKER_ADD_HOSTS`, `CLAUDE_DOCKER_EGRESS_ALLOWLIST`, `XDG_STATE_HOME`, and `settings.docker.json`
+- **THEN** the output contains each of `--yolo`, `--ephemeral`, `--ro`, `--ro=PATH`, `--aws`, `--gh`, `--glab`, `--api`, `--egress-lock`, `--egress-allowlist`, `--az`, `--iterm`, `--tmux`, `--claude-dir`, `-h`, `--help`, `--`, `CLAUDE_DOCKER_TMUX`, `CLAUDE_DOCKER_CONFIG_DIR`, `CLAUDE_DOCKER_API_CA`, `CLAUDE_DOCKER_AZ_CA`, `CLAUDE_DOCKER_ADD_HOSTS`, `CLAUDE_DOCKER_EGRESS_ALLOWLIST`, `XDG_STATE_HOME`, and `settings.docker.json`
 
 #### Scenario: Each wrapper flag has an explanation
 

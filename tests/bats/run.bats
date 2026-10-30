@@ -122,6 +122,39 @@ run_script_fn() {
   [ "${WORKSPACES[0]}" = "$WS" ]
 }
 
+@test "parse_args: --ro=PATH marks only that workspace, in order" {
+  parse_args a --ro=b c
+  [ "$(lines_of "${WORKSPACES[@]}")" = "$(printf 'a\nb\nc')" ]
+  [ "$(lines_of "${WORKSPACES_RO[@]}")" = "$(printf '0\n1\n0')" ]
+  [ "$RO_WORKSPACES" = 0 ]
+}
+
+@test "parse_args: --ro=~/x expands the tilde" {
+  parse_args a '--ro=~/x'
+  [ "${WORKSPACES[1]}" = "$HOME/x" ]
+}
+
+@test "parse_args: --ro=PATH counts as a workspace, so PWD is not added" {
+  cd "$WS"
+  parse_args --ro=b --ro=c
+  [ "$(lines_of "${WORKSPACES[@]}")" = "$(printf 'b\nc')" ]
+  [ "$(lines_of "${WORKSPACES_RO[@]}")" = "$(printf '1\n1')" ]
+}
+
+@test "parse_args: --ro=. mounts PWD read-only as the working dir" {
+  cd "$WS"
+  parse_args --ro=.
+  build_workspace_mounts
+  [ "$CWD" = /workspaces/repo ]
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/workspaces/repo:ro' "$WS")" ]
+}
+
+@test "parse_args: empty --ro= is rejected" {
+  run parse_args --ro= a
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--ro= needs a path"* ]]
+}
+
 @test "parse_args: --iterm and --tmux set CLAUDE_DOCKER_TMUX" {
   parse_args --iterm
   [ "$CLAUDE_DOCKER_TMUX" = cc ]
@@ -511,6 +544,63 @@ http_access allow all" ]
   [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/workspaces/repo:ro\n-v\n%s:/workspaces/other:ro' "$WS" "$BATS_TEST_TMPDIR/other")" ]
 }
 
+@test "build_workspace_mounts: --ro=PATH mounts only that workspace :ro" {
+  mkdir -p "$BATS_TEST_TMPDIR/other"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/other") WORKSPACES_RO=(0 1)
+  build_workspace_mounts
+  [ "$CWD" = /workspaces/repo ]
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/workspaces/repo\n-v\n%s:/workspaces/other:ro' "$WS" "$BATS_TEST_TMPDIR/other")" ]
+}
+
+@test "build_workspace_mounts: warns when a read-only workspace is inside a writable one" {
+  mkdir -p "$WS/vendor"
+  WORKSPACES=("$WS" "$WS/vendor") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ]
+  [ "$output" = "claude-docker: warning: read-only workspace '$WS/vendor' is inside writable workspace '$WS', so it stays writable under /workspaces/repo" ]
+}
+
+@test "build_workspace_mounts: the nesting warning sees through symlinks" {
+  mkdir -p "$WS/vendor"
+  ln -s "$WS/vendor" "$BATS_TEST_TMPDIR/vendor-link"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/vendor-link") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"read-only workspace '$BATS_TEST_TMPDIR/vendor-link' is inside writable workspace '$WS'"* ]]
+}
+
+@test "build_workspace_mounts: one directory through a symlink as both rw and ro is refused" {
+  ln -s "$WS" "$BATS_TEST_TMPDIR/repo-link"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/repo-link") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 1 ]
+  [ "$output" = "claude-docker: workspaces '$WS' and '$BATS_TEST_TMPDIR/repo-link' are the same directory, one read-write and one read-only; pass it once" ]
+}
+
+@test "build_workspace_mounts: one directory through a symlink in the same mode still mounts" {
+  ln -s "$WS" "$BATS_TEST_TMPDIR/repo-link"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/repo-link")
+  run build_workspace_mounts
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "build_workspace_mounts: the same path twice gets its own error" {
+  WORKSPACES=("$WS" "$WS") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 1 ]
+  [ "$output" = "claude-docker: workspace '$WS' is given more than once; pass it once, as PATH (read-write) or --ro=PATH (read-only)" ]
+}
+
+@test "build_workspace_mounts: no nesting warning when the outer one is read-only too" {
+  mkdir -p "$WS/vendor" "$BATS_TEST_TMPDIR/repo-b"
+  WORKSPACES=("$WS/vendor" "$WS" "$BATS_TEST_TMPDIR/repo-b") WORKSPACES_RO=(1 1 0)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  WORKSPACES=("$WS" "$WS/vendor") WORKSPACES_RO=(1 0)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
 @test "build_workspace_mounts: a missing workspace gets a prefixed error" {
   WORKSPACES=("$BATS_TEST_TMPDIR/missing")
   run build_workspace_mounts
@@ -895,6 +985,21 @@ TABLE
   WITH_API=1 WITH_EGRESS_LOCK=1
   build_flags_env
   [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=api,egress-lock" ]
+}
+
+@test "build_flags_env: some --ro=PATH workspaces tag ro-partial" {
+  WORKSPACES=(a b) WORKSPACES_RO=(0 1)
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=ro-partial" ]
+}
+
+@test "build_flags_env: all workspaces read-only tag ro" {
+  WORKSPACES=(a b) WORKSPACES_RO=(1 1)
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=ro" ]
+  WORKSPACES_RO=(0 1) RO_WORKSPACES=1
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=ro" ]
 }
 
 @test "build_flags_env: no opt-ins, no tag" {
