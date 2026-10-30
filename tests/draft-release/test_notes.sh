@@ -118,5 +118,43 @@ check "the range" "three entries" "$(field changes)" "3"
 # the head of the range comes before the backport merge below it.
 check "entries within a section" "newest first" \
   "$(notes | grep -A3 '^## Maintenance' | grep -oE '#(2102|2199)' | tr '\n' ' ')" "#2199 #2102 "
+check "every merged pull request read" "no warning block" "$(count_notes '\[!WARNING\]')" "0"
+
+# --- merged pull requests that cannot be read ----------------------------------------------
+# A "Merge pull request #N" subject always names a pull request, so one that cannot be read
+# shipped all the same. #2302 was merged inside #2301's branch, #2303 straight to main; neither
+# has a fixture, so both reads fail. Both are listed from their merge commits, whose third line
+# is the pull request's title and so gives the type and the ! marker; they are warned about and
+# named at the top of the draft. A squash-style
+# "(#2399)" inside the branch may be an issue, so it stays a silent skip.
+fresh_fixtures
+printf '%s\n' '[{"id":1,"tag_name":"v1.0.0","draft":false,"prerelease":false,"body":"x","html_url":"u1"}]' > "${F}/releases.json"
+cat > "${F}/compare.json" <<'JSON'
+{"commits": [
+  {"sha":"b1000000","parents":[{"sha":"base0000"}],"commit":{"message":"feat: add the endpoint"}},
+  {"sha":"b2000000","parents":[{"sha":"base0000"},{"sha":"b1000000"}],"commit":{"message":"Merge pull request #2302 from OWNER/endpoint\n\nfeat(api)!: add the endpoint"}},
+  {"sha":"b3000000","parents":[{"sha":"b2000000"}],"commit":{"message":"chore: fix a typo (#2399)"}},
+  {"sha":"c1000000","parents":[{"sha":"base0000"},{"sha":"b3000000"}],"commit":{"message":"Merge pull request #2301 from OWNER/tooling\n\nchore(tooling): add the suite"}},
+  {"sha":"head0000","parents":[{"sha":"c1000000"},{"sha":"c9000000"}],"commit":{"message":"Merge pull request #2303 from OWNER/docs\n\ndocs: describe it"}}
+]}
+JSON
+printf '%s\n' '{"title":"chore(tooling): add the suite","user":{"login":"author-a"},"body":""}' > "${F}/pull_2301.json"
+run
+
+section "merged pull requests that cannot be read"
+check "a merge inside a merged branch" "is listed by the title in its merge commit" "$(count_notes '^\* feat(api)!: add the endpoint (#2302, b2000000)$')" "1"
+check "a merge inside a merged branch" "keeps its ! marker" "$(notes | grep -A2 '^## Breaking changes' | grep -c '#2302')" "1"
+check "a merge inside a merged branch" "warns" "$(count_warning 'Pull request #2302 could not be read')" "1"
+check "a merge on the branch's own line" "is listed by the title in its merge commit" "$(notes | grep -A2 '^## Documentation' | grep -c '^\* docs: describe it (#2303, head0000)$')" "1"
+check "a merge on the branch's own line" "warns" "$(count_warning 'Pull request #2303 could not be read')" "1"
+check "the draft" "opens with the warning block" "$(notes | head -1)" "> [!WARNING]"
+check "the warning block" "names both, with the error" "$(notes | grep -c '^> - #230[23] (gh: Not Found (HTTP 404)')" "2"
+check "the warning block" "asks for a re-run before publishing" "$(count_notes 'Re-run the workflow before publishing this draft')" "1"
+check "a readable merge" "is listed by its title" "$(count_notes '^\* chore(tooling): add the suite (#2301) @author-a$')" "1"
+check "an unreadable (#N) inside the branch" "is still skipped" "$(count_notes 'fix a typo')" "0"
+check "an unreadable (#N) inside the branch" "without a warning" "$(count_warning 'Pull request #2399 could not be read')" "0"
+check "the version" "the ! in the merge title makes it a major" "$(field version) ($(field bump))" "v2.0.0 (major)"
+check "the range" "three entries, for the three merges" "$(field changes)" "3"
+check "the marker" "stays the last line under the warning block" "$(notes | tail -1)" "${MARKER}"
 
 finish

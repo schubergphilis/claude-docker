@@ -350,3 +350,11 @@ draft it manages.
 - **WHEN** the workflow runs
 - **THEN** neither of them is changed
 - **AND** the workflow creates or updates only the draft that carries its marker
+
+#### Scenario: a merged pull request that cannot be read is named in the draft
+
+- **GIVEN** a `Merge pull request #N` commit in the range whose pull request the workflow cannot read
+- **WHEN** the workflow runs
+- **THEN** the pull request is listed under the title GitHub wrote into its merge commit, which gives its type and any `!` marker, whether it was merged to the default branch or inside another pull request's branch
+- **AND** the draft opens with a warning naming it and the error, asking for a re-run before publishing
+- **AND** the run carries the same warning
