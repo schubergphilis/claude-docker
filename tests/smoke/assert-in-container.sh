@@ -265,7 +265,7 @@ check_path_order() {
 }
 
 # ---------------------------------------------------------------------------
-# 3b. git ownership check — the image trusts /workspaces/* and nothing else
+# 3b. git ownership check — only the workspaces run.sh vouched for are trusted
 # ---------------------------------------------------------------------------
 
 # Print "ok" when git opens the repo at $1, else git's error. The remaining
@@ -282,32 +282,39 @@ git_opens() {
   fi
 }
 
+# Each setup step is a condition, so a failed mktemp or git init is a FAIL
+# under main's set -e rather than an abort, and the temp repos are removed on
+# every path.
 check_git_trust() {
+  local ws="${WORKSPACE:-/workspaces/smoke}" outside="" repo=""
+  # The smoke workspace is the runner's own directory, so run.sh vouches for it.
   assert_eq "git-safe-directory-system" \
-    "$(git config --system --get-all safe.directory | paste -sd,)" "/workspaces/*"
+    "$(git config --system --get-all safe.directory | paste -sd,)" "$ws,$ws/*"
 
-  local outside
-  outside=$(mktemp -d)
-  git init -q "$outside"
-  case "$(git_opens "$outside")" in
-    *"dubious ownership"*) pass "git-trust: foreign-owned repo outside /workspaces refused" ;;
-    *) fail "git-trust: foreign-owned repo outside /workspaces was not refused" ;;
-  esac
-  rm -rf "$outside"
+  if outside=$(mktemp -d) && git init -q "$outside"; then
+    case "$(git_opens "$outside")" in
+      *"dubious ownership"*) pass "git-trust: foreign-owned repo outside /workspaces refused" ;;
+      *) fail "git-trust: foreign-owned repo outside /workspaces was not refused" ;;
+    esac
+  else
+    fail "git-trust: could not create a repo outside /workspaces"
+  fi
+  [ -z "$outside" ] || rm -rf "$outside"
 
   if [ "${EXPECT_RO:-0}" = "1" ]; then
     pass "git-trust-workspace: skipped (EXPECT_RO=1, workspace is :ro)"
-    return
+    return 0
   fi
   # Nested two levels, like a .claude/worktrees/<name> checkout.
-  local ws="${WORKSPACE:-/workspaces/smoke}" repo
-  repo=$(mktemp -d "$ws/.git-trust.XXXXXX")
-  git init -q "$repo/nested/repo"
-  assert_eq "git-trust: foreign-owned repo under /workspaces opens" \
-    "$(git_opens "$repo/nested/repo")" "ok"
-  assert_eq "git-trust: survives an exported GIT_CONFIG_* set" \
-    "$(git_opens "$repo/nested/repo" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/elsewhere)" "ok"
-  rm -rf "$repo"
+  if repo=$(mktemp -d "$ws/.git-trust.XXXXXX") && git init -q "$repo/nested/repo"; then
+    assert_eq "git-trust: foreign-owned repo under a trusted workspace opens" \
+      "$(git_opens "$repo/nested/repo")" "ok"
+    assert_eq "git-trust: survives an exported GIT_CONFIG_* set" \
+      "$(git_opens "$repo/nested/repo" GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=safe.directory GIT_CONFIG_VALUE_0=/elsewhere)" "ok"
+  else
+    fail "git-trust: could not create a repo under $ws"
+  fi
+  [ -z "$repo" ] || rm -rf "$repo"
 }
 
 # ---------------------------------------------------------------------------

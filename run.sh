@@ -829,8 +829,8 @@ detect_msys() {
   if [ "$IS_MSYS" = "1" ]; then
     HOST_UID=1000
     HOST_GID=1000
-    # Those same root-owned NTFS mounts would trip git's ownership check; the
-    # image's system gitconfig trusts /workspaces/* on every host (Dockerfile).
+    # Those same root-owned NTFS mounts would trip git's ownership check;
+    # build_git_trust has the entrypoint trust every workspace on Windows.
   else
     HOST_UID=$(id -u)
     HOST_GID=$(id -g)
@@ -1437,6 +1437,81 @@ build_workspace_mounts() {
     i=$((i + 1))
   done
   CWD="${CONTAINER_PATHS[0]}"
+}
+
+# Whether host path $1 belongs to the user running claude-docker. A function
+# so the tests can stand in for an owner they can't create.
+owned_by_me() { [ -O "$1" ]; }
+
+# Whether git's own directories for workspace $1 are yours: there are none (not
+# a repo), or .git is a directory you own, or a pointer file (worktree,
+# submodule) you own whose gitdir, and that gitdir's commondir, you own too.
+# Host git checks the gitdir as well, but safe.directory in the container is
+# matched against the workspace path alone, so the check happens here. A .git
+# symlink is refused, as stage_git_overlays refuses it.
+git_dirs_owned() {
+  local ws="$1" gd cd
+  [ -L "$ws/.git" ] && return 1
+  [ -e "$ws/.git" ] || return 0
+  owned_by_me "$ws/.git" || return 1
+  [ -f "$ws/.git" ] || return 0
+  gd=$(sed -n 's/^gitdir: //p' "$ws/.git" 2>/dev/null | head -1)
+  [ -n "$gd" ] || return 1
+  case "$gd" in /*) ;; *) gd="$ws/$gd" ;; esac
+  owned_by_me "$gd" || return 1
+  [ -f "$gd/commondir" ] || return 0
+  cd=$(head -1 "$gd/commondir" 2>/dev/null)
+  [ -n "$cd" ] || return 1
+  case "$cd" in /*) ;; *) cd="$gd/$cd" ;; esac
+  owned_by_me "$cd"
+}
+
+# Which mounted workspaces git in the container may trust despite an owner
+# mismatch (its safe.directory check). Git refuses a repository whose owner
+# differs from the user running it, so that another user's planted hooks or
+# core.fsmonitor never run in your session. Inside the container that check
+# misfires: Windows NTFS mounts show every file as root's, and Docker Desktop
+# on macOS has been seen to report a mismatch for a workspace you own. So the
+# host decides: a workspace you own, along with its git directory
+# (git_dirs_owned), is passed to the entrypoint, which trusts it in the
+# container's system git config, out of the session's reach. A workspace
+# another host user owns gets no entry, and git refuses it as it would on the
+# host. On Windows ownership means nothing, so every workspace is trusted.
+build_git_trust() {
+  local n=${#SEEN_PATHS[@]} i j ws trusted="" vouched=() parent
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    ws="${SEEN_PATHS[$i]}"
+    vouched[$i]=""
+    if [ "$IS_MSYS" = "1" ] || { owned_by_me "$ws" && git_dirs_owned "$ws"; }; then
+      vouched[$i]=1
+      trusted="${trusted:+$trusted:}${CONTAINER_PATHS[$i]}"
+    fi
+    i=$((i + 1))
+  done
+  # A workspace left out is still trusted through a vouched-for one it sits
+  # in (<parent>/* covers it), so say which applies. SEEN_PATHS are physical
+  # paths, so this sees through symlinks.
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    if [ -z "${vouched[$i]}" ]; then
+      parent=""
+      j=0
+      while [ "$j" -lt "$n" ]; do
+        case "${SEEN_PATHS[$i]}" in
+          "${SEEN_PATHS[$j]}"/*) [ -n "${vouched[$j]}" ] && parent="${SEEN_PATHS[$j]}" ;;
+        esac
+        j=$((j + 1))
+      done
+      if [ -n "$parent" ]; then
+        echo "claude-docker: warning: '${SEEN_PATHS[$i]}' or its git directory belongs to another user, but it sits inside '$parent', so git in the container trusts it anyway; pass it on its own, or leave it out" >&2
+      else
+        echo "claude-docker: '${SEEN_PATHS[$i]}' or its git directory belongs to another user, so git in the container won't trust it (its ownership check); mount only repos whose git directory you own" >&2
+      fi
+    fi
+    i=$((i + 1))
+  done
+  ENV_ARGS+=("-e" "CLAUDE_DOCKER_TRUSTED_WORKSPACES=$trusted")
 }
 
 build_cred_mounts() {
@@ -2924,6 +2999,7 @@ main() {
   prune_stale_auth_proxy
   detect_msys
   build_workspace_mounts
+  build_git_trust
   build_cred_mounts
   build_env_args
   discover_tokens

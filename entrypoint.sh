@@ -12,6 +12,7 @@
 SEED_SETTINGS=/run/claude-docker/settings.json
 ROOT_HOME=/root
 CA_DIR=/usr/local/share/ca-certificates
+GIT_SYSTEM_CONFIG=/etc/gitconfig
 
 # Seed /root/.claude/settings.json from the host settings.docker.json that
 # run.sh forwards at the seed path. A copy, not a bind mount at the real path:
@@ -146,6 +147,34 @@ chown_volumes() {
   fi
 }
 
+# Trust the workspaces run.sh vouched for (CLAUDE_DOCKER_TRUSTED_WORKSPACES,
+# colon-separated container paths; see build_git_trust) in git's system
+# config, so git's ownership check accepts them, and the worktrees nested in
+# them, whatever owner the mount reports. System scope, written as root before
+# the drop: the session can't edit it, and a GIT_CONFIG_* export or a cleaned
+# environment doesn't remove it. Only a /workspaces/<name> path is written;
+# anything else, a * included (git reads "*" as "trust every repository"), is
+# refused with a WARN.
+trust_workspaces() {
+  local p list="${CLAUDE_DOCKER_TRUSTED_WORKSPACES:-}" paths=()
+  [ -n "$list" ] || return 0
+  # read -a, not an unquoted $list: the shell would expand a * in an entry
+  # against the filesystem before the check below could refuse it.
+  IFS=: read -ra paths <<<"$list"
+  for p in "${paths[@]}"; do
+    case "$p" in
+      '') continue ;;
+      /workspaces/*/* | */. | */.. | *'*'* | *'?'* | *'['* ) ;;
+      /workspaces/?*)
+        git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p" \
+          && git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p/*" \
+          || { printf 'entrypoint: ERROR could not trust %s for git\n' "$p" >&2; return 1; }
+        continue ;;
+    esac
+    printf 'entrypoint: WARN not trusting %s for git: not a /workspaces/<name> path\n' "$p" >&2
+  done
+}
+
 main() {
   set -euo pipefail
   local uid="${HOST_UID:-0}" gid="${HOST_GID:-0}"
@@ -154,6 +183,7 @@ main() {
   # fall through to the exec.
   seed_settings || return
   install_cas || return
+  trust_workspaces || return
   approve_api_key || return
   if [ "$uid" = 0 ]; then
     exec "$@"

@@ -34,7 +34,7 @@ Windows paths (`C:\...`) are accepted anywhere `run.sh` takes a path. `~` inside
 
 - MSYS's automatic POSIX→Windows argv rewriting is disabled, and every host path handed to a native executable (mount sources, `cp` destinations, `git -C`) is translated with `cygpath`, so container-side paths reach the engine intact — no `invalid option type "\Program Files\Git\workspaces\..."`.
 - The container user is UID/GID `1000`, not Git Bash's synthetic SID-derived `id -u` (e.g. `197609`, outside rootless podman's ID range). NTFS mounts have no real POSIX ownership, so nothing on the host is affected; the agent still runs non-root.
-- Those mounts show every file as owned by root, which would trip git's ownership check; the image's system git config trusts `/workspaces/*` on every host (see [File ownership](usage.md#file-ownership)).
+- Those mounts show every file as owned by root, which would trip git's ownership check; on Windows the entrypoint trusts every workspace in the container's system git config, since ownership means nothing there (see [File ownership](usage.md#file-ownership)).
 - Each workspace's effective `core.autocrlf` (Git for Windows sets `true` system-wide) is carried into its container-only `.git/config` overlay, so in-container `git status` doesn't flag every CRLF file as modified.
 - `--tfe`, `--glab` and `--registry` look under `%APPDATA%` first (`terraform.d\credentials.tfrc.json`, `glab-cli\`, `uv\uv.toml`, `pip\pip.ini`), then fall back to the Linux paths.
 

@@ -164,10 +164,12 @@ class GitBashTest(unittest.TestCase):
         self.assertIn("HOST_UID=1000", env)
         self.assertIn("HOST_GID=1000", env)
 
-    def test_safe_directory_left_to_image(self):
-        # The image's system gitconfig trusts /workspaces/*; no env override.
+    def test_every_workspace_trusted_through_the_entrypoint(self):
+        # NTFS mounts carry no owner, so run.sh vouches for every workspace and
+        # the entrypoint writes it to the system gitconfig; no GIT_CONFIG_* env.
         env = pairs(self.start(), "-e")
         self.assertFalse([e for e in env if e.startswith("GIT_CONFIG_")])
+        self.assertIn("CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo", env)
 
     def test_overlay_carries_host_autocrlf(self):
         self.start()

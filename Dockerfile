@@ -123,16 +123,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
  && git lfs install --system --skip-repo \
  && rm -rf /var/lib/apt/lists/*
 
-# Trust every mounted workspace (and worktrees nested in one) for git's
-# ownership check, on every host OS. Without it git refuses a workspace with
-# "detected dubious ownership" whenever the owner it sees differs from the
-# dropped UID (always on Windows NTFS mounts, and seen on macOS too), and
-# agents then append safe.directory entries to the persistent ~/.gitconfig.
-# System scope, not GIT_CONFIG_* env: a session's own GIT_CONFIG_COUNT export
-# or a tool that runs git with a cleaned environment can't drop it. Scoped to
-# /workspaces only — a repo elsewhere with a foreign owner is still refused.
-RUN git config --system safe.directory '/workspaces/*'
-
 # GitHub CLI (keyring fetched at build; TODO: commit the keyring to the repo)
 RUN install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
