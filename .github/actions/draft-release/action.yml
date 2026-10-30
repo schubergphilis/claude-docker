@@ -187,6 +187,8 @@ runs:
         trap 'rm -rf "${work}"' EXIT
         entries="${work}/entries.tsv"   # type <tab> bump <tab> rendered line
         : > "${entries}"
+        unreadable="${work}/unreadable.txt"   # one "#N (error)" line per unreadable merge
+        : > "${unreadable}"
 
         # --- what the draft describes --------------------------------------------------
 
@@ -265,7 +267,7 @@ runs:
           fi
         fi
 
-        raw="${work}/raw.tsv"        # sha <tab> first parent <tab> subject
+        raw="${work}/raw.tsv"        # sha <tab> first parent <tab> subject <tab> third line
         if [[ -n "${previous_tag}" ]]; then
           # Which release the count starts from is said out loud, and a prerelease is named as
           # one: a beta ahead of the last full release becomes the baseline here, and a
@@ -277,14 +279,14 @@ runs:
           fi
           gh api --paginate "repos/${REPOSITORY}/compare/${previous_tag}...${HEAD_SHA}?per_page=100" \
             --jq 'def dash: if . == null or . == "" then "-" else . end;
-                  .commits[] | [.sha, (.parents[0].sha|dash), (.commit.message | split("\n")[0] | dash)] | @tsv' > "${raw}" \
+                  .commits[] | [.sha, (.parents[0].sha|dash), (.commit.message | split("\n")[0] | dash), (.commit.message | split("\n")[2] | dash)] | @tsv' > "${raw}" \
             || fail "Cannot compare ${previous_tag} with the head commit" \
                  "repos/${REPOSITORY}/compare/${previous_tag}...${HEAD_SHA} could not be read. Check that the tag exists and that the token may read this repository."
         else
           echo "Nothing to count from; drafting the first release."
           gh api --paginate "repos/${REPOSITORY}/commits?sha=${HEAD_SHA}&per_page=100" \
             --jq 'def dash: if . == null or . == "" then "-" else . end;
-                  .[] | [.sha, (.parents[0].sha|dash), (.commit.message | split("\n")[0] | dash)] | @tsv' > "${raw}" \
+                  .[] | [.sha, (.parents[0].sha|dash), (.commit.message | split("\n")[0] | dash), (.commit.message | split("\n")[2] | dash)] | @tsv' > "${raw}" \
             || fail "Cannot list commits" \
                  "repos/${REPOSITORY}/commits could not be read. Check that the token may read this repository."
         fi
@@ -302,7 +304,7 @@ runs:
         while [[ -n "${cursor}" && "${cursor}" != '-' && "${remaining}" -gt 0 ]]; do
           line="$(grep -m 1 "^${cursor}"$'\t' "${raw}" || true)"
           [[ -n "${line}" ]] || break
-          IFS=$'\t' read -r walk_sha walk_parent walk_subject <<< "${line}"
+          IFS=$'\t' read -r walk_sha walk_parent walk_subject _ <<< "${line}"
           printf '%s\t%s\n' "${walk_sha}" "${walk_subject}" >> "${first_parent}"
           cursor="${walk_parent}"
           remaining=$((remaining - 1))
@@ -315,9 +317,9 @@ runs:
         # oldest first and the commits API newest first, so only the former is reversed.
         commits="${work}/commits.tsv"
         if [[ -n "${previous_tag}" ]]; then
-          awk -F'\t' '{ line[NR] = $1 "\t" $3 } END { for (i = NR; i > 0; i--) print line[i] }' "${raw}" > "${commits}"
+          awk -F'\t' '{ line[NR] = $1 "\t" $3 "\t" $4 } END { for (i = NR; i > 0; i--) print line[i] }' "${raw}" > "${commits}"
         else
-          awk -F'\t' '{ print $1 "\t" $3 }' "${raw}" > "${commits}"
+          awk -F'\t' '{ print $1 "\t" $3 "\t" $4 }' "${raw}" > "${commits}"
         fi
 
         # Whether a commit sits on the branch's own line, rather than inside a merged branch.
@@ -350,13 +352,15 @@ runs:
         # --- turn commits into entries -----------------------------------------------
 
         seen_prs=' '
-        while IFS=$'\t' read -r sha subject; do
+        while IFS=$'\t' read -r sha subject merge_title; do
           [[ -n "${sha}" ]] || continue
 
           pr=''
+          is_merge=''
           if [[ "${subject}" =~ ^Merge[[:space:]]pull[[:space:]]request[[:space:]]#([0-9]+) ]]; then
             # A merge commit: the change is the pull request, not this commit.
             pr="${BASH_REMATCH[1]}"
+            is_merge=1
           elif [[ "${subject}" =~ \(#([0-9]+)\)$ ]]; then
             # A squash merge: GitHub appends the pull request number to the subject.
             pr="${BASH_REMATCH[1]}"
@@ -378,7 +382,21 @@ runs:
                      [(.title|dash), (.user.login // "unknown"),
                      ((.body // "") | split("```") | [.[range(0; length; 2)]] | join("\n")
                       | test("(^|\r?\n)BREAKING[ -]CHANGE: ") | tostring)] | @tsv' \
-              > "${work}/pr.tsv" 2>/dev/null; then
+              > "${work}/pr.tsv" 2>"${work}/pr.err"; then
+              # A merge commit always names a pull request, so this one shipped. GitHub writes
+              # the pull request's title into the merge message, which gives its type and any
+              # ! marker; a BREAKING CHANGE: footer in its description stays unknown, so the
+              # version may come out too low. It is warned about and named at the top of the
+              # draft, where whoever publishes it looks. A failed read is often transient.
+              if [[ -n "${is_merge}" ]]; then
+                pr_err="$(head -n 1 "${work}/pr.err" | tr -d '\r' | cut -c1-200)"
+                printf '#%s (%s)\n' "${pr}" "${pr_err:-no error text}" >> "${unreadable}"
+                echo "::warning title=Pull request #${pr} could not be read::${pr_err:-no error text}. Listed from its merge commit ${sha:0:8}; a BREAKING CHANGE footer in its description is unknown."
+                [[ "${merge_title}" != '-' ]] || merge_title="${subject}"
+                classify "${merge_title}" 'false'
+                printf '%s\t%s\t* %s (#%s, %s)\n' "${entry_type}" "${entry_bump}" "${merge_title}" "${pr}" "${sha:0:8}" >> "${entries}"
+                continue
+              fi
               # Inside a merged branch, "(#12)" is as likely an issue as a pull request, and
               # the commit belongs to the pull request that brought it either way: skip it.
               on_first_parent "${sha}" || continue
@@ -475,6 +493,17 @@ runs:
           [[ -n "${lines}" ]] || return 0
           printf '## %s\n\n%s\n\n' "${heading}" "${lines}" >> "${body}"
         }
+
+        # Pull requests that could not be read go first: the version may be too low, and the
+        # draft is where that has to be seen before it is published.
+        if [[ -s "${unreadable}" ]]; then
+          {
+            printf '> [!WARNING]\n'
+            printf '> These pull requests could not be read. Their type comes from the merge commit, but a BREAKING CHANGE footer in their description is unknown, so the version may be too low. Re-run the workflow before publishing this draft.\n'
+            while IFS= read -r line; do printf '> - %s\n' "${line}"; done < "${unreadable}"
+            printf '\n'
+          } >> "${body}"
+        fi
 
         # A breaking change is called out on its own instead of sitting between the other
         # entries of its type, where it is the easiest line in the notes to miss.
