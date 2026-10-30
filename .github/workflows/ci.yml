@@ -197,11 +197,30 @@ jobs:
         #   2. --gh   — composition: GitHub traffic via squid → gh sidecar
         #   3. --endpoint-port — an endpoint on a non-80/443 port is allowed,
         #      for that endpoint only
+        #   4. --allowlist — --egress-allowlist: listed hosts only, --tfe's
+        #      host refused, DNS probes pass, git clone through the gh sidecar
+        #      with the workflow's token (read-only, a public repo)
+        env:
+          EGRESS_SMOKE_GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           IMAGE=claude-docker:ci bash tests/smoke/egress.sh
           IMAGE=claude-docker:ci bash tests/smoke/egress.sh --gh
           IMAGE=claude-docker:ci bash tests/smoke/egress.sh --endpoint-port
+          IMAGE=claude-docker:ci bash tests/smoke/egress.sh --allowlist
+
+      - name: Egress allowlist squid harness (real squid)
+        # The --egress-allowlist rules against the squid image run.sh built
+        # in the step above, with a stub resolver that logs every query:
+        # allow/refuse per rule, no DNS query for a name off the list, and
+        # `squid -k parse` on every config the run.sh BATS suite generates
+        # (so that suite runs here first, to write them).
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bats
+          bats tests/bats/run.bats >/dev/null
+          bash tests/egress-proxy/harness.sh
 
       - name: Managed settings precedence (Claude Code in the image)
         # --egress-lock pins Claude Code's endpoint with managed settings. This

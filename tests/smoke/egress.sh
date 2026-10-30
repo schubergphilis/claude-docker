@@ -8,7 +8,7 @@
 # sidecar, and this cell asserts on their teardown too. The in-container half
 # is assert-in-container.sh with EXPECT_EGRESS=1.
 #
-# Usage: IMAGE=<tag> bash tests/smoke/egress.sh [--gh | --endpoint-port]
+# Usage: IMAGE=<tag> bash tests/smoke/egress.sh [--gh | --endpoint-port | --allowlist]
 #   --gh             also start the gh auth-proxy sidecar (fake token) and
 #                    assert that GitHub traffic flows agent → squid → gh
 #                    sidecar → GitHub, with the token injected (GitHub answers
@@ -18,6 +18,13 @@
 #                    tunnel) and assert squid allows that port for the endpoint
 #                    only. Runs with --api-direct: only then does the agent
 #                    itself dial the endpoint.
+#   --allowlist      add --egress-allowlist with a file listing example.org
+#                    and .github.com, plus --gh and --tfe: listed hosts are
+#                    reachable, unlisted ones and --tfe's host refused, and
+#                    both DNS probes passed (the session started). With
+#                    EGRESS_SMOKE_GH_TOKEN set to a real token, a git clone
+#                    goes through the gh sidecar. Also records the DNS probe's
+#                    codes on this engine (design D7, task 0.5).
 # The other cells use --api, so model traffic goes agent → squid → auth-proxy
 # sidecar → endpoint.
 #
@@ -30,11 +37,13 @@ parse_args() {
   local arg
   IMAGE="${IMAGE:-claude-code:local}"
   WITH_GH=0
+  WITH_ALLOWLIST=0
   ENDPOINT_PORT=""
   for arg in "$@"; do
     case "$arg" in
       --gh) WITH_GH=1 ;;
       --endpoint-port) ENDPOINT_PORT=22 ;;
+      --allowlist) WITH_ALLOWLIST=1 ;;
       *) die "unknown argument '$arg'" ;;
     esac
   done
@@ -103,14 +112,29 @@ run_session() {
   managed_url="$endpoint_url"
   [ "$api_proxy" = "1" ] && managed_url=http://claude-docker-api-proxy:8080
   API_PROXY="$api_proxy"
-  entry="EXPECT_EGRESS=1 EXPECT_EGRESS_GH=$WITH_GH EXPECT_EGRESS_API_PROXY=$api_proxy EXPECT_EGRESS_ENDPOINT_PORT=$ENDPOINT_PORT EXPECT_EGRESS_MANAGED_URL=$managed_url EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
+  local gh_check="$WITH_GH" clone=0 gh_token=ghp_fakeEgressSmokeToken000000000000000000
+  if [ "$WITH_ALLOWLIST" = "1" ]; then
+    # A real token can't give "Bad credentials", but can clone.
+    if [ -n "${EGRESS_SMOKE_GH_TOKEN:-}" ]; then
+      gh_token="$EGRESS_SMOKE_GH_TOKEN" gh_check=0 clone=1
+    else
+      gh_check=1
+    fi
+  fi
+  entry="EXPECT_EGRESS=1 EXPECT_EGRESS_ALLOWLIST=$WITH_ALLOWLIST EXPECT_EGRESS_GH_CLONE=$clone EXPECT_EGRESS_GH=$gh_check EXPECT_EGRESS_API_PROXY=$api_proxy EXPECT_EGRESS_ENDPOINT_PORT=$ENDPOINT_PORT EXPECT_EGRESS_MANAGED_URL=$managed_url EXPECT_UID=$(id -u) EXPECT_GID=$(id -g) /workspaces/egress/assert-in-container.sh"
   flags=("$api_flag" --egress-lock --ephemeral)
   envs=("${api_env[@]}"
         ANTHROPIC_BASE_URL="$endpoint_url"
         CLAUDE_DOCKER_TEST_ENTRY="$entry")
-  if [ "$WITH_GH" = "1" ]; then
+  if [ "$WITH_GH" = "1" ] || [ "$WITH_ALLOWLIST" = "1" ]; then
     flags+=(--gh)
-    envs+=(GH_TOKEN=ghp_fakeEgressSmokeToken000000000000000000)
+    envs+=(GH_TOKEN="$gh_token")
+  fi
+  if [ "$WITH_ALLOWLIST" = "1" ]; then
+    # Outside the workspace ($WS is $TMPROOT/egress), as run.sh requires.
+    ALLOWLIST="$TMPROOT/team.allow"
+    printf '# smoke\nexample.org\n.github.com\n' >"$ALLOWLIST"
+    flags+=(--tfe "--egress-allowlist=$ALLOWLIST")
   fi
 
   transcript="$TMPROOT/transcript.txt"
@@ -162,7 +186,51 @@ assert_evidence() {
     grep -q "egress proxy blocked:.* example.org:$ENDPOINT_PORT " "$transcript" \
       || die "end-of-session summary does not list example.org:$ENDPOINT_PORT"
   fi
+  if [ "$WITH_ALLOWLIST" = "1" ]; then
+    assert_allowlist_evidence "$logf"
+  fi
   log "PASS: startup banner, denied summary, saved log"
+}
+
+# --egress-allowlist evidence: the file's resolved path and hash in the meta,
+# and the config squid ran with, owner-only, next to the log.
+assert_allowlist_evidence() {
+  local meta="${1%.log}.meta" conf="${1%.log}.conf"
+  grep -qx "allowlist_file=$ALLOWLIST" "$meta" || die "meta does not name the allowlist file"
+  grep -qx "allowlist_sha256=$(sha256sum "$ALLOWLIST" | cut -d' ' -f1)" "$meta" \
+    || die "meta's allowlist_sha256 does not match the file"
+  grep -q "^allowlist_add_hosts=.*github.com:" "$meta" || die "meta lacks the --gh sidecar's add-hosts"
+  [ -f "$conf" ] || die "no squid config saved next to the log"
+  [ "$(stat -c %a "$conf")" = 600 ] || die "the saved squid config is not owner-only"
+  grep -q "^http_access deny all\$" "$conf" || die "the saved config does not end in deny all"
+  grep -q "egress proxy blocked:.*app.terraform.io" "$transcript" \
+    || die "the denied summary does not name --tfe's unlisted host"
+  log "PASS: allowlist evidence (file, hash, add-hosts, saved config)"
+}
+
+# Task 0.5: the code the DNS probe gets on this engine. On an internal
+# network it must be one run.sh accepts; against a resolver that can't be
+# reached it must not be (a timeout never passes).
+check_probe_codes() {
+  local net="claude-egress-smoke-probe-$$" code closed
+  closed=$(bash -c 'source "$1"; printf "%s" "$EGRESS_DNS_CLOSED_CODES"' _ "$RUN_SH")
+  probe() {
+    docker run --rm "$@" --entrypoint node "$IMAGE" -e \
+      'new (require("dns").promises.Resolver)({timeout:3000,tries:1}).resolve4("example.org").then(a=>console.log("ADDR "+a[0]),e=>console.log("ERR "+e.code))' \
+      2>/dev/null | tail -1
+  }
+  docker network create --internal "$net" >/dev/null || die "cannot create $net"
+  code=$(probe --network "$net") || true
+  docker network rm "$net" >/dev/null 2>&1 || true
+  log "DNS probe on an internal network ($(docker version --format '{{.Server.Version}}' 2>/dev/null)): $code"
+  case " $closed " in *" ${code#ERR } "*) ;; *) die "internal-network probe got '$code', not one of: $closed" ;; esac
+  code=$(probe --network none --dns 192.0.2.1) || true
+  log "DNS probe against an unreachable resolver: $code"
+  case "$code" in
+    "ERR "*) case " $closed " in *" ${code#ERR } "*) die "an unreachable resolver gives '$code', which run.sh accepts as closed" ;; esac ;;
+    *) die "an unreachable resolver gave '$code'" ;;
+  esac
+  log "PASS: DNS probe codes"
 }
 
 # Only this session's resources: another session's live sidecar on the same
@@ -173,7 +241,8 @@ assert_teardown() {
   sid=$(grep -o "egress proxy 'claude-egress-proxy-[A-Za-z0-9]*'" "$transcript" \
         | head -1 | sed -e "s#.*claude-egress-proxy-##" -e "s#'\$##") || true
   [ -n "$sid" ] || die "no session id in the startup banner"
-  for name in "claude-egress-proxy-$sid" "claude-auth-proxy-$sid"; do
+  for name in "claude-egress-proxy-$sid" "claude-auth-proxy-$sid" \
+              "claude-egress-proxy-$sid-probe-control" "claude-egress-proxy-$sid-probe-check"; do
     [ -z "$(docker ps -aq --filter "name=^${name}\$")" ] || leftover+=" $name"
   done
   for name in "claude-egress-$sid" "claude-egress-out-$sid" "claude-auth-$sid"; do
@@ -188,6 +257,7 @@ main() {
   parse_args "$@"
   setup_workspace
   check_refused_endpoints
+  [ "$WITH_ALLOWLIST" = "1" ] && check_probe_codes
   run_session
   assert_evidence
   assert_teardown

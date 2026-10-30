@@ -31,7 +31,7 @@ People running Claude Code on their own machine: macOS, Linux or Windows.
 | Layer | What it covers |
 |---|---|
 | Default | No host credentials. Your Claude Code setup (skills, agents, commands, themes, `CLAUDE.md`, statusline) read-only, plus a settings file of your choice copied in at start. The workspaces you pass in, read-write. Open network. Login and history persist between sessions. Claude Code asks before it acts. |
-| Options | Credentials per integration (Git forges, clouds, package registries). A custom model endpoint. Read-only workspaces. Sessions that keep nothing. Unattended mode. Terminal split panes and alternate Claude config dirs. Your own image built on top of this one. |
+| Options | Credentials per integration (Git forges, clouds, package registries). A custom model endpoint, optionally locked, and restricted egress to a host allowlist (the boundary is the internal network and proxy sidecar outside the agent container, so a child image can't add it). Read-only workspaces. Sessions that keep nothing. Unattended mode. Terminal split panes and alternate Claude config dirs. Your own image built on top of this one. |
 
 The [README](../README.md) and `claude-docker --help` list the flags.
 

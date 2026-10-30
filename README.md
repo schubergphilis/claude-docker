@@ -44,7 +44,7 @@ Pin the full `v`-prefixed tag — there is no `latest` and no `:0.1`. Only `linu
 - [Vision and scope](docs/vision-and-scope.md) — what claude-docker is for, its principles, defaults and options
 - [Installation](docs/installation.md) — BuildKit on Colima, prebuilt image from GHCR
 - [Usage](docs/usage.md) — container runtime, session flags, resuming sessions, host config parity, worktrees, split panes, extending the image
-- [Auth model](docs/auth.md) — credential opt-in flags, AWS SSO, GitHub auth proxy, Terraform Cloud, private registries, custom model endpoint, API egress lock, Azure DevOps Server CA
+- [Auth model](docs/auth.md) — credential opt-in flags, AWS SSO, GitHub auth proxy, Terraform Cloud, private registries, custom model endpoint, API egress lock, egress allowlist, Azure DevOps Server CA
 - [Security](docs/security.md) — threat model, image vulnerability scanning
 - [Maintenance](docs/maintenance.md) — updating pinned tool versions, CI smoke tests
 - [Windows](docs/windows.md) — PowerShell, WSL2 and Git Bash hosts

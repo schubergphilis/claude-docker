@@ -42,7 +42,7 @@ Credential flags (`--aws`, `--gh`, …) are covered in [Credential opt-in](auth.
 | `--ephemeral` | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
 | `--ro`        | Mount every workspace read-only. Prevents the agent from modifying your code.                                               |
 
-`--ro` does **not** block credential flags or restrict network egress (only `--egress-lock` does, see [API egress lock](auth.md#api-egress-lock)) — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
+`--ro` does **not** block credential flags or restrict network egress (only `--egress-lock` and `--egress-allowlist` do, see [API egress lock](auth.md#api-egress-lock) and [Egress allowlist](auth.md#egress-allowlist)) — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
 
 ```bash
 claude-docker --ephemeral --ro ~/untrusted-repo
@@ -155,7 +155,7 @@ The container uses the host's DNS server but not the host's `/etc/hosts`, so a f
 export CLAUDE_DOCKER_ADD_HOSTS=gitlab.example.com:10.1.2.3,devops.example.com:10.1.2.4
 ```
 
-Each entry is passed to the runtime as `--add-host`, and so lands in the container's `/etc/hosts`; the `--gh` auth-proxy sidecar gets them too, and so does the `--egress-lock` proxy, which resolves every name the session connects to. Under `--gh`, entries for `github.com`, `api.github.com` and `uploads.github.com` are skipped for the agent container with a warning, since those must resolve to the sidecar. An entry that isn't `host:ip` stops `claude-docker` before any container starts.
+Each entry is passed to the runtime as `--add-host`, and so lands in the container's `/etc/hosts`; the `--gh` auth-proxy sidecar gets them too, and so does the `--egress-lock` proxy, which resolves every name the session connects to. Under `--egress-allowlist` an entry decides where a listed name connects, not whether it may: the name must still be on the [allowlist](auth.md#egress-allowlist), and the session's `.meta` records the entries. Under `--gh`, entries for `github.com`, `api.github.com` and `uploads.github.com` are skipped for the agent container with a warning, since those must resolve to the sidecar. An entry that isn't `host:ip` stops `claude-docker` before any container starts.
 
 ## Pasting images
 
