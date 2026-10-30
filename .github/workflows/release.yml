@@ -40,7 +40,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Draft the release
-        uses: ./.github/actions/draft-release
+        uses: $/.github/actions/draft-release
         with:
           # `inputs` is empty on a push, so the dispatch default does not apply there.
           dry_run: ${{ inputs.dry_run || 'false' }}
