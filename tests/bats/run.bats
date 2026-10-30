@@ -14,15 +14,27 @@ setup() {
   CALLS="$BATS_TEST_TMPDIR/calls"
   : >"$CALLS"
   unset GH_TOKEN GITHUB_TOKEN GITLAB_TOKEN GITLAB_HOST CLAUDE_DOCKER_RUNTIME \
-    CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA CLAUDE_DOCKER_ADD_HOSTS \
-    CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY
+    CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_GLAB_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA \
+    CLAUDE_DOCKER_ADD_HOSTS CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS \
+    ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BASE_URL CLAUDE_DOCKER_GLAB_UPSTREAM XDG_STATE_HOME \
+    CLAUDE_DOCKER_EGRESS_PROXY_IMAGE CLAUDE_DOCKER_EGRESS_ALLOWLIST CLAUDE_DOCKER_GH_UPSTREAM
+  # Computed when run.sh was sourced, before HOME moved above.
+  EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress"
   RUNTIME=docker
-  # Knobs for the docker stub: STUB_FAIL names subcommands that fail,
-  # STUB_PS is the stopped-container list, STUB_ALIVE the running sidecar id.
+  # Knobs for the docker stub: STUB_FAIL names subcommands that fail ("run",
+  # or "network:connect" for one sub-subcommand), STUB_PS is the
+  # stopped-container list, STUB_ALIVE the running sidecar id, STUB_LOGS what
+  # `logs` prints (what the sidecar has logged so far), STUB_LOGS_ERR what it
+  # prints on stderr (the container's stderr, e.g. squid's cache_log).
   STUB_FAIL="" STUB_PS="" STUB_ALIVE="cid" STUB_IP="10.0.0.2"
+  STUB_LOGS="serving initial configuration" STUB_LOGS_ERR=""
+  # What the --egress-allowlist DNS probes print, and where the stub copies
+  # the squid config the proxy is started with.
+  STUB_PROBE_CONTROL="ADDR 93.184.215.14" STUB_PROBE_CHECK="ERR ENOTFOUND"
+  STUB_SQUID_CONF="$BATS_TEST_TMPDIR/squid-mounted.conf"
   docker() {
     echo "docker $*" >>"$CALLS"
-    case " $STUB_FAIL " in *" $1 "*) return 1 ;; esac
+    case " $STUB_FAIL " in *" $1 "*|*" $1:${2:-} "*) return 1 ;; esac
     case "$1" in
       ps)
         if [ "$2" = "-aq" ]; then [ -z "$STUB_PS" ] || printf '%s\n' $STUB_PS
@@ -30,7 +42,18 @@ setup() {
       network) [ "$2" = "ls" ] && echo "net1"; return 0 ;;
       cp) echo "CA" >"$3" ;;
       inspect) echo "$STUB_IP" ;;
-      logs) echo "caddy: bad policy" ;;
+      run)
+        local a
+        case "$*" in
+          *-probe-control*) echo "$STUB_PROBE_CONTROL" ;;
+          *-probe-check*) echo "$STUB_PROBE_CHECK" ;;
+        esac
+        for a in "$@"; do
+          case "$a" in *:/etc/squid/squid.conf:ro) cp "${a%:/etc/squid/squid.conf:ro}" "$STUB_SQUID_CONF" ;; esac
+        done ;;
+      logs)
+        printf '%s\n' "$STUB_LOGS"
+        [ -z "$STUB_LOGS_ERR" ] || printf '%s\n' "$STUB_LOGS_ERR" >&2 ;;
     esac
     return 0
   }
@@ -58,7 +81,8 @@ lines_of() { printf '%s\n' "$@"; }
 # functions.
 export_stubs() {
   export -f docker podman gh glab git sleep
-  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP
+  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP STUB_LOGS STUB_LOGS_ERR \
+    STUB_PROBE_CONTROL STUB_PROBE_CHECK STUB_SQUID_CONF
 }
 run_script() {
   export_stubs
@@ -125,11 +149,189 @@ run_script_fn() {
   [[ "$output" == *"--gh and --gh-direct are mutually exclusive"* ]]
 }
 
+@test "validate_opts: --glab with --glab-direct is rejected" {
+  WITH_GLAB=1 WITH_GLAB_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--glab and --glab-direct are mutually exclusive"* ]]
+}
+
+@test "validate_opts: --api with --api-direct is rejected" {
+  WITH_API=1 WITH_API_DIRECT=1 ANTHROPIC_API_KEY=k
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--api and --api-direct are mutually exclusive"* ]]
+}
+
+@test "validate_opts: --api-direct without a token is rejected too" {
+  WITH_API_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY"* ]]
+}
+
+@test "validate_opts: --api needs an http(s) ANTHROPIC_BASE_URL" {
+  WITH_API=1 ANTHROPIC_API_KEY=k ANTHROPIC_BASE_URL=llm.example.com
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"must start with http:// or https://"* ]]
+  WITH_API=0 WITH_API_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 0 ]
+}
+
+@test "validate_opts: missing CLAUDE_DOCKER_GLAB_POLICY is fatal under --glab only" {
+  WITH_GLAB=1 CLAUDE_DOCKER_GLAB_POLICY="$BATS_TEST_TMPDIR/nope.caddy"
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CLAUDE_DOCKER_GLAB_POLICY '$BATS_TEST_TMPDIR/nope.caddy' is not a readable file"* ]]
+  WITH_GLAB=0 WITH_GLAB_DIRECT=1
+  run validate_opts
+  [ "$status" -eq 0 ]
+}
+
 @test "validate_opts: --api without a token is rejected" {
   WITH_API=1 ANTHROPIC_API_KEY=""
   run validate_opts
   [ "$status" -eq 1 ]
   [[ "$output" == *"--api needs ANTHROPIC_AUTH_TOKEN or ANTHROPIC_API_KEY"* ]]
+}
+
+@test "validate_opts: --egress-lock stores the endpoint host lowercased" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  ANTHROPIC_BASE_URL="https://u:p@LLM.Example.EU:443/v1"
+  validate_opts
+  [ "$egress_api_host" = "llm.example.eu" ]
+}
+
+@test "validate_opts: --egress-lock takes the endpoint port, else the scheme default" {
+  # --api-direct: --api itself refuses a scheme that isn't lowercase http(s).
+  WITH_API_DIRECT=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  local url want
+  for url in "https://gw.eu/v1=443" "http://litellm/=80" "HTTP://litellm=80" \
+             "https://u:p@gw.eu:8443/v1=8443" "http://litellm:4000=4000" "https://gw.eu:08443=8443"; do
+    want="${url##*=}"
+    ANTHROPIC_BASE_URL="${url%=*}"
+    validate_opts
+    [ "$egress_api_port" = "$want" ] || { echo "$ANTHROPIC_BASE_URL -> '$egress_api_port', want $want"; return 1; }
+  done
+}
+
+@test "gen_egress_squid_conf: the endpoint port is opened for the endpoint only, below the address denies" {
+  egress_api_host=gw.eu egress_api_port=8443
+  run gen_egress_squid_conf
+  [[ "$output" == *$'\nacl egress_model_port port 8443\n'* ]]
+  [[ "$output" == *$'\nacl egress_metadata_addrs dst 100.100.100.200/32 fd00:ec2::254/128\n'* ]]
+  local rules
+  rules=$(grep '^http_access' <<<"$output")
+  [ "$rules" = "http_access deny manager
+http_access deny egress_metadata_names
+http_access deny egress_metadata_addrs
+http_access deny egress_linklocal
+http_access deny egress_loopback
+http_access allow egress_model_endpoint egress_model_port
+http_access deny !egress_ports
+http_access deny CONNECT !egress_tls_port
+http_access allow egress_model_endpoint
+http_access deny egress_model_providers
+http_access allow all" ]
+}
+
+@test "validate_opts: --egress-lock needs --api or --api-direct" {
+  WITH_EGRESS_LOCK=1 ANTHROPIC_BASE_URL=https://gw.eu ANTHROPIC_AUTH_TOKEN=t
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--egress-lock needs --api or --api-direct"* ]]
+  WITH_API_DIRECT=1
+  validate_opts
+  [ "$egress_api_host" = gw.eu ]
+}
+
+@test "gen_egress_squid_conf: the auth-proxy sidecar's own ports are opened for its names only" {
+  egress_api_host=gw.eu egress_api_port=443
+  API_SIDECAR_ACTIVE=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com:8443
+  run gen_egress_squid_conf
+  [[ "$output" == *$'\nacl egress_auth_proxy_api dstdomain -n claude-docker-api-proxy\nacl egress_auth_proxy_api_port port 8080\n'* ]]
+  [[ "$output" == *$'\nacl egress_auth_proxy_glab dstdomain -n gl.example.com\nacl egress_auth_proxy_glab_port port 8443\n'* ]]
+  # Below the address denies, above the generic port denies.
+  [[ "$output" == *$'http_access deny egress_loopback\nhttp_access allow egress_model_endpoint egress_model_port\nhttp_access allow egress_auth_proxy_api egress_auth_proxy_api_port\nhttp_access allow egress_auth_proxy_glab egress_auth_proxy_glab_port\nhttp_access deny !egress_ports\n'* ]]
+}
+
+@test "gen_egress_squid_conf: no sidecar, or a glab host without a port, adds no rule" {
+  egress_api_host=gw.eu egress_api_port=443
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run gen_egress_squid_conf
+  [[ "$output" != *egress_auth_proxy* ]]
+}
+
+@test "validate_opts: --egress-lock refuses a provider host in any case" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  ANTHROPIC_BASE_URL="https://Api.Anthropic.com"
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"points at one ('api.anthropic.com')"* ]]
+}
+
+@test "validate_opts: --egress-lock reads the host before a ? or #, not after an @ in it" {
+  # The authority ends at the first /, ? or #: these name api.anthropic.com,
+  # which the --api sidecar would dial, not the gateway after the @.
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  local url
+  for url in 'https://api.anthropic.com?@gw.example.eu' 'https://api.anthropic.com#@gw.example.eu' \
+             'https://api.anthropic.com?x=1@gw.example.eu/v1'; do
+    ANTHROPIC_BASE_URL="$url"
+    run validate_opts
+    [ "$status" -eq 1 ] || { echo "accepted: $url"; return 1; }
+    [[ "$output" == *"points at one ('api.anthropic.com')"* ]]
+  done
+}
+
+@test "validate_opts: --egress-lock records the host the --api sidecar dials" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  local url want
+  for url in 'https://gw.example.eu?@other.example=gw.example.eu' \
+             'https://gw.example.eu#@other.example=gw.example.eu' \
+             'https://u:p@gw.example.eu:8443/v1?next=@other.example=gw.example.eu' \
+             'https://gw.example.eu/v1/?a=b=gw.example.eu'; do
+    want="${url##*=}"
+    ANTHROPIC_BASE_URL="${url%=*}"
+    validate_opts
+    [ "$egress_api_host" = "$want" ] || { echo "lock: $ANTHROPIC_BASE_URL -> $egress_api_host"; return 1; }
+    mkdir -p "$BATS_TEST_TMPDIR/sites"
+    stage_api_proxy_site "$BATS_TEST_TMPDIR"
+    local dialed="${API_PROXY_UPSTREAM#*://}"
+    dialed="${dialed##*@}"
+    [ "${dialed%:*}" = "$want" ] || { echo "sidecar: $ANTHROPIC_BASE_URL -> $API_PROXY_UPSTREAM"; return 1; }
+  done
+}
+
+@test "validate_opts: --egress-lock refuses a URL that would need JSON escaping" {
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  local url
+  for url in 'https://gw.eu/"x' 'https://gw.eu/a\b' "https://gw.eu/a'b" $'https://gw.eu/a\tb'; do
+    ANTHROPIC_BASE_URL="$url"
+    run validate_opts
+    [ "$status" -eq 1 ] || { echo "accepted: $url"; return 1; }
+    [[ "$output" == *"has characters a URL may not contain"* ]]
+  done
+  ANTHROPIC_BASE_URL='https://u:p@gw.eu:8443/v1?a=1&b=%20'
+  validate_opts
+}
+
+@test "gen_egress_managed_settings: under the --api sidecar, pins the sidecar's URL" {
+  ANTHROPIC_BASE_URL=https://gw.eu/v1 API_SIDECAR_ACTIVE=1
+  run gen_egress_managed_settings http://10.89.0.2:3128
+  [[ "$output" == *'"ANTHROPIC_BASE_URL": "http://claude-docker-api-proxy:8080",'* ]]
+  [[ "$output" != *gw.eu* ]]
+}
+
+@test "gen_egress_managed_settings: pins the endpoint and the proxy env, and switches the other backends off" {
+  ANTHROPIC_BASE_URL='https://u:p@gw.eu:8443/v1?a=1&b=%20'
+  run gen_egress_managed_settings http://10.89.0.2:3128
+  [ "$status" -eq 0 ]
+  # Exactly these keys, as Claude Code reads them: valid JSON, env strings.
+  [ "$(printf '%s' "$output" | python3 -c 'import json,sys; print(json.dumps(json.load(sys.stdin), sort_keys=True))')" = \
+    '{"env": {"ANTHROPIC_BASE_URL": "https://u:p@gw.eu:8443/v1?a=1&b=%20", "CLAUDE_CODE_USE_ANTHROPIC_AWS": "0", "CLAUDE_CODE_USE_ANTHROPIC_GOOGLE_CLOUD": "0", "CLAUDE_CODE_USE_BEDROCK": "0", "CLAUDE_CODE_USE_FOUNDRY": "0", "CLAUDE_CODE_USE_GATEWAY": "0", "CLAUDE_CODE_USE_MANTLE": "0", "CLAUDE_CODE_USE_VERTEX": "0", "HTTPS_PROXY": "http://10.89.0.2:3128", "HTTP_PROXY": "http://10.89.0.2:3128", "NO_PROXY": "localhost,127.0.0.1,::1", "http_proxy": "http://10.89.0.2:3128", "https_proxy": "http://10.89.0.2:3128", "no_proxy": "localhost,127.0.0.1,::1"}}' ]
 }
 
 @test "validate_opts: missing CLAUDE_DOCKER_AZ_CA is fatal" {
@@ -224,19 +426,36 @@ run_script_fn() {
   [[ "$output" == *"requested runtime 'podman' not found on PATH"* ]]
 }
 
-# --- prune_stale_gh ---
+# --- prune_stale_auth_proxy ---
 
-@test "prune_stale_gh: removes stopped sidecars and stale networks" {
+@test "prune_stale_auth_proxy: removes stopped sidecars and stale networks" {
   STUB_PS="old1 old2"
-  prune_stale_gh
+  prune_stale_auth_proxy
   grep -qx "docker rm -f old1" "$CALLS"
   grep -qx "docker rm -f old2" "$CALLS"
   grep -qx "docker network rm net1" "$CALLS"
 }
 
-@test "prune_stale_gh: failures never abort the run" {
+@test "prune_stale_auth_proxy: sweeps the legacy claude-gh names too, stopped only" {
+  prune_stale_auth_proxy
+  for prefix in claude-auth claude-gh; do
+    grep -qx "docker ps -aq --filter name=^$prefix-proxy- --filter status=exited --filter status=created --filter status=dead" "$CALLS"
+    grep -qx "docker network ls -q --filter name=^$prefix-" "$CALLS"
+  done
+  run ! grep -q "status=running" "$CALLS"
+}
+
+@test "prune_stale_auth_proxy: also sweeps stopped egress proxies and egress networks" {
+  prune_stale_auth_proxy
+  grep -q "^docker ps -aq --filter name=^claude-egress-proxy- .*--filter status=exited" "$CALLS"
+  grep -qx "docker network ls -q --filter name=^claude-egress-" "$CALLS"
+  # Running proxies belong to live sessions: only stopped states are listed.
+  run ! grep -q "^docker ps -aq --filter name=^claude-egress-proxy-$" "$CALLS"
+}
+
+@test "prune_stale_auth_proxy: failures never abort the run" {
   STUB_PS="old1" STUB_FAIL="rm ps network"
-  run prune_stale_gh
+  run prune_stale_auth_proxy
   [ "$status" -eq 0 ]
 }
 
@@ -260,14 +479,14 @@ run_script_fn() {
   uname() { echo MINGW64_NT-10.0; }
   detect_msys
   [ "$HOST_UID" = 1000 ] && [ "$HOST_GID" = 1000 ]
-  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_CONFIG_* ]]
+  [ "${#GIT_CFG[@]}" -eq 0 ]
 }
 
 @test "detect_msys: Linux keeps id -u and adds no git config" {
   uname() { echo Linux; }
   detect_msys
   [ "$HOST_UID" = "$(id -u)" ] && [ "$HOST_GID" = "$(id -g)" ]
-  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_CONFIG_* ]]
+  [ "${#GIT_CFG[@]}" -eq 0 ]
 }
 
 @test "hostpath: identity off MSYS" {
@@ -375,7 +594,52 @@ run_script_fn() {
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *UV_INDEX_CORP_PASSWORD* ]]
 }
 
+@test "build_env_args: --glab forwards GITLAB_HOST but never GITLAB_TOKEN" {
+  export GITLAB_TOKEN=glpat GITLAB_HOST=gl.example.com
+  WITH_GLAB=1
+  build_env_args
+  [ "$(lines_of "${ENV_ARGS[@]}")" = "$(printf -- '-e\nTERM\n-e\nCOLORTERM\n-e\nGITLAB_HOST')" ]
+  ENV_ARGS=() WITH_GLAB=0 WITH_GLAB_DIRECT=1
+  build_env_args
+  [ "$(lines_of "${ENV_ARGS[@]}")" = "$(printf -- '-e\nGITLAB_TOKEN\n-e\nGITLAB_HOST')" ]
+}
+
+@test "build_env_args: --api keeps the endpoint and credentials for the sidecar" {
+  export ANTHROPIC_BASE_URL=https://llm ANTHROPIC_API_KEY=k ANTHROPIC_AUTH_TOKEN=t ANTHROPIC_MODEL=m ANTHROPIC_CUSTOM_HEADERS="X: y"
+  WITH_API=1
+  build_env_args
+  local got
+  got=$(lines_of "${ENV_ARGS[@]}")
+  [[ "$got" == *ANTHROPIC_MODEL* ]] && [[ "$got" == *ANTHROPIC_CUSTOM_HEADERS* ]]
+  [[ "$got" != *ANTHROPIC_BASE_URL* ]] && [[ "$got" != *ANTHROPIC_API_KEY* ]] && [[ "$got" != *ANTHROPIC_AUTH_TOKEN* ]]
+  ENV_ARGS=() WITH_API=0 WITH_API_DIRECT=1
+  build_env_args
+  got=$(lines_of "${ENV_ARGS[@]}")
+  [[ "$got" == *ANTHROPIC_BASE_URL* ]] && [[ "$got" == *ANTHROPIC_API_KEY* ]] && [[ "$got" == *ANTHROPIC_AUTH_TOKEN* ]]
+  [[ "$got" == *ANTHROPIC_MODEL* ]]
+}
+
 # --- discover_tokens ---
+
+@test "glab_host_of: host[:port] from a URL or a bare host" {
+  local in want
+  while IFS='|' read -r in want; do
+    [ "$(glab_host_of "$in")" = "$want" ] || { echo "glab_host_of '$in' = '$(glab_host_of "$in")', want '$want'"; return 1; }
+  done <<'TABLE'
+gitlab.example.com|gitlab.example.com
+gitlab.example.com:8443|gitlab.example.com:8443
+https://gitlab.example.com|gitlab.example.com
+https://gitlab.example.com/|gitlab.example.com
+https://gitlab.example.com:8443/group/p.git|gitlab.example.com:8443
+https://user@gitlab.example.com/g/p|gitlab.example.com
+https://user:p@ss@gitlab.example.com/g|gitlab.example.com
+https://gitlab.example.com/g/a@b|gitlab.example.com
+ssh://git@gitlab.example.com:2222/g/p.git|gitlab.example.com:2222
+http://gitlab.internal/x|gitlab.internal
+https://|
+|
+TABLE
+}
 
 @test "discover_tokens: --gh-direct forwards the gh CLI token by name" {
   WITH_GH_DIRECT=1
@@ -404,13 +668,122 @@ run_script_fn() {
   run ! grep -q "^gh " "$CALLS"
 }
 
-@test "discover_tokens: --glab asks glab for GITLAB_HOST's token" {
-  WITH_GLAB=1 GITLAB_HOST=https://gitlab.example.com/
+@test "discover_tokens: --glab-direct asks glab for GITLAB_HOST's token and forwards it" {
+  WITH_GLAB_DIRECT=1 GITLAB_HOST=https://gitlab.example.com/
   SEEN_PATHS=("$WS")
   discover_tokens
   [ "$GITLAB_TOKEN" = glpat_stub ]
   grep -q "glab config get token --host gitlab.example.com" "$CALLS"
   [[ "$(lines_of "${ENV_ARGS[@]}")" == *$'-e\nGITLAB_TOKEN'* ]]
+  [ -z "$GLAB_HOST_TOKEN" ]
+}
+
+@test "discover_tokens: --glab keeps the discovered token for the sidecar" {
+  WITH_GLAB=1 GITLAB_HOST=https://gitlab.example.com:8443/
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ "$GLAB_HOST_TOKEN" = glpat_stub ]
+  [ "$GLAB_PROXY_HOST" = gitlab.example.com:8443 ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GITLAB_TOKEN* ]]
+}
+
+@test "discover_tokens: --glab with an explicit token proxies glab's default host, not the origin" {
+  command git init -q "$WS"
+  command git -C "$WS" remote add origin git@github.com:org/repo.git
+  git() { command git "$@"; }
+  WITH_GLAB=1 GITLAB_TOKEN=glpat_explicit
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ "$GLAB_HOST_TOKEN" = glpat_explicit ]
+  [ "$GLAB_PROXY_HOST" = gitlab.com ]
+  [ "$GITLAB_HOST" = gitlab.com ]
+  run ! grep -q "glab config get token" "$CALLS"
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *$'-e\nGITLAB_TOKEN'* ]]
+}
+
+@test "discover_tokens: --glab with an explicit token and no host glab proxies gitlab.com" {
+  # A PATH with everything but glab, so the gitlab.com fallback is taken.
+  unset -f glab
+  nobin="$BATS_TEST_TMPDIR/no-glab-bin"; mkdir -p "$nobin"
+  for f in /usr/local/bin/* /usr/bin/* /bin/*; do
+    case "${f##*/}" in glab) continue ;; esac
+    [ -e "$nobin/${f##*/}" ] || ln -s "$f" "$nobin/${f##*/}"
+  done
+  PATH="$nobin"
+  [ -z "$(command -v glab)" ]
+  WITH_GLAB=1 GITLAB_TOKEN=glpat_explicit
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ "$GLAB_HOST_TOKEN" = glpat_explicit ]
+  [ "$GLAB_PROXY_HOST" = gitlab.com ]
+  [ "$GITLAB_HOST" = gitlab.com ]
+}
+
+@test "discover_tokens: --glab-direct with an explicit token asks glab nothing" {
+  WITH_GLAB_DIRECT=1 GITLAB_TOKEN=glpat_explicit
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ ! -s "$CALLS" ]
+  [ -z "${GITLAB_HOST:-}" ]
+}
+
+@test "discover_tokens: --glab refuses hosts the proxy can't serve" {
+  for h in http://gitlab.internal 10.0.0.5 10.0.0.5:8443 "[::1]:8443" fe80::1; do
+    WITH_GLAB=1 GITLAB_HOST="$h"
+    SEEN_PATHS=("$WS")
+    run discover_tokens
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"use --glab-direct"* ]]
+  done
+}
+
+@test "discover_tokens: --glab refuses a plain-http origin" {
+  command git init -q "$WS"
+  command git -C "$WS" remote add origin http://gitlab.internal/g/p.git
+  git() { command git "$@"; }
+  glab() { echo "glab $*" >>"$CALLS"; [ "$3 $5" = "token gitlab.internal" ] && echo "glpat_stub"; return 0; }
+  WITH_GLAB=1
+  SEEN_PATHS=("$WS")
+  run discover_tokens
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"'http://gitlab.internal/g/p.git' is plain http"*"use --glab-direct"* ]]
+}
+
+@test "discover_tokens: --glab never ties a host-agnostic token to the origin" {
+  # The default stub answers every host, as glab does for GITLAB_ACCESS_TOKEN,
+  # OAUTH_TOKEN or a legacy top-level token.
+  command git init -q "$WS"
+  command git -C "$WS" remote add origin https://github.com/org/repo.git
+  git() { command git "$@"; }
+  WITH_GLAB=1
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  grep -q "glab config get token --host claude-docker.invalid" "$CALLS"
+  [ "$GLAB_HOST_TOKEN" = glpat_stub ]
+  [ "$GLAB_PROXY_HOST" = gitlab.com ]
+  [ "$GITLAB_HOST" = gitlab.com ]
+}
+
+@test "discover_tokens: --glab keeps a token stored for the origin host" {
+  command git init -q "$WS"
+  command git -C "$WS" remote add origin git@gitlab.example.com:g/p.git
+  git() { command git "$@"; }
+  glab() { echo "glab $*" >>"$CALLS"; [ "$3 $5" = "token gitlab.example.com" ] && echo "glpat_origin"; return 0; }
+  WITH_GLAB=1
+  SEEN_PATHS=("$WS")
+  discover_tokens
+  [ "$GLAB_HOST_TOKEN" = glpat_origin ]
+  [ "$GLAB_PROXY_HOST" = gitlab.example.com ]
+}
+
+@test "discover_tokens: --glab refuses a host that isn't host[:port]" {
+  for h in 'gitlab_example.com' 'gl.example.com:abc' 'gl.example.com{' 'gl example.com'; do
+    WITH_GLAB=1 GITLAB_HOST="$h"
+    SEEN_PATHS=("$WS")
+    run discover_tokens
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"is not a valid host[:port]"* ]]
+  done
 }
 
 @test "discover_tokens: --glab with no token warns" {
@@ -420,6 +793,76 @@ run_script_fn() {
   run discover_tokens
   [ "$status" -eq 0 ]
   [[ "$output" == *"--glab: no GitLab token found for gitlab.example.com"* ]]
+}
+
+@test "discover_tokens: --glab-direct with no token names --glab-direct" {
+  glab() { return 0; }
+  WITH_GLAB_DIRECT=1 GITLAB_HOST=gitlab.example.com
+  SEEN_PATHS=("$WS")
+  run discover_tokens
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"--glab-direct: no GitLab token found for gitlab.example.com"* ]]
+}
+
+# --- build_git_config ---
+
+@test "build_git_config: proxied forges add no git config" {
+  WITH_GH=1 WITH_GLAB=1 GITLAB_HOST=gitlab.example.com
+  build_git_config
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_CONFIG_* ]]
+}
+
+@test "build_git_config: one credential helper per forge host" {
+  WITH_GH_DIRECT=1 WITH_GLAB_DIRECT=1 WITH_AZ=1
+  GITLAB_HOST=https://gitlab.example.com:8443/ AZURE_DEVOPS_ORG_URL=https://ado.example.com/tfs/Coll
+  GIT_CFG=(safe.directory "/workspaces/*")
+  build_git_config
+  env=$(lines_of "${ENV_ARGS[@]}")
+  [[ "$env" == *$'GIT_CONFIG_KEY_0=safe.directory\n-e\nGIT_CONFIG_VALUE_0=/workspaces/*'* ]]
+  [[ "$env" == *$'GIT_CONFIG_KEY_1=credential.https://github.com.helper\n-e\nGIT_CONFIG_VALUE_1=!gh auth git-credential'* ]]
+  [[ "$env" == *$'GIT_CONFIG_KEY_2=credential.https://gitlab.example.com:8443.helper\n-e\nGIT_CONFIG_VALUE_2=!glab auth git-credential'* ]]
+  [[ "$env" == *"GIT_CONFIG_KEY_3=credential.https://ado.example.com.helper"* ]]
+  [[ "$env" == *'password=$AZURE_DEVOPS_EXT_PAT'* ]]
+  [[ "$env" == *"GIT_CONFIG_COUNT=4"* ]]
+  [[ "$env" != *insteadOf* ]]
+}
+
+@test "build_git_config: Azure DevOps PAT is offered only to its own host" {
+  unset -f git
+  WITH_AZ=1
+  build_git_config
+  # ENV_ARGS is (-e K=V)...: export every K=V and ask git for credentials.
+  for a in "${ENV_ARGS[@]}"; do [ "$a" = -e ] || export "$a"; done
+  export AZURE_DEVOPS_EXT_PAT=s3cret GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=
+  run git credential fill <<<$'protocol=https\nhost=dev.azure.com\n'
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"password=s3cret"* ]]
+  run git credential fill <<<$'protocol=https\nhost=evil.example.com\n'
+  [ "$status" -ne 0 ]
+  [[ "$output" != *s3cret* ]]
+}
+
+@test "build_git_config: a URL with no usable host gets no credential helper" {
+  for url in 'https://' 'https:///' 'https://*.example.com' 'https:// evil'; do
+    ENV_ARGS=() GIT_CFG=()
+    WITH_AZ=1 WITH_GLAB_DIRECT=1 AZURE_DEVOPS_ORG_URL=$url GITLAB_HOST=$url
+    run build_git_config
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"--az: AZURE_DEVOPS_ORG_URL has no usable host"* ]]
+    [[ "$output" == *"--glab-direct: GITLAB_HOST has no usable host"* ]]
+    build_git_config 2>/dev/null
+    [[ "$(lines_of "${ENV_ARGS[@]}")" != *credential.* ]]
+  done
+}
+
+@test "build_git_config: an empty-host Azure DevOps URL never offers the PAT" {
+  unset -f git
+  WITH_AZ=1 AZURE_DEVOPS_ORG_URL=https://
+  build_git_config 2>/dev/null
+  for a in "${ENV_ARGS[@]}"; do [ "$a" = -e ] || export "$a"; done
+  export AZURE_DEVOPS_EXT_PAT=s3cret GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=
+  run git credential fill <<<$'protocol=https\nhost=evil.example.com\n'
+  [[ "$output" != *s3cret* ]]
 }
 
 # --- forward_git_identity / build_flags_env ---
@@ -436,10 +879,22 @@ run_script_fn() {
   [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_* ]]
 }
 
-@test "build_flags_env: tags the opt-ins in README order" {
+@test "build_flags_env: tags the opt-ins in opt-in table order" {
   WITH_AWS=1 WITH_GH=1 EPHEMERAL=1
   build_flags_env
   [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=aws,gh,ephemeral" ]
+}
+
+@test "build_flags_env: -direct modes get their own tags" {
+  WITH_GLAB_DIRECT=1 WITH_API_DIRECT=1
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=glab-direct,api-direct" ]
+}
+
+@test "build_flags_env: egress-lock follows api in the tag" {
+  WITH_API=1 WITH_EGRESS_LOCK=1
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=api,egress-lock" ]
 }
 
 @test "build_flags_env: no opt-ins, no tag" {
@@ -454,14 +909,15 @@ run_script_fn() {
     create_stage
     echo "$stage" >"$BATS_TEST_TMPDIR/stage"
     [ -d "$stage" ]
-    [ "$GH_PROXY_SIDECAR" = "claude-gh-proxy-${stage##*.}" ]
+    [ "$AUTH_PROXY_SIDECAR" = "claude-auth-proxy-${stage##*.}" ]
+    [ "$AUTH_PROXY_NETWORK" = "claude-auth-${stage##*.}" ]
   )
   local s
   s=$(cat "$BATS_TEST_TMPDIR/stage")
   [[ "$s" == "$HOME/.cache/claude-docker/host."* ]]
   [ ! -e "$s" ]
-  grep -q "docker rm -f claude-gh-proxy-" "$CALLS"
-  grep -q "docker network rm claude-gh-" "$CALLS"
+  grep -q "docker rm -f claude-auth-proxy-" "$CALLS"
+  grep -q "docker network rm claude-auth-" "$CALLS"
 }
 
 @test "create_stage: an unwritable cache dir aborts" {
@@ -470,93 +926,357 @@ run_script_fn() {
   [ "$status" -eq 1 ]
 }
 
-# --- start_gh_sidecar ---
+@test "create_stage: the EXIT trap saves the egress log, then removes the egress resources" {
+  STUB_LOGS="1.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html"
+  (
+    create_stage
+    egress_started=20260101T000000Z
+    echo "${stage##*.}" >"$BATS_TEST_TMPDIR/sid"
+  ) 2>"$BATS_TEST_TMPDIR/stderr"
+  local sid
+  sid=$(cat "$BATS_TEST_TMPDIR/sid")
+  [ -f "$EGRESS_LOG_DIR/20260101T000000Z-$sid.log" ]
+  grep -q "^docker rm -f claude-egress-proxy-$sid$" "$CALLS"
+  grep -q "^docker network rm claude-egress-$sid claude-egress-out-$sid$" "$CALLS"
+  # The log is read before the proxy is removed, and the egress networks go
+  # last: the auth-proxy sidecar may still be attached to the internal one.
+  [ "$(grep -n "^docker logs claude-egress-proxy-" "$CALLS" | cut -d: -f1)" -lt \
+    "$(grep -n "^docker rm -f claude-egress-proxy-" "$CALLS" | cut -d: -f1)" ]
+  [ "$(grep -n "^docker network rm claude-egress-" "$CALLS" | cut -d: -f1)" -gt \
+    "$(grep -n "^docker network rm claude-auth-" "$CALLS" | cut -d: -f1)" ]
+  grep -q "egress proxy blocked: api.anthropic.com" "$BATS_TEST_TMPDIR/stderr"
+}
+
+# --- egress_save_log ---
+
+@test "egress_save_log: no-op when the proxy never started" {
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ ! -s "$CALLS" ]
+  [ ! -e "$EGRESS_LOG_DIR" ]
+}
+
+@test "egress_save_log: writes the log and meta, and lists each denied host:port once" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
+  egress_api_host=llm.example.eu agent_image_id=sha256:img WORKSPACES=("$WS")
+  EGRESS_IMAGE=claude-docker-egress-proxy:123 egress_proxy_image_id=sha256:proxy
+  STUB_LOGS="1.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -
+2.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html
+3.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT api.anthropic.com:443 - HIER_NONE/- text/html
+4.000 5 10.0.0.3 TCP_DENIED/403 3900 GET http://169.254.169.254/latest - HIER_NONE/- text/html
+5.000 5 10.0.0.3 TCP_DENIED/403 3900 CONNECT example.com:8443 - HIER_NONE/- text/html
+6.000 5 10.0.0.3 TCP_DENIED/403 3900 GET http://plain.example:80/x - HIER_NONE/- text/html"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  local base="$EGRESS_LOG_DIR/20260101T000000Z-abc"
+  [ "$(cat "$base.log")" = "$STUB_LOGS" ]
+  grep -qx "endpoint=llm.example.eu" "$base.meta"
+  grep -qx "image_id=sha256:img" "$base.meta"
+  grep -qx "proxy_image=claude-docker-egress-proxy:123" "$base.meta"
+  grep -qx "proxy_image_id=sha256:proxy" "$base.meta"
+  grep -qx "workspace=$WS" "$base.meta"
+  [ "$(grep -c '^[a-z_]*=' "$base.meta")" -eq 10 ]
+  [[ "$output" == *"egress proxy blocked: 169.254.169.254 api.anthropic.com example.com:8443 plain.example "* ]]
+  [[ "$output" == *"egress log saved to $base.log"* ]]
+}
+
+@test "egress_save_log: the log dir and files are owner-only, even if the dir already existed" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
+  mkdir -p "$EGRESS_LOG_DIR"
+  chmod 755 "$EGRESS_LOG_DIR"
+  umask 022
+  # Not `run`: the caller's umask must come back unchanged.
+  egress_save_log 2>/dev/null
+  [ "$(umask)" = 0022 ]
+  [ "$(stat -c %a "$EGRESS_LOG_DIR")" = 700 ]
+  [ "$(stat -c %a "$EGRESS_LOG_DIR/20260101T000000Z-abc.log")" = 600 ]
+  [ "$(stat -c %a "$EGRESS_LOG_DIR/20260101T000000Z-abc.meta")" = 600 ]
+}
+
+@test "egress_save_log: a ready proxy's log with squid's startup line on stderr is saved, without the stderr" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_LOGS="1.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -"
+  STUB_LOGS_ERR="2026/01/01 00:00:00| Accepting HTTP Socket connections at conn1 local=[::]:3128 remote=[::] FD 10 flags=9"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [ "$(cat "$EGRESS_LOG_DIR/20260101T000000Z-abc.log")" = "$STUB_LOGS" ]
+  [[ "$output" == *"egress log saved to"* ]]
+  [[ "$output" != *"incomplete"* ]]
+}
+
+@test "egress_save_log: an engine that merges squid's stderr into the log still counts as complete" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_LOGS="2026/01/01 00:00:00| Accepting HTTP Socket connections at conn1 local=[::]:3128 remote=[::] FD 10 flags=9"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"egress log saved to"* ]]
+}
+
+@test "egress_save_log: a rotated log (startup line gone) is reported incomplete, not saved" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_LOGS="9.000 5 10.0.0.3 TCP_TUNNEL/200 900 CONNECT example.org:443 - HIER_DIRECT/1.2.3.4 -"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [ "$(cat "$EGRESS_LOG_DIR/20260101T000000Z-abc.log")" = "$STUB_LOGS" ]
+  [[ "$output" == *"the egress log in $EGRESS_LOG_DIR/20260101T000000Z-abc.log is incomplete: squid's startup line is gone"* ]]
+  [[ "$output" != *"egress log saved"* ]]
+}
+
+@test "egress_save_log: a failed copy is reported missing, not saved, and keeps the meta" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  STUB_FAIL="logs"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the egress log in $EGRESS_LOG_DIR/20260101T000000Z-abc.log is missing or incomplete: 'docker logs' failed (exit 1)"* ]]
+  [[ "$output" != *"egress log saved"* ]]
+  [ -s "$EGRESS_LOG_DIR/20260101T000000Z-abc.meta" ]
+}
+
+@test "egress_save_log: a failed copy names the engine's error, not squid's last stderr line" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc egress_ready=1
+  docker() {
+    echo "2026/01/01 00:00:00| Accepting HTTP Socket connections at conn1 local=[::]:3128" >&2
+    echo "Error response from daemon: configured logging driver does not support reading" >&2
+    echo "2026/01/01 00:00:09| Squid Cache (Version 7.6): Exiting normally." >&2
+    return 1
+  }
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"'docker logs' failed (exit 1): Error response from daemon: configured logging driver does not support reading"* ]]
+  [[ "$output" != *"Exiting normally"* ]]
+}
+
+@test "egress_save_log: a proxy that never got ready isn't held to the startup line" {
+  egress_started=20260101T000000Z proxy_sid=abc EGRESS_SIDECAR=claude-egress-proxy-abc
+  STUB_LOGS=""
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"egress log saved to"* ]]
+}
+
+@test "egress_save_log: an unwritable log dir never fails the teardown, and says the log is lost" {
+  egress_started=20260101T000000Z proxy_sid=abc
+  : >"$HOME/.local"
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"claude-docker: could not create $EGRESS_LOG_DIR; the egress log was not saved"* ]]
+  run ! grep -q "^docker logs" "$CALLS"
+}
+
+@test "egress_save_log: a log dir that can't be made owner-only is not written to" {
+  egress_started=20260101T000000Z proxy_sid=abc
+  chmod() { return 1; }
+  run egress_save_log
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not create $EGRESS_LOG_DIR; the egress log was not saved"* ]]
+  [ -z "$(ls -A "$EGRESS_LOG_DIR")" ]
+  run ! grep -q "^docker logs" "$CALLS"
+}
+
+# --- create_egress_networks ---
+
+@test "create_egress_networks: no-op without --egress-lock" {
+  create_egress_networks
+  [ ! -s "$CALLS" ]
+}
+
+@test "create_egress_networks: an internal agent network and an outbound proxy network" {
+  WITH_EGRESS_LOCK=1 EGRESS_NETWORK=claude-egress-x EGRESS_OUT_NETWORK=claude-egress-out-x
+  create_egress_networks
+  grep -qx "docker network create --internal claude-egress-x" "$CALLS"
+  grep -qx "docker network create claude-egress-out-x" "$CALLS"
+}
+
+@test "create_egress_networks: a create failure aborts before any container" {
+  WITH_EGRESS_LOCK=1 EGRESS_NETWORK=claude-egress-x EGRESS_OUT_NETWORK=claude-egress-out-x
+  STUB_FAIL="network:create"
+  run create_egress_networks
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed to create the --egress-lock networks"* ]]
+  run ! grep -q "^docker run" "$CALLS"
+}
+
+# --- start_auth_sidecar ---
 
 sidecar_setup() {
   WITH_GH=1 GH_HOST_TOKEN=gho_secret
   stage="$BATS_TEST_TMPDIR/stage"
   mkdir -p "$stage"
-  GH_PROXY_NETWORK=claude-gh-x GH_PROXY_SIDECAR=claude-gh-proxy-x
+  AUTH_PROXY_NETWORK=claude-auth-x AUTH_PROXY_SIDECAR=claude-auth-proxy-x
 }
 
-@test "start_gh_sidecar: no-op without a host token" {
-  WITH_GH=1
-  start_gh_sidecar
-  [ "$GH_SIDECAR_ACTIVE" = 0 ]
+@test "start_auth_sidecar: no-op without a proxied credential" {
+  WITH_GH=1 WITH_GLAB=1
+  start_auth_sidecar
+  [ "$GH_SIDECAR_ACTIVE" = 0 ] && [ "$GLAB_SIDECAR_ACTIVE" = 0 ] && [ "$API_SIDECAR_ACTIVE" = 0 ]
   [ ! -s "$CALLS" ]
 }
 
-@test "start_gh_sidecar: wires the agent to the sidecar" {
+@test "start_auth_sidecar: wires the agent to the gh sidecar" {
   sidecar_setup
   CLAUDE_DOCKER_GH_POLICY="$BATS_TEST_TMPDIR/policy.caddy"
   echo "# user policy" >"$CLAUDE_DOCKER_GH_POLICY"
-  start_gh_sidecar 2>/dev/null
+  start_auth_sidecar 2>/dev/null
   [ "$GH_SIDECAR_ACTIVE" = 1 ]
-  [ "$(cat "$stage/gh-proxy/policy.caddy")" = "# user policy" ]
+  [ "$(cat "$stage/auth-proxy/caddy/policy.caddy")" = "# user policy" ]
+  [ -f "$stage/auth-proxy/caddy/sites/gh.caddy" ]
+  [ ! -e "$stage/auth-proxy/caddy/sites/glab.caddy" ] && [ ! -e "$stage/auth-proxy/caddy/sites/api.caddy" ]
   [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--add-host\napi.github.com:10.0.0.2'* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"auth-proxy/root.crt:/usr/local/share/ca-certificates/claude-docker-auth-proxy.crt:ro"* ]]
   [[ "$(lines_of "${ENV_ARGS[@]}")" == *"GH_TOKEN=claude-docker-proxy"* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"UV_SYSTEM_CERTS=1"* ]]
+  grep -q "^docker run -d --name claude-auth-proxy-x --network claude-auth-x .* -v $stage/auth-proxy/caddy:/etc/caddy:ro" "$CALLS"
   # The real token is passed by name, never on argv.
   run ! grep -q gho_secret "$CALLS"
   run ! grep -rq gho_secret "$stage"
 }
 
-@test "start_gh_sidecar: passes CLAUDE_DOCKER_ADD_HOSTS to the sidecar" {
+@test "start_auth_sidecar: passes CLAUDE_DOCKER_ADD_HOSTS to the sidecar" {
   sidecar_setup
   ADD_HOSTS=(github.com:140.82.121.4)
-  start_gh_sidecar 2>/dev/null
+  start_auth_sidecar 2>/dev/null
   grep -q "^docker run -d .*--add-host github.com:140.82.121.4" "$CALLS"
 }
 
-@test "start_gh_sidecar: no policy stages an empty one" {
+@test "start_auth_sidecar: no policy stages an empty one" {
   sidecar_setup
-  start_gh_sidecar 2>/dev/null
-  [ -f "$stage/gh-proxy/policy.caddy" ] && [ ! -s "$stage/gh-proxy/policy.caddy" ]
+  start_auth_sidecar 2>/dev/null
+  [ -f "$stage/auth-proxy/caddy/policy.caddy" ] && [ ! -s "$stage/auth-proxy/caddy/policy.caddy" ]
 }
 
-@test "start_gh_sidecar: network create failure aborts" {
+@test "start_auth_sidecar: --glab redirects only the token's host" {
+  WITH_GLAB=1 GLAB_HOST_TOKEN=glpat_secret GLAB_PROXY_HOST=gl.example.com:8443
+  CLAUDE_DOCKER_GLAB_POLICY="$BATS_TEST_TMPDIR/glab-policy.caddy"
+  echo "# user glab policy" >"$CLAUDE_DOCKER_GLAB_POLICY"
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  AUTH_PROXY_NETWORK=claude-auth-x AUTH_PROXY_SIDECAR=claude-auth-proxy-x
+  start_auth_sidecar 2>/dev/null
+  [ "$GLAB_SIDECAR_ACTIVE" = 1 ] && [ "$GH_SIDECAR_ACTIVE" = 0 ]
+  [ -f "$stage/auth-proxy/caddy/sites/glab.caddy" ]
+  [ "$(cat "$stage/auth-proxy/caddy/glab-policy.caddy")" = "# user glab policy" ]
+  [ "$GLAB_PROXY_SITE" = gl.example.com:8443 ]
+  [ "$GLAB_PROXY_UPSTREAM" = https://gl.example.com:8443 ]
+  [ "$GLAB_PROXY_BASIC" = "Basic $(printf 'oauth2:glpat_secret' | base64)" ]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--add-host\ngl.example.com:10.0.0.2'* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *github.com* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"GITLAB_TOKEN=claude-docker-proxy"* ]]
+  grep -q -- "-e GLAB_PROXY_BEARER -e GLAB_PROXY_BASIC" "$CALLS"
+  run ! grep -q glpat_secret "$CALLS"
+  run ! grep -rq glpat_secret "$stage"
+}
+
+@test "start_auth_sidecar: --api routes through the sidecar without a CA" {
+  WITH_API=1 ANTHROPIC_API_KEY=sk-secret ANTHROPIC_BASE_URL=https://llm.example.com/anthropic/
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  AUTH_PROXY_NETWORK=claude-auth-x AUTH_PROXY_SIDECAR=claude-auth-proxy-x
+  start_auth_sidecar 2>/dev/null
+  [ "$API_SIDECAR_ACTIVE" = 1 ]
+  [ "$API_PROXY_UPSTREAM" = https://llm.example.com ] && [ "$API_PROXY_PREFIX" = /anthropic ]
+  [ "$(cat "$stage/auth-proxy/caddy/api-cred.caddy")" = 'request_header x-api-key "{env.API_PROXY_KEY}"
+request_header -Authorization' ]
+  [ ! -s "$stage/auth-proxy/caddy/api-transport.caddy" ]
+  got=$(lines_of "${ENV_ARGS[@]}")
+  [[ "$got" == *"ANTHROPIC_BASE_URL=http://claude-docker-api-proxy:8080"* ]]
+  [[ "$got" == *"ANTHROPIC_API_KEY=claude-docker-proxy"* ]]
+  [[ "$got" != *ANTHROPIC_AUTH_TOKEN* ]] && [[ "$got" != *UV_SYSTEM_CERTS* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--add-host\nclaude-docker-api-proxy:10.0.0.2'* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *root.crt* ]]
+  run ! grep -q "^docker cp" "$CALLS"
+  grep -q -- "-e API_PROXY_KEY " "$CALLS"
+  run ! grep -q -- "API_PROXY_BEARER" "$CALLS"
+  run ! grep -q sk-secret "$CALLS"
+  run ! grep -rq sk-secret "$stage"
+}
+
+@test "start_auth_sidecar: --api with an auth token and a CA" {
+  WITH_API=1 ANTHROPIC_AUTH_TOKEN=tok-secret CLAUDE_DOCKER_API_CA="$BATS_TEST_TMPDIR/ca.pem"
+  echo PEM >"$CLAUDE_DOCKER_API_CA"
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  start_auth_sidecar 2>/dev/null
+  [ "$API_PROXY_UPSTREAM" = https://api.anthropic.com ] && [ -z "$API_PROXY_PREFIX" ]
+  [ "$API_PROXY_BEARER" = "Bearer tok-secret" ]
+  [ "$(cat "$stage/auth-proxy/caddy/api-cred.caddy")" = 'request_header -x-api-key
+request_header Authorization "{env.API_PROXY_BEARER}"' ]
+  [ "$(cat "$stage/auth-proxy/caddy/api-ca.pem")" = PEM ]
+  grep -q "tls_trust_pool file /etc/ssl/certs/ca-certificates.crt /etc/caddy/api-ca.pem" "$stage/auth-proxy/caddy/api-transport.caddy"
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"ANTHROPIC_AUTH_TOKEN=claude-docker-proxy"* ]]
+}
+
+@test "start_auth_sidecar: one sidecar serves gh, glab and api" {
+  sidecar_setup
+  WITH_GLAB=1 GLAB_HOST_TOKEN=glpat GLAB_PROXY_HOST=gl.example.com WITH_API=1 ANTHROPIC_API_KEY=k
+  run start_auth_sidecar
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"auth-proxy sidecar 'claude-auth-proxy-x' is active for gh, glab, api"* ]]
+  [ "$(grep -c "^docker run -d" "$CALLS")" -eq 1 ]
+  [ "$(grep -c "^docker network create" "$CALLS")" -eq 1 ]
+}
+
+@test "start_auth_sidecar: --glab on the --api port is refused" {
+  WITH_GLAB=1 GLAB_HOST_TOKEN=glpat GLAB_PROXY_HOST=gl.example.com:8080 WITH_API=1 ANTHROPIC_API_KEY=k
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  run start_auth_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"collides with the --api proxy port"* ]]
+  run ! grep -q "^docker" "$CALLS"
+}
+
+@test "start_auth_sidecar: network create failure aborts" {
   sidecar_setup
   STUB_FAIL="network"
-  run start_gh_sidecar
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
-  [[ "$output" == *"failed to create network 'claude-gh-x'"* ]]
+  [[ "$output" == *"failed to create network 'claude-auth-x'"* ]]
   run ! grep -q "^docker run" "$CALLS"
 }
 
-@test "start_gh_sidecar: sidecar start failure aborts" {
+@test "start_auth_sidecar: sidecar start failure aborts and names the -direct flags" {
   sidecar_setup
+  WITH_API=1 ANTHROPIC_API_KEY=k
   STUB_FAIL="run"
-  run start_gh_sidecar
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
-  [[ "$output" == *"failed to start the gh-auth-proxy sidecar"* ]]
+  [[ "$output" == *"failed to start the auth-proxy sidecar"* ]]
+  [[ "$output" == *"--gh-direct / --api-direct"* ]]
   run ! grep -q "^docker cp" "$CALLS"
 }
 
-@test "start_gh_sidecar: an exited sidecar reports Caddy's logs" {
+@test "start_auth_sidecar: an exited sidecar reports Caddy's logs" {
   sidecar_setup
-  STUB_FAIL="cp" STUB_ALIVE=""
-  run start_gh_sidecar
+  STUB_LOGS="caddy: bad policy" STUB_ALIVE=""
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
   [[ "$output" == *"sidecar exited during startup"* ]]
   [[ "$output" == *"  | caddy: bad policy"* ]]
   run ! grep -q "^docker inspect" "$CALLS"
 }
 
-@test "start_gh_sidecar: no CA within the budget aborts" {
+@test "start_auth_sidecar: no CA within the budget aborts" {
   sidecar_setup
   STUB_FAIL="cp"
-  run start_gh_sidecar
+  run start_auth_sidecar
   [ "$status" -eq 1 ]
   [[ "$output" == *"did not produce a CA certificate within 15s"* ]]
   [ "$(grep -c "^docker cp" "$CALLS")" -eq 15 ]
 }
 
-@test "start_gh_sidecar: a failing inspect reaches the address error" {
+@test "start_auth_sidecar: a config that never loads aborts, without trying the CA" {
+  sidecar_setup
+  STUB_LOGS="still starting"
+  run start_auth_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"did not load its config within 15s"* ]]
+  run ! grep -q "^docker cp" "$CALLS"
+}
+
+@test "start_auth_sidecar: a failing inspect reaches the address error" {
   STUB_FAIL="inspect"
   # Under set -e, which `run` would ignore: without `|| true` on the inspect
   # the shell aborts before this message prints.
-  run_script_fn 'WITH_GH=1 GH_HOST_TOKEN=t stage=$HOME/st; mkdir -p "$stage"; start_gh_sidecar'
+  run_script_fn 'WITH_GH=1 GH_HOST_TOKEN=t stage=$HOME/st; mkdir -p "$stage"; start_auth_sidecar'
   [ "$status" -eq 1 ]
-  [[ "$output" == *"could not determine the gh-auth-proxy sidecar's network address"* ]]
+  [[ "$output" == *"could not determine the auth-proxy sidecar's network address"* ]]
   [[ "$output" != *"is active"* ]]
 }
 
@@ -577,9 +1297,247 @@ sidecar_setup() {
   [ "$(lines_of "${MOUNT_ARGS[@]}")" = $'--add-host\ngitlab.example.com:10.1.2.3' ]
 }
 
+@test "build_host_args: under --glab the proxied GitLab host is skipped" {
+  ADD_HOSTS=(GL.example.com:10.1.2.3 registry.gl.example.com:10.1.2.4)
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com:8443
+  build_host_args 2>/dev/null
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = $'--add-host\nregistry.gl.example.com:10.1.2.4' ]
+}
+
 @test "build_host_args: nothing set adds nothing" {
   build_host_args
   [ "${#MOUNT_ARGS[@]}" -eq 0 ]
+}
+
+@test "start_auth_sidecar: without --egress-lock the agent joins the auth network" {
+  sidecar_setup
+  start_auth_sidecar 2>/dev/null
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--network\nclaude-auth-x'* ]]
+  run ! grep -q "^docker network connect" "$CALLS"
+}
+
+@test "start_auth_sidecar: under --egress-lock the sidecar joins the internal network" {
+  sidecar_setup
+  WITH_EGRESS_LOCK=1 EGRESS_NETWORK=claude-egress-x
+  start_auth_sidecar 2>/dev/null
+  grep -qx "docker network connect claude-egress-x claude-auth-proxy-x" "$CALLS"
+  # The agent's address for the sidecar is the one on the internal network,
+  # and the agent itself is not put on the auth network (it has a route out).
+  grep -q '^docker inspect .*"claude-egress-x"' "$CALLS"
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *"--network"* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--add-host\napi.github.com:10.0.0.2'* ]]
+}
+
+@test "start_auth_sidecar: failing to join the internal network aborts" {
+  sidecar_setup
+  WITH_EGRESS_LOCK=1 EGRESS_NETWORK=claude-egress-x
+  STUB_FAIL="network:connect"
+  run start_auth_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed to attach the auth-proxy sidecar to 'claude-egress-x'"* ]]
+  [[ "$output" == *"no credential was forwarded"* ]]
+  run ! grep -q "^docker inspect" "$CALLS"
+}
+
+# --- start_egress_sidecar ---
+
+egress_setup() {
+  WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=llm.example.eu
+  ANTHROPIC_BASE_URL=https://llm.example.eu/v1
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage"
+  EGRESS_NETWORK=claude-egress-x EGRESS_OUT_NETWORK=claude-egress-out-x
+  EGRESS_SIDECAR=claude-egress-proxy-x
+  STUB_LOGS="Accepting HTTP Socket connections at conn1 local=[::]:3128"
+}
+
+@test "start_egress_sidecar: no-op without --egress-lock" {
+  WITH_API=1
+  start_egress_sidecar
+  [ ! -s "$CALLS" ]
+  [[ "${ENV_ARGS[*]}" != *proxy* ]]
+}
+
+@test "start_egress_sidecar: wires the agent to the proxy on the internal network only" {
+  egress_setup
+  start_egress_sidecar 2>/dev/null
+  # squid from its own image (cached here: inspect succeeds, so no build),
+  # unprivileged, on the outbound network, then attached to the internal one.
+  run ! grep -q "^docker build" "$CALLS"
+  grep -q "^docker run -d --name claude-egress-proxy-x --network claude-egress-out-x --user squid --cap-drop ALL --security-opt no-new-privileges .*--entrypoint /usr/sbin/squid claude-docker-egress-proxy:[0-9]* -N$" "$CALLS"
+  grep -qx "docker network connect claude-egress-x claude-egress-proxy-x" "$CALLS"
+  grep -qx "acl egress_model_endpoint dstdomain -n llm.example.eu" "$stage/egress-squid.conf"
+  # The internal network, and Claude Code's managed settings, read-only.
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "--network
+claude-egress-x
+-v
+$stage/egress-managed-settings.json:/etc/claude-code/managed-settings.json:ro" ]
+  grep -q '"ANTHROPIC_BASE_URL": "https://llm.example.eu/v1"' "$stage/egress-managed-settings.json"
+  # Written once squid's address is known, so the pin names this session's.
+  grep -q '"HTTPS_PROXY": "http://10.0.0.2:3128"' "$stage/egress-managed-settings.json"
+  local env
+  env=$(lines_of "${ENV_ARGS[@]}")
+  # Whole lines: a no_proxy that also lists e.g. github.com would let that
+  # traffic skip the proxy (and its log).
+  for v in http_proxy https_proxy HTTP_PROXY HTTPS_PROXY; do
+    [[ "$env"$'\n' == *$'\n'"$v=http://10.0.0.2:3128"$'\n'* ]]
+  done
+  [[ "$env"$'\n' == *$'\n'"no_proxy=localhost,127.0.0.1,::1"$'\n'* ]]
+  [[ "$env"$'\n' == *$'\n'"NO_PROXY=localhost,127.0.0.1,::1"$'\n'* ]]
+  [[ "$env"$'\n' == *$'\n'"CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1"$'\n'* ]]
+  [[ "$env"$'\n' == *$'\n'"CLAUDE_CODE_DISABLE_OFFICIAL_MARKETPLACE_AUTOINSTALL=1"$'\n'* ]]
+  # entrypoint.sh pre-approves ANTHROPIC_API_KEY only under this flag.
+  [[ "$env"$'\n' == *$'\n'"CLAUDE_DOCKER_EGRESS_LOCK=1"$'\n'* ]]
+  [ -n "$egress_started" ]
+}
+
+@test "gen_egress_proxy_containerfile: pinned Alpine base, squid floor, unprivileged user" {
+  run gen_egress_proxy_containerfile
+  [ "$output" = "FROM alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+RUN apk add --no-cache 'squid>=7.6' && squid -v | head -1
+USER squid" ]
+}
+
+@test "ensure_egress_image: builds a missing image, named by the Containerfile's checksum" {
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  STUB_FAIL="image:inspect"
+  ensure_egress_image 2>/dev/null
+  local sum
+  sum=$(gen_egress_proxy_containerfile | cksum | cut -d' ' -f1)
+  [ "$EGRESS_IMAGE" = "claude-docker-egress-proxy:$sum" ]
+  grep -qx "docker build -q -t claude-docker-egress-proxy:$sum -f $stage/egress-proxy/Containerfile $stage/egress-proxy" "$CALLS"
+  [ "$(cat "$stage/egress-proxy/Containerfile")" = "$(gen_egress_proxy_containerfile)" ]
+  # A different recipe is a different image, never a stale reuse.
+  EGRESS_PROXY_SQUID_MIN=9.9
+  [ "claude-docker-egress-proxy:$(gen_egress_proxy_containerfile | cksum | cut -d' ' -f1)" != "$EGRESS_IMAGE" ]
+}
+
+@test "ensure_egress_image: a cached image is reused, an override is used as is" {
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  ensure_egress_image
+  run ! grep -q "^docker build" "$CALLS"
+  CLAUDE_DOCKER_EGRESS_PROXY_IMAGE=registry.example/squid@sha256:abc
+  ensure_egress_image
+  [ "$EGRESS_IMAGE" = "registry.example/squid@sha256:abc" ]
+}
+
+@test "start_egress_sidecar: a failed proxy image build aborts before any container" {
+  egress_setup
+  STUB_FAIL="image:inspect build"
+  run start_egress_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed to build the --egress-lock proxy image"* ]]
+  run ! grep -q "^docker run" "$CALLS"
+}
+
+@test "start_egress_sidecar: with the gh sidecar, squid resolves GitHub to it" {
+  egress_setup
+  GH_SIDECAR_ACTIVE=1 proxy_ip=10.0.0.9
+  start_egress_sidecar 2>/dev/null
+  local run_line
+  run_line=$(grep "^docker run -d --name claude-egress-proxy-x" "$CALLS")
+  for h in github.com api.github.com uploads.github.com; do
+    [[ "$run_line" == *"--add-host $h:10.0.0.9"* ]]
+  done
+}
+
+@test "start_egress_sidecar: squid resolves the --glab and --api names to the auth sidecar" {
+  egress_setup
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com:8443 API_SIDECAR_ACTIVE=1 proxy_ip=10.0.0.9
+  start_egress_sidecar 2>/dev/null
+  local run_line
+  run_line=$(grep "^docker run -d --name claude-egress-proxy-x" "$CALLS")
+  [[ "$run_line" == *"--add-host gl.example.com:10.0.0.9 "* ]]
+  [[ "$run_line" == *"--add-host claude-docker-api-proxy:10.0.0.9 "* ]]
+  grep -q '"ANTHROPIC_BASE_URL": "http://claude-docker-api-proxy:8080"' "$stage/egress-managed-settings.json"
+}
+
+@test "start_egress_sidecar: squid gets the CLAUDE_DOCKER_ADD_HOSTS entries" {
+  egress_setup
+  ADD_HOSTS=(gitlab.example.com:10.1.2.3)
+  start_egress_sidecar 2>/dev/null
+  grep -q "^docker run -d --name claude-egress-proxy-x .*--add-host gitlab.example.com:10.1.2.3 " "$CALLS"
+}
+
+@test "start_egress_sidecar: under --gh, ADD_HOSTS GitHub entries stay off squid" {
+  egress_setup
+  GH_SIDECAR_ACTIVE=1 API_SIDECAR_ACTIVE=1 proxy_ip=10.0.0.9
+  ADD_HOSTS=(GitHub.com:140.82.121.4 gitlab.example.com:10.1.2.3 claude-docker-api-proxy:10.9.9.9)
+  start_egress_sidecar 2>/dev/null
+  local run_line
+  run_line=$(grep "^docker run -d --name claude-egress-proxy-x" "$CALLS")
+  [[ "$run_line" == *"--add-host gitlab.example.com:10.1.2.3 "* ]]
+  [[ "$run_line" != *"140.82.121.4"* ]] && [[ "$run_line" != *"10.9.9.9"* ]]
+}
+
+@test "start_egress_sidecar: proxy start failure aborts" {
+  egress_setup
+  STUB_FAIL="run"
+  run start_egress_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed to start the --egress-lock proxy"* ]]
+  [[ "$output" == *"agent container was never started"* ]]
+  run ! grep -q "^docker network connect" "$CALLS"
+}
+
+@test "start_egress_sidecar: no log is saved for a proxy that never started" {
+  egress_setup
+  STUB_FAIL="run"
+  run_script_fn 'WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=gw.eu ANTHROPIC_BASE_URL=https://gw.eu stage=$HOME/st; mkdir -p "$stage"
+    EGRESS_NETWORK=n EGRESS_OUT_NETWORK=o EGRESS_SIDECAR=p; trap egress_save_log EXIT; start_egress_sidecar'
+  [ "$status" -eq 1 ]
+  [[ "$output" != *"egress log saved"* ]]
+  [ ! -e "$EGRESS_LOG_DIR" ]
+}
+
+@test "start_egress_sidecar: a proxy that started but couldn't join the network still has its log saved" {
+  egress_setup
+  STUB_FAIL="network:connect"
+  run_script_fn 'WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=gw.eu ANTHROPIC_BASE_URL=https://gw.eu stage=$HOME/st; mkdir -p "$stage"
+    EGRESS_NETWORK=n EGRESS_OUT_NETWORK=o EGRESS_SIDECAR=p; trap egress_save_log EXIT; start_egress_sidecar'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"egress log saved"* ]]
+}
+
+@test "start_egress_sidecar: failing to join the internal network aborts" {
+  egress_setup
+  STUB_FAIL="network:connect"
+  run start_egress_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"failed to join the --egress-lock proxy to network "* ]]
+  run ! grep -q "^docker logs" "$CALLS"
+}
+
+@test "start_egress_sidecar: an exited proxy reports squid's logs" {
+  egress_setup
+  STUB_ALIVE="" STUB_LOGS="FATAL: Bungled /etc/squid/squid.conf line 3"
+  run start_egress_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"proxy exited during startup"* ]]
+  [[ "$output" == *"  | FATAL: Bungled /etc/squid/squid.conf line 3"* ]]
+  run ! grep -q "^docker inspect" "$CALLS"
+}
+
+@test "start_egress_sidecar: not accepting connections within the budget aborts" {
+  egress_setup
+  STUB_LOGS="Starting Squid Cache"
+  run start_egress_sidecar
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"was not accepting connections within 15s"* ]]
+  [[ "$output" == *"  | Starting Squid Cache"* ]]
+  # 15 readiness polls, plus the one that prints the tail.
+  [ "$(grep -c "^docker logs claude-egress-proxy-x" "$CALLS")" -eq 16 ]
+  run ! grep -q "^docker inspect" "$CALLS"
+}
+
+@test "start_egress_sidecar: a failing inspect reaches the address error" {
+  STUB_FAIL="inspect" STUB_LOGS="Accepting HTTP Socket connections"
+  # Under set -e, like the gh sidecar case above.
+  run_script_fn 'WITH_API=1 WITH_EGRESS_LOCK=1 egress_api_host=gw.eu ANTHROPIC_BASE_URL=https://gw.eu stage=$HOME/st; mkdir -p "$stage"
+    EGRESS_NETWORK=n EGRESS_OUT_NETWORK=o EGRESS_SIDECAR=p; start_egress_sidecar'
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"could not determine the --egress-lock proxy's address"* ]]
+  [[ "$output" != *"is active"* ]]
 }
 
 # --- stage_host_config ---
@@ -717,6 +1675,90 @@ run_statusline() {
   [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *$'--tmpfs\n/root/.config/gh'* ]]
 }
 
+@test "build_volume_mounts: glab state is unmasked under either glab flag" {
+  for f in WITH_GLAB WITH_GLAB_DIRECT; do
+    WITH_GLAB=0 WITH_GLAB_DIRECT=0 MOUNT_ARGS=()
+    printf -v "$f" 1
+    build_volume_mounts
+    [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *glab-cli* ]]
+  done
+}
+
+# --- stage_glab_config ---
+
+glab_config_setup() {
+  GLAB_SRC="$BATS_TEST_TMPDIR/glab-cli"
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$GLAB_SRC" "$stage"
+  cat >"$GLAB_SRC/config.yml" <<'YML'
+git_protocol: https
+hosts:
+    # glab writes hosts four spaces deep and their keys eight.
+    gl.example.com:
+        token: glpat-one
+        oauth2_refresh_token: refresh-one
+        api_host: gl.example.com
+        use_keyring: true
+    gitlab.com:
+        job_token: "glcbt-two"
+        api_host: gitlab.com
+YML
+}
+
+@test "stage_glab_config: proxied copy blanks every token value" {
+  glab_config_setup
+  WITH_GLAB=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run stage_glab_config
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  stage_glab_config 2>/dev/null
+  run ! grep -Eq 'glpat-one|refresh-one|glcbt-two' "$stage/glab-config.yml"
+  grep -qx '        token: ""' "$stage/glab-config.yml"
+  grep -qx '        use_keyring: false' "$stage/glab-config.yml"
+  grep -qx '        api_host: gl.example.com' "$stage/glab-config.yml"
+  [ "$(wc -l <"$stage/glab-config.yml")" -eq "$(wc -l <"$GLAB_SRC/config.yml")" ]
+}
+
+@test "stage_glab_config: --glab without a found token still blanks them" {
+  glab_config_setup
+  WITH_GLAB=1 GLAB_SIDECAR_ACTIVE=0
+  stage_glab_config
+  run ! grep -Eq 'glpat-one|refresh-one|glcbt-two' "$stage/glab-config.yml"
+}
+
+@test "stage_glab_config: --glab-direct keeps the tokens" {
+  glab_config_setup
+  stage_glab_config
+  grep -q glpat-one "$stage/glab-config.yml"
+  grep -qx '        use_keyring: false' "$stage/glab-config.yml"
+}
+
+@test "stage_glab_config: warns when api_host is not the proxied host" {
+  glab_config_setup
+  sed 's/        api_host: gl.example.com/        api_host: api.gl.example.com/' "$GLAB_SRC/config.yml" >"$BATS_TEST_TMPDIR/c.yml"
+  mv "$BATS_TEST_TMPDIR/c.yml" "$GLAB_SRC/config.yml"
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run stage_glab_config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"api_host for gl.example.com is 'api.gl.example.com'"* ]]
+}
+
+@test "stage_glab_config: warns for a two-space hand-written config too" {
+  glab_config_setup
+  printf 'hosts:\n  gl.example.com:\n    api_host: api.gl.example.com\n  gitlab.com:\n    api_host: gitlab.com\n' >"$GLAB_SRC/config.yml"
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run stage_glab_config
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"api_host for gl.example.com is 'api.gl.example.com'"* ]]
+}
+
+@test "stage_glab_config: no warning when another host has a different api_host" {
+  glab_config_setup
+  printf 'hosts:\n    gitlab.com:\n        api_host: api.gitlab.com\n    gl.example.com:\n        api_host: gl.example.com\n' >"$GLAB_SRC/config.yml"
+  GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gl.example.com
+  run stage_glab_config
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
 # --- run_container / main ---
 
 @test "run_container: hands everything to the runtime" {
@@ -750,4 +1792,615 @@ run_statusline() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"could not determine"* ]]
   run ! grep -q "^docker run --rm" "$CALLS"
+}
+
+@test "main: --api alone creates no egress resources" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu
+  run_script --ephemeral --api "$WS"
+  [ "$status" -eq 0 ]
+  run ! grep -q "^docker network create.* claude-egress-" "$CALLS"
+  run ! grep -q "^docker run -d --name claude-egress-" "$CALLS"
+  run ! grep -q "^docker run --rm .*_proxy=" "$CALLS"
+}
+
+@test "main: --egress-lock starts the agent on the internal network, behind the proxy" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu/v1
+  STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
+  run_script --ephemeral --api --egress-lock "$WS"
+  [ "$status" -eq 0 ]
+  local agent
+  agent=$(grep "^docker run --rm" "$CALLS")
+  [[ "$agent" == *"--network claude-egress-"* ]]
+  [[ "$agent" == *"-e HTTPS_PROXY=http://10.0.0.2:3128"* ]]
+  # Model traffic goes to the auth sidecar, which squid resolves on the
+  # internal network.
+  [[ "$agent" == *"-e ANTHROPIC_BASE_URL=http://claude-docker-api-proxy:8080"* ]]
+  grep -q "^docker network connect claude-egress-[^ ]* claude-auth-proxy-" "$CALLS"
+  grep -q "^docker run -d --name claude-egress-proxy-.*--add-host claude-docker-api-proxy:10.0.0.2 " "$CALLS"
+  # Networks, then the proxy, then the agent; teardown after it.
+  [ "$(grep -n "^docker network create --internal" "$CALLS" | cut -d: -f1)" -lt \
+    "$(grep -n "^docker run -d --name claude-egress-proxy-" "$CALLS" | cut -d: -f1)" ]
+  [ "$(grep -n "^docker run -d --name claude-egress-proxy-" "$CALLS" | cut -d: -f1)" -lt \
+    "$(grep -n "^docker run --rm" "$CALLS" | cut -d: -f1)" ]
+  grep -q "^docker rm -f claude-egress-proxy-" "$CALLS"
+  grep -q "^docker network rm claude-egress-" "$CALLS"
+  ls "$HOME/.local/state/claude-docker/egress/"*.meta
+}
+
+@test "main: --gh --egress-lock creates the internal network before the auth sidecar joins it" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu
+  STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
+  run_script --ephemeral --gh --api --egress-lock "$WS"
+  [ "$status" -eq 0 ]
+  [ "$(grep -n "^docker network create --internal claude-egress-" "$CALLS" | cut -d: -f1)" -lt \
+    "$(grep -n "^docker network connect claude-egress-.* claude-auth-proxy-" "$CALLS" | cut -d: -f1)" ]
+  # The agent is on the internal network only, never on the auth one.
+  local agent
+  agent=$(grep "^docker run --rm" "$CALLS")
+  [ "$(grep -o -- "--network [^ ]*" <<<"$agent" | wc -l)" -eq 1 ]
+  [[ "$agent" == *"--network claude-egress-"* ]]
+}
+
+@test "main: a failing egress proxy stops before the agent starts" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu
+  STUB_LOGS=$'serving initial configuration\nStarting Squid Cache'
+  run_script --ephemeral --api --egress-lock "$WS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"was not accepting connections within 15s"* ]]
+  run ! grep -q "^docker run --rm" "$CALLS"
+  # The EXIT trap still cleans up what was created.
+  grep -q "^docker rm -f claude-egress-proxy-" "$CALLS"
+  grep -q "^docker network rm claude-egress-" "$CALLS"
+}
+
+@test "main: --api-direct --egress-lock starts no auth sidecar and pins the real endpoint" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://llm.example.eu/v1
+  STUB_LOGS="Accepting HTTP Socket connections"
+  run_script --ephemeral --api-direct --egress-lock "$WS"
+  [ "$status" -eq 0 ]
+  run ! grep -q "^docker run -d --name claude-auth-proxy-" "$CALLS"
+  local agent
+  agent=$(grep "^docker run --rm" "$CALLS")
+  [[ "$agent" == *"--network claude-egress-"* ]]
+  [[ "$agent" != *"claude-docker-api-proxy"* ]]
+}
+
+@test "main: an invalid endpoint stops before any docker call" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://api.anthropic.com
+  run_script --ephemeral --api --egress-lock "$WS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"points at one"* ]]
+  [ ! -s "$CALLS" ]
+}
+
+# --- --egress-allowlist ---
+
+# A --api --egress-lock --egress-allowlist session's options, with the file
+# $HOME/team.allow holding $1.
+allowlist_setup() {
+  WITH_API=1 WITH_EGRESS_LOCK=1 WITH_EGRESS_ALLOWLIST=1 ANTHROPIC_AUTH_TOKEN=t
+  ANTHROPIC_BASE_URL=https://gw.example.eu
+  WORKSPACES=("$WS")
+  printf '%s' "$1" >"$HOME/team.allow"
+  EGRESS_ALLOWLIST_ARG="$HOME/team.allow"
+}
+
+# The http_access lines of the generated config, one per line.
+rules_of() { grep '^http_access' <<<"$1"; }
+# Line number of http_access rule $2 in rule list $1.
+rule_at() { grep -nxF "http_access $2" <<<"$1" | cut -d: -f1; }
+
+# Write config $2 for case $1 where the squid harness (tests/egress-proxy)
+# parses it with the real squid; expected-configs.txt lists every case.
+save_for_harness() {
+  local dir="${BATS_TEST_DIRNAME}/../egress-proxy/generated"
+  mkdir -p "$dir"
+  printf '%s\n' "$2" >"$dir/$1.conf"
+}
+
+@test "parse_args: --egress-allowlist with and without =FILE" {
+  parse_args --egress-allowlist "$WS"
+  [ "$WITH_EGRESS_ALLOWLIST" = 1 ] && [ -z "$EGRESS_ALLOWLIST_ARG" ]
+  parse_args --egress-allowlist=~/team.allow "$WS"
+  [ "$EGRESS_ALLOWLIST_ARG" = "~/team.allow" ]
+}
+
+@test "validate_opts: the flag's file wins over CLAUDE_DOCKER_EGRESS_ALLOWLIST" {
+  allowlist_setup "example.com"
+  printf 'pypi.org\n' >"$HOME/env.allow"
+  CLAUDE_DOCKER_EGRESS_ALLOWLIST="$HOME/env.allow"
+  validate_opts
+  [ "$(lines_of "${EGRESS_ALLOW_NAMES[@]}")" = "example.com" ]
+  EGRESS_ALLOWLIST_ARG=""
+  validate_opts
+  [ "$(lines_of "${EGRESS_ALLOW_NAMES[@]}")" = "pypi.org" ]
+  [ "$egress_allowlist_file" = "$HOME/env.allow" ]
+  EGRESS_ALLOWLIST_ARG="~/team.allow"
+  validate_opts
+  [ "$egress_allowlist_file" = "$HOME/team.allow" ]
+  CLAUDE_DOCKER_EGRESS_ALLOWLIST="~/env.allow" EGRESS_ALLOWLIST_ARG=""
+  validate_opts
+  [ "$egress_allowlist_file" = "$HOME/env.allow" ]
+}
+
+@test "validate_opts: entries are trimmed, lowercased and kept with their ports" {
+  allowlist_setup $'# team list\nPyPI.org  # index\n.corp.example\ngit.example.com:8443\n.internal.example:08443\npypi.org#x\nexample.org\t#c\r\n  \nlast.example'
+  validate_opts
+  [ "$(lines_of "${EGRESS_ALLOW_NAMES[@]}")" = "pypi.org
+.corp.example
+git.example.com
+.internal.example
+pypi.org
+example.org
+last.example" ]
+  local IFS=,
+  [ "${EGRESS_ALLOW_PORTS[*]}" = ",,8443,8443,,," ]
+}
+
+@test "validate_opts: boundary values are accepted" {
+  local h
+  h="$(printf 'a%.0s' {1..63}).$(printf 'b%.0s' {1..63}).$(printf 'c%.0s' {1..63}).$(printf 'd%.0s' {1..61})"
+  [ "${#h}" = 253 ]
+  allowlist_setup "$h"$'\na.example:1\nb.example:65535\n'
+  validate_opts
+  [ "${EGRESS_ALLOW_NAMES[0]}" = "$h" ]
+  local IFS=,
+  [ "${EGRESS_ALLOW_PORTS[*]}" = ",1,65535" ]
+}
+
+@test "validate_opts: the hash covers the bytes read, CRLF and an unterminated last line included" {
+  allowlist_setup $'example.org\r\npypi.org'
+  validate_opts
+  [ "$egress_allowlist_sha256" = "$(sha256sum "$HOME/team.allow" | cut -d' ' -f1)" ]
+  [ "${EGRESS_ALLOW_NAMES[1]}" = pypi.org ]
+}
+
+# A PATH with the tools validate_opts needs, plus the hash tools named.
+hash_path() {
+  local dir="$BATS_TEST_TMPDIR/bin" t
+  mkdir -p "$dir"
+  for t in cat wc tr dirname basename readlink "$@"; do
+    [ "$t" = shasum ] && continue
+    ln -sf "$(command -v "$t")" "$dir/$t"
+  done
+  case " $* " in *" shasum "*)
+    # Records its argv and answers like `shasum -a 256`.
+    printf '#!/bin/sh\necho "$@" >"%s"\nexec %s\n' \
+      "$BATS_TEST_TMPDIR/shasum-argv" "$(command -v sha256sum)" >"$dir/shasum"
+    chmod +x "$dir/shasum" ;;
+  esac
+  printf '%s' "$dir"
+}
+
+@test "validate_opts: hashes with sha256sum, else shasum -a 256, else refuses" {
+  allowlist_setup $'pypi.org\n'
+  local want p
+  want=$(sha256sum "$HOME/team.allow" | cut -d' ' -f1)
+  p=$(hash_path sha256sum)
+  PATH="$p" validate_opts
+  [ "$egress_allowlist_sha256" = "$want" ]
+  egress_allowlist_sha256=""
+  p=$(hash_path shasum)
+  rm -f "$p/sha256sum"
+  PATH="$p" validate_opts
+  [ "$egress_allowlist_sha256" = "$want" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/shasum-argv")" = "-a 256" ]
+  rm -f "$p/shasum"
+  PATH="$p" run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"needs sha256sum or shasum"* ]]
+}
+
+@test "gen_egress_squid_conf: allowlist names, ports and overlaps" {
+  allowlist_setup $'api.example.com\n.example.com\npypi.org\npypi.org\ngit.corp.example:8443\n.internal.example:8443\n.a.internal.example\n'
+  validate_opts
+  API_SIDECAR_ACTIVE=1
+  run gen_egress_squid_conf
+  save_for_harness allowlist-overlap "$output"
+  [ "$(grep '^acl egress_allowed_names ' <<<"$output")" = "acl egress_allowed_names dstdomain -n gw.example.eu
+acl egress_allowed_names dstdomain -n claude-docker-api-proxy
+acl egress_allowed_names dstdomain -n .example.com
+acl egress_allowed_names dstdomain -n pypi.org
+acl egress_allowed_names dstdomain -n git.corp.example
+acl egress_allowed_names dstdomain -n .internal.example" ]
+  [[ "$output" == *$'\nacl egress_allow_1 dstdomain -n git.corp.example\nacl egress_allow_1_port port 8443\nacl egress_allow_2 dstdomain -n .internal.example\nacl egress_allow_2_port port 8443\n'* ]]
+  # Every dstdomain skips reverse lookups.
+  run ! grep -E '^acl [^ ]+ dstdomain( [^-]|$)' <<<"$output"
+}
+
+@test "gen_egress_squid_conf: allowlist rule order" {
+  allowlist_setup $'git.corp.example:8443\n'
+  validate_opts
+  API_SIDECAR_ACTIVE=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gitlab.corp.example:8443
+  local conf rules
+  conf=$(gen_egress_squid_conf)
+  save_for_harness allowlist-order "$conf"
+  rules=$(rules_of "$conf")
+  # The cache manager and metadata names first, then the name-only deny,
+  # before any dst rule.
+  [ "$(rule_at "$rules" "deny manager")" = 1 ]
+  [ "$(rule_at "$rules" "deny egress_metadata_names")" = 2 ]
+  [ "$(rule_at "$rules" "deny !egress_allowed_names")" = 3 ]
+  local deny_names=3 r
+  for r in "deny egress_metadata_addrs" "deny egress_linklocal" "deny egress_loopback" "deny egress_model_providers"; do
+    [ "$(rule_at "$rules" "$r")" -gt "$deny_names" ]
+    # Address and provider denies above every allow.
+    [ "$(rule_at "$rules" "$r")" -lt "$(rule_at "$rules" "allow egress_model_endpoint egress_model_port")" ]
+  done
+  for r in "allow egress_model_endpoint egress_model_port" "allow egress_auth_proxy_api egress_auth_proxy_api_port" \
+           "allow egress_auth_proxy_glab egress_auth_proxy_glab_port" "allow egress_allow_1 egress_allow_1_port"; do
+    [ "$(rule_at "$rules" "$r")" -lt "$(rule_at "$rules" "deny !egress_ports")" ]
+  done
+  [ "$(rule_at "$rules" "deny !egress_ports")" -lt "$(rule_at "$rules" "deny CONNECT !egress_tls_port")" ]
+  [ "$(rule_at "$rules" "deny CONNECT !egress_tls_port")" -lt "$(rule_at "$rules" "allow egress_allowed_names")" ]
+  [ "$(tail -1 <<<"$rules")" = "http_access deny all" ]
+  [[ "$rules" != *"allow all"* ]]
+  [ "$(grep -c '^http_access deny egress_model_providers$' <<<"$rules")" = 1 ]
+}
+
+@test "gen_egress_squid_conf: --api-direct allows the endpoint, no sidecar name, and ends in deny all" {
+  allowlist_setup ""
+  WITH_API=0 WITH_API_DIRECT=1
+  validate_opts
+  local conf rules
+  conf=$(gen_egress_squid_conf)
+  save_for_harness allowlist-api-direct "$conf"
+  rules=$(rules_of "$conf")
+  [[ "$rules" == *"http_access allow egress_model_endpoint egress_model_port"* ]]
+  [[ "$conf" != *claude-docker-api-proxy* ]]
+  [ "$(tail -1 <<<"$rules")" = "http_access deny all" ]
+  [ "$(grep '^acl egress_allowed_names ' <<<"$conf")" = "acl egress_allowed_names dstdomain -n gw.example.eu" ]
+}
+
+@test "gen_egress_squid_conf: credential flags add no host to the allowlist" {
+  allowlist_setup ""
+  WITH_TFE=1 WITH_GH_DIRECT=1 WITH_AZ=1 WITH_AWS=1 WITH_REGISTRY=1
+  validate_opts
+  API_SIDECAR_ACTIVE=1
+  run gen_egress_squid_conf
+  save_for_harness allowlist-empty "$output"
+  [ "$(grep '^acl egress_allowed_names ' <<<"$output")" = "acl egress_allowed_names dstdomain -n gw.example.eu
+acl egress_allowed_names dstdomain -n claude-docker-api-proxy" ]
+}
+
+@test "gen_egress_squid_conf: IPv4 endpoint and endpoint port under the allowlist" {
+  allowlist_setup $'example.com\n.corp.example:8443\nlocalhost:8080\n'
+  ANTHROPIC_BASE_URL=https://10.0.0.5:8443
+  validate_opts
+  API_SIDECAR_ACTIVE=1
+  run gen_egress_squid_conf
+  save_for_harness allowlist-ipv4-endpoint "$output"
+  [[ "$output" == *$'\nacl egress_model_endpoint dstdomain -n 10.0.0.5\nacl egress_model_port port 8443\n'* ]]
+  grep -qx 'acl egress_allowed_names dstdomain -n 10.0.0.5' <<<"$output"
+}
+
+@test "gen_egress_squid_conf: an endpoint port and a --glab port under the allowlist, for the harness" {
+  allowlist_setup $'example.com\ngit.corp.example:8443\n.corp.example\nx.example:8443\n'
+  ANTHROPIC_BASE_URL=https://gw.example.eu:8443
+  validate_opts
+  API_SIDECAR_ACTIVE=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gitlab.corp.example:8443
+  run gen_egress_squid_conf
+  save_for_harness allowlist-ports "$output"
+  grep -qx 'acl egress_model_port port 8443' <<<"$output"
+}
+
+@test "gen_egress_squid_conf: without --egress-allowlist, byte-identical to the pre-change configs" {
+  local golden="${BATS_TEST_DIRNAME}/../egress-proxy/golden"
+  API_SIDECAR_ACTIVE=1
+  egress_api_host=llm.example.eu egress_api_port=443
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock.conf")" ]
+  save_for_harness lock "$(gen_egress_squid_conf)"
+  egress_api_host=gw.example.eu egress_api_port=8443
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock-endpoint-port.conf")" ]
+  save_for_harness lock-endpoint-port "$(gen_egress_squid_conf)"
+  egress_api_host=llm.example.eu egress_api_port=443 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gitlab.corp.example:8443
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock-glab.conf")" ]
+  save_for_harness lock-glab "$(gen_egress_squid_conf)"
+  # An entry list left over from somewhere else changes nothing without the flag.
+  EGRESS_ALLOW_NAMES=(x.example) EGRESS_ALLOW_PORTS=("")
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock-glab.conf")" ]
+}
+
+@test "gen_egress_squid_conf: endpoint hosts starting with - are written as given (squid refuses them, see the harness)" {
+  local h dir="${BATS_TEST_DIRNAME}/../egress-proxy/generated-negative"
+  mkdir -p "$dir"
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  for h in -gw.example.eu --gw.example.eu -n --; do
+    ANTHROPIC_BASE_URL="https://$h"
+    validate_opts
+    [ "$egress_api_host" = "$h" ]
+    API_SIDECAR_ACTIVE=0
+    run gen_egress_squid_conf
+    grep -qxF -- "acl egress_model_endpoint dstdomain -n $h" <<<"$output"
+    printf '%s\n' "$output" >"$dir/endpoint$h.conf"
+  done
+}
+
+@test "check_allowlist_session: --gh needs GitHub's three hosts, exactly or by a covering suffix" {
+  allowlist_setup $'.github.io\nnotgithub.com\nuploads.github.com\n'
+  validate_opts
+  WITH_GH=1 GH_HOST_TOKEN=t
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *": github.com api.github.com" ]]
+  allowlist_setup $'github.com\napi.github.com\n'
+  validate_opts
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *": uploads.github.com" ]]
+  local list
+  for list in $'.github.com' $'.GitHub.com:443' $'github.com:443\napi.github.com\nuploads.github.com'; do
+    allowlist_setup "$list"
+    validate_opts
+    check_allowlist_session
+  done
+}
+
+@test "check_allowlist_session: --glab needs its proxied host, port or not" {
+  allowlist_setup ""
+  validate_opts
+  WITH_GLAB=1 GLAB_HOST_TOKEN=t GLAB_PROXY_HOST=gitlab.corp.example
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"gitlab.corp.example"* ]]
+  local list
+  for list in .corp.example gitlab.corp.example:8443 GITLAB.corp.example; do
+    allowlist_setup "$list"
+    validate_opts
+    GLAB_PROXY_HOST=gitlab.corp.example:8443
+    check_allowlist_session
+  done
+  for list in notcorp.example .other.corp2.example; do
+    allowlist_setup "$list"
+    validate_opts
+    GLAB_PROXY_HOST=gitlab.corp.example:8443
+    run check_allowlist_session
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "check_allowlist_session: no sidecar, no host check" {
+  allowlist_setup ""
+  validate_opts
+  # No token: --gh and --glab go through squid like any other client.
+  WITH_GH=1 GH_HOST_TOKEN="" WITH_GLAB=1 GLAB_HOST_TOKEN=""
+  check_allowlist_session
+  # An exported GH_TOKEN without --gh (plain, or under --gh-direct).
+  WITH_GH=0 GH_HOST_TOKEN=t WITH_GLAB=0
+  check_allowlist_session
+  WITH_GH_DIRECT=1
+  check_allowlist_session
+  # And nothing at all without the flag.
+  WITH_EGRESS_ALLOWLIST=0 WITH_GH=1 RUNTIME=podman
+  check_allowlist_session
+}
+
+@test "check_allowlist_session: docker only" {
+  allowlist_setup ""
+  validate_opts
+  RUNTIME=podman
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docker only"*"podman"* ]]
+}
+
+@test "main: a --gh host missing from the allowlist stops before any container resource" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://gw.example.eu GH_TOKEN=t
+  printf 'github.com\n' >"$HOME/team.allow"
+  run_script --ephemeral --gh --api --egress-lock "--egress-allowlist=$HOME/team.allow" "$WS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"api.github.com uploads.github.com"* ]]
+  run ! grep -qE "^docker (network create|run)" "$CALLS"
+}
+
+@test "egress_dns_probe: probes from the agent image, control on the outbound network, then the internal one" {
+  WITH_EGRESS_ALLOWLIST=1 HOST_UID=1000 HOST_GID=1000 IMAGE=claude-code:local
+  EGRESS_NETWORK=claude-egress-x EGRESS_OUT_NETWORK=claude-egress-out-x
+  EGRESS_PROBE_CONTROL=claude-egress-proxy-x-probe-control EGRESS_PROBE_CHECK=claude-egress-proxy-x-probe-check
+  egress_dns_probe
+  [ "$(grep -c '^docker run' "$CALLS")" = 2 ]
+  grep -q "^docker run --rm --name claude-egress-proxy-x-probe-control --network claude-egress-out-x --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --entrypoint node claude-code:local -e .*Resolver.*timeout:3000,tries:1.*example.org" "$CALLS"
+  [ "$(sed -n 2p "$CALLS" | cut -d' ' -f1-7)" = "docker run --rm --name claude-egress-proxy-x-probe-check --network claude-egress-x" ]
+  # Both names are under the stopped-only prune's prefix.
+  [[ "$EGRESS_PROBE_CONTROL" == claude-egress-proxy-* && "$EGRESS_PROBE_CHECK" == claude-egress-proxy-* ]]
+}
+
+@test "egress_dns_probe: only an answer without an address passes" {
+  WITH_EGRESS_ALLOWLIST=1 EGRESS_PROBE_CONTROL=c-probe-control EGRESS_PROBE_CHECK=c-probe-check
+  local code
+  for code in ENOTFOUND EREFUSED ESERVFAIL ENODATA; do
+    STUB_PROBE_CHECK="ERR $code"
+    egress_dns_probe
+  done
+  for code in "ADDR 93.184.215.14" "ERR ETIMEOUT" "ERR ECONNREFUSED" "ERR EOTHER" ""; do
+    STUB_PROBE_CHECK="$code"
+    run egress_dns_probe
+    [ "$status" -eq 1 ] || { echo "passed: '$code'"; return 1; }
+    [[ "$output" == *DNS* ]]
+  done
+  STUB_PROBE_CHECK="ADDR 93.184.215.14"
+  run egress_dns_probe
+  [[ "$output" == *"DNS is open"* ]]
+}
+
+@test "egress_dns_probe: a control that doesn't resolve, or can't run, is inconclusive" {
+  WITH_EGRESS_ALLOWLIST=1 EGRESS_PROBE_CONTROL=c-probe-control EGRESS_PROBE_CHECK=c-probe-check
+  local out
+  for out in "ERR ETIMEOUT" "ERR ENOTFOUND" ""; do
+    STUB_PROBE_CONTROL="$out"
+    run egress_dns_probe
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"DNS check is inconclusive"* ]]
+  done
+  STUB_PROBE_CONTROL="ADDR 1.2.3.4" STUB_FAIL="run"
+  run egress_dns_probe
+  [ "$status" -eq 1 ]
+  [ "$(grep -c '^docker run' "$CALLS")" -ge 1 ]
+}
+
+@test "egress_dns_probe: no-op without the flag" {
+  egress_dns_probe
+  [ ! -s "$CALLS" ]
+}
+
+# A main() run of an --egress-allowlist session; $HOME/team.allow holds $1.
+allowlist_main() {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://gw.example.eu
+  STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
+  printf '%s' "$1" >"$HOME/team.allow"
+  shift
+  run_script --ephemeral --api --egress-lock "$@" "$WS"
+}
+
+@test "main: --egress-allowlist probes DNS after the networks and before both sidecars" {
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 0 ]
+  local net ctl chk auth proxy
+  net=$(grep -n "^docker network create --internal" "$CALLS" | cut -d: -f1)
+  ctl=$(grep -n "^docker run --rm --name claude-egress-proxy-.*-probe-control" "$CALLS" | cut -d: -f1)
+  chk=$(grep -n "^docker run --rm --name claude-egress-proxy-.*-probe-check" "$CALLS" | cut -d: -f1)
+  auth=$(grep -n "^docker run -d --name claude-auth-proxy-" "$CALLS" | cut -d: -f1)
+  proxy=$(grep -n "^docker run -d --name claude-egress-proxy-" "$CALLS" | cut -d: -f1)
+  [ "$net" -lt "$ctl" ] && [ "$ctl" -lt "$chk" ] && [ "$chk" -lt "$auth" ] && [ "$auth" -lt "$proxy" ]
+  # The EXIT trap removes both probes by name.
+  grep -q "^docker rm -f claude-egress-proxy-[^ ]*-probe-control claude-egress-proxy-[^ ]*-probe-check$" "$CALLS"
+}
+
+@test "main: a failed DNS check starts no sidecar and cleans up" {
+  STUB_PROBE_CHECK="ADDR 93.184.215.14"
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DNS is open"* ]]
+  run ! grep -q "^docker run -d" "$CALLS"
+  grep -q "^docker network rm claude-egress-" "$CALLS"
+}
+
+@test "main: --egress-allowlist saves the config and the list's evidence" {
+  printf 'pypi.org\n' >"$HOME/real.allow"
+  mkdir -p "$HOME/etc"
+  mv "$HOME/real.allow" "$HOME/etc/team"
+  ln -s "$HOME/etc/team" "$HOME/link.allow"
+  export CLAUDE_DOCKER_ADD_HOSTS=git.corp.example:10.0.0.5
+  allowlist_main "" "--egress-allowlist=$HOME/link.allow"
+  [ "$status" -eq 0 ]
+  local dir="$HOME/.local/state/claude-docker/egress" meta conf
+  meta=$(ls "$dir"/*.meta)
+  conf="${meta%.meta}.conf"
+  grep -qx "allowlist_file=$HOME/etc/team" "$meta"
+  grep -qx "allowlist_sha256=$(sha256sum "$HOME/etc/team" | cut -d' ' -f1)" "$meta"
+  grep -q "^allowlist_add_hosts=.*git.corp.example:10.0.0.5" "$meta"
+  grep -q "^allowlist_add_hosts=.*claude-docker-api-proxy:10.0.0.2" "$meta"
+  [ "$(grep -c '^[a-z_0-9]*=' "$meta")" -eq 13 ]
+  # The config the proxy was started with, owner-only.
+  cmp "$conf" "$STUB_SQUID_CONF"
+  [ "$(stat -c %a "$conf")" = 600 ]
+  grep -qx "acl egress_allowed_names dstdomain -n pypi.org" "$conf"
+}
+
+@test "main: --gh sidecar hosts are in the allowlist evidence" {
+  export GH_TOKEN=t
+  allowlist_main ".github.com" --gh "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 0 ]
+  grep -q "^allowlist_add_hosts=github.com:10.0.0.2 api.github.com:10.0.0.2 uploads.github.com:10.0.0.2 " \
+    "$HOME"/.local/state/claude-docker/egress/*.meta
+}
+
+@test "main: without --egress-allowlist, the same meta keys and no .conf, env var or not" {
+  local v
+  for v in "" /nonexistent; do
+    rm -rf "$HOME/.local/state"
+    : >"$CALLS"
+    if [ -n "$v" ]; then export CLAUDE_DOCKER_EGRESS_ALLOWLIST="$v"; fi
+    export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://gw.example.eu
+    STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
+    run_script --ephemeral --api --egress-lock "$WS"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *allowlist* ]]
+    [ "$(grep -c '^[a-z_]*=' "$HOME"/.local/state/claude-docker/egress/*.meta)" -eq 10 ]
+    run ! ls "$HOME"/.local/state/claude-docker/egress/*.conf
+    run ! grep -q -- "-probe-" "$CALLS"
+  done
+}
+
+@test "main: an evidence dir that can't be created aborts before the proxy starts" {
+  : >"$BATS_TEST_TMPDIR/file"
+  export XDG_STATE_HOME="$BATS_TEST_TMPDIR/file/state"
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"could not save the --egress-allowlist squid config to $XDG_STATE_HOME/claude-docker/egress/"* ]]
+  run ! grep -q "^docker run -d --name claude-egress-proxy-" "$CALLS"
+}
+
+@test "main: the saved config survives a failed log copy" {
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 0 ]
+  local conf
+  conf=$(ls "$HOME"/.local/state/claude-docker/egress/*.conf)
+  rm "${conf%.conf}".{log,meta}
+  # Teardown again, now with an engine that can't return the log.
+  egress_started="$(basename "$conf" | cut -d- -f1)" proxy_sid="$(basename "$conf" .conf | cut -d- -f2)"
+  EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress" WITH_EGRESS_ALLOWLIST=1 STUB_FAIL="logs"
+  run egress_save_log
+  [[ "$output" == *"missing or incomplete"* ]]
+  [ -s "$conf" ]
+}
+
+@test "egress_save_log: a .meta that can't be written still lets the trap remove everything" {
+  STUB_LOGS="x"
+  (
+    create_stage
+    egress_started=20260101T000000Z WITH_EGRESS_ALLOWLIST=1
+    mkdir -p "$EGRESS_LOG_DIR/20260101T000000Z-${stage##*.}.meta"
+    echo "${stage##*.}" >"$BATS_TEST_TMPDIR/sid"
+  ) 2>"$BATS_TEST_TMPDIR/stderr"
+  local sid
+  sid=$(cat "$BATS_TEST_TMPDIR/sid")
+  grep -q "could not write" "$BATS_TEST_TMPDIR/stderr"
+  grep -q "^docker rm -f claude-egress-proxy-$sid$" "$CALLS"
+  grep -q "^docker network rm claude-egress-$sid claude-egress-out-$sid$" "$CALLS"
+}
+
+@test "create_stage: a failed probe removal still removes the sidecars and networks" {
+  STUB_FAIL="rm"
+  (
+    create_stage
+    WITH_EGRESS_ALLOWLIST=1
+    echo "${stage##*.}" >"$BATS_TEST_TMPDIR/sid"
+  ) 2>/dev/null
+  local sid
+  sid=$(cat "$BATS_TEST_TMPDIR/sid")
+  grep -q "^docker rm -f claude-egress-proxy-$sid-probe-control claude-egress-proxy-$sid-probe-check$" "$CALLS"
+  grep -q "^docker network rm claude-auth-$sid$" "$CALLS"
+  grep -q "^docker network rm claude-egress-$sid claude-egress-out-$sid$" "$CALLS"
+}
+
+@test "stage_gh_proxy_site: under --egress-allowlist, stages the bytes that were checked" {
+  printf 'route /x { respond 1 }\n' >"$HOME/gh.caddy"
+  allowlist_setup ".github.com"
+  WITH_GH=1 CLAUDE_DOCKER_GH_POLICY="$HOME/gh.caddy"
+  validate_opts
+  # The file changes after the check; the stage gets what was checked.
+  printf 'route /y { respond 2 }\n' >"$HOME/gh.caddy"
+  mkdir -p "$BATS_TEST_TMPDIR/caddy/sites"
+  stage_gh_proxy_site "$BATS_TEST_TMPDIR/caddy"
+  [ "$(cat "$BATS_TEST_TMPDIR/caddy/policy.caddy")" = "route /x { respond 1 }" ]
+}
+
+@test "--help: documents --egress-allowlist and its env var" {
+  local flag env
+  # The flag's own entry: from its name to the next flag.
+  flag=$(print_help | sed -n '/^  --egress-allowlist\[=FILE\]$/,/^  --iterm/p' | sed '$d')
+  [[ "$flag" == *"Needs --egress-lock"* ]]
+  [[ "$flag" == *"FILE"* ]]
+  [[ "$flag" == *"CLAUDE_DOCKER_EGRESS_ALLOWLIST"* ]]
+  env=$(print_help | sed -n '/^  CLAUDE_DOCKER_EGRESS_ALLOWLIST$/,/^  XDG_STATE_HOME/p')
+  [[ "$env" == *"--egress-allowlist"* ]]
+  [[ "$(print_help)" == *"--egress-lock       With --api or --api-direct"* ]]
+}
+
+@test "the squid harness's expected config list matches what these tests write" {
+  local dir="${BATS_TEST_DIRNAME}/../egress-proxy"
+  diff <(sed -e '/^#/d' -e '/^$/d' "$dir/expected-configs.txt" | sort) \
+       <(grep -o '^ *save_for_harness [a-z0-9-][a-z0-9-]*' "$BATS_TEST_FILENAME" \
+         | awk '{print $2 ".conf"}' | sort -u)
 }

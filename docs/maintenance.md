@@ -27,7 +27,11 @@ A weekly GitHub Actions run does the same thing unattended: [`pins-updater.yml`]
 
 `nodejs` (from NodeSource's signed apt repo), the Go toolchain, and the `ubuntu` base-image digest are pinned manually: the script reports base-digest drift and how the Go pin compares to the latest stable release, but does not rewrite either, since moving the base OS is a deliberate, separately-reviewed change. Go stays manual for a different reason — go.dev's release feed carries no publish dates, so the soak window can't be evaluated from it; the pin lives in the Dockerfile as `ARG GO_VERSION` plus a per-arch sha256, and the comment above it carries the exact `curl | jq` to read the new version and both hashes when bumping.
 
+`anchore/scan-action` in `ci.yml` and `image-scan.yml` is pinned to the commit that `docker.yml`'s `mcvs-docker-action` runs, so the PR and publish scans run the same grype (see [Image vulnerability scanning](security.md#image-vulnerability-scanning)). Dependabot ignores it; it moves with `mcvs-docker-action`. When that pin moves, [`tests/test_grype_gate.py`](../tests/test_grype_gate.py) fails until you look up the scan-action commit in the new release's `action.yml`, add the pair to the test, and move both workflows to it.
+
 The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinned manually too, but lives outside this whole mechanism: the digest is a default in `run.sh` (`CLAUDE_DOCKER_PROXY_IMAGE`), not a file under `pins/`, and `update_pins.py` never touches it. That's deliberate — a Caddy upgrade can change Caddyfile directive semantics, i.e. the security-critical config this feature generates, so bumping it means reading the changelog and validating the generated Caddyfile against the new version by hand, not taking an automated version bump on faith.
+
+The [API egress lock](auth.md#api-egress-lock)'s proxy image is the same kind of manual pin: `EGRESS_PROXY_BASE` (an Alpine digest) and `EGRESS_PROXY_SQUID_MIN` (a version floor) in `run.sh`. Users build it on first use, and its tag is the checksum of the Containerfile `run.sh` generates, so changing either value builds a new image. Bumping the base means checking the generated squid config against that Alpine release's squid; the `--egress-lock` CI cells do that against the real image.
 
 ## CI smoke tests
 
@@ -41,7 +45,20 @@ IMAGE=claude-code:local bash tests/smoke/smoke.sh --uid="$(id -u)" --optins=aws,
 
 Each cell starts from `env -i` plus an allowlist, so your own `AWS_*`/`GH_TOKEN`/`CLAUDE_DOCKER_*` never reach it. A cell removes its `smoke-test-*` volumes on exit; a run killed with `SIGKILL` can't, so clean up with `docker volume ls -q --filter name=smoke-test- | xargs -r docker volume rm`.
 
-The GitHub auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy)) has its own harness, [`tests/integration/gh-proxy-integration.sh`](../tests/integration/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock GitHub upstream, credential-free and CI-runnable, since CI has no real GitHub credentials to test against. Without a docker daemon it prints SKIP and exits 0; set `GH_PROXY_IT_REQUIRE_DOCKER=1` to make that a failure instead.
+The auth proxy sidecar (see [GitHub auth proxy](auth.md#github-auth-proxy), [GitLab auth proxy](auth.md#gitlab-auth-proxy), [Custom model endpoint](auth.md#custom-model-endpoint)) has its own harness, [`tests/integration/gh-proxy-integration.sh`](../tests/integration/gh-proxy-integration.sh): it drives `run.sh` end-to-end against a mock upstream standing in for GitHub, GitLab and the model gateway, credential-free and CI-runnable, since CI has no real credentials to test against. Without a docker daemon it prints SKIP and exits 0; set `GH_PROXY_IT_REQUIRE_DOCKER=1` to make that a failure instead. The sidecar's Caddy config is also exercised directly by [`tests/test_auth_proxy_caddyfile.py`](../tests/test_auth_proxy_caddyfile.py), which runs run.sh's own staging into a real Caddy when a `caddy` binary is named by `CADDY_BIN` or on `PATH` (use the version `PROXY_IMAGE` pins) and skips otherwise; with `CLAUDE_DOCKER_TEST_REQUIRE_CADDY=1`, as CI's `validate` job sets, a missing binary fails instead.
+
+The [API egress lock](auth.md#api-egress-lock) has its own `run.sh`-driven cell, [`tests/smoke/egress.sh`](../tests/smoke/egress.sh) (`IMAGE=claude-code:local bash tests/smoke/egress.sh [--gh | --endpoint-port]`), which runs in CI. It checks the following:
+
+- a missing, provider-host or config-smuggling `ANTHROPIC_BASE_URL` aborts startup;
+- the endpoint and other hosts are reachable, while `api.anthropic.com` is refused;
+- a proxy-unaware client has no route out;
+- metadata and loopback destinations are denied;
+- the session log and `.meta` are saved on the host;
+- `--gh` traffic reaches the auth proxy through squid, with the token injected;
+- an endpoint on a port other than 80/443 is allowed, for that endpoint only;
+- Claude Code's managed settings pin the endpoint and are read-only to the agent;
+- squid runs from its own image, and the agent image has none;
+- teardown leaves nothing behind.
 
 ### Manual fallback checklist (macOS)
 
@@ -53,4 +70,5 @@ There is **no automated macOS CI job**: GitHub-hosted `macos-latest` runners can
 - Real AWS SSO (`--aws`) and Terraform Cloud (`--tfe`) reach their endpoints from inside the container via the mounted config.
 - `--iterm` (`tmux -CC`) renders native panes (control mode can't be asserted headlessly).
 - GitHub auth proxy, real credentials: `gh api /user` through the sidecar (`--gh`) returns your real identity while `echo $GH_TOKEN` in the container still shows the placeholder; clone and push a private repo over HTTPS with no credential prompt; `git lfs pull` succeeds through the proxy (batch call on `github.com` gets the injected header, object transfer hits pre-signed hosts unmodified); the statusline tag reads `gh` for a proxied session and `gh-direct` for `--gh-direct`.
+- GitLab and model-endpoint proxy, real credentials: under `--glab`, `glab mr list` and a `git push` over HTTPS to a self-hosted GitLab work with no prompt; under `--api`, a Claude Code session through your gateway streams normally; in both, `printenv | grep -E 'GITLAB|ANTHROPIC'` in the container shows only placeholders and the sidecar URL.
 - GitHub auth proxy, platform parity _(not macOS-specific — grouped here because it's likewise outside the CI harness)_: under podman, sidecar `network create` / `inspect` (reading the sidecar IP) / `cp` (CA extraction) / `--add-host` behave like their docker equivalents; from Git Bash on Windows, the staged Caddyfile and CA-certificate mounts reach `podman.exe`/`docker.exe` with intact paths (same `hostpath()` translation as the rest of the wrapper).

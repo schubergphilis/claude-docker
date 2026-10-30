@@ -1,0 +1,11 @@
+# Every squid config tests/bats/run.bats writes to generated/ (save_for_harness).
+# tests/egress-proxy/harness.sh fails when generated/ holds a different set.
+allowlist-api-direct.conf
+allowlist-empty.conf
+allowlist-ipv4-endpoint.conf
+allowlist-order.conf
+allowlist-overlap.conf
+allowlist-ports.conf
+lock-endpoint-port.conf
+lock-glab.conf
+lock.conf

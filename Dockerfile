@@ -92,6 +92,9 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # but CI's gha cache kept serving this layer with 8.18.0-1ubuntu2.7 (see
 # .trivyignore); naming them changes the RUN, so the layer is rebuilt. Drop
 # them together with the openssl names.
+# libbrotli1 (curl's brotli) is named for CVE-2026-111497, fixed in
+# 1.2.0-3ubuntu0.1. Same stale-cache pattern: a fresh build gets the fix, CI's
+# gha cache served 1.2.0-3build1. Drop at the next base-image bump.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
@@ -108,6 +111,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssl-provider-legacy \
       libcurl4t64 \
       libcurl3t64-gnutls \
+      libbrotli1 \
       git \
       git-lfs \
       tmux \

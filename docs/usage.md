@@ -2,6 +2,70 @@
 
 [← Back to the README](../README.md)
 
+## Container runtime
+
+`claude-docker` runs on **docker or podman**. With no configuration it auto-detects the engine, preferring `docker` and falling back to `podman` — so a podman-only host (including Windows via `podman machine` + WSL backend, and podman-as-docker Linux setups) works with zero setup and never hits `docker: command not found`.
+
+To force an engine, set `CLAUDE_DOCKER_RUNTIME`:
+
+```bash
+CLAUDE_DOCKER_RUNTIME=podman claude-docker ~/repo
+```
+
+The env var is the canonical mechanism: it works everywhere — scripts, CI, editor "run" integrations, and non-interactive shells all inherit it. If you want a shorter interactive spelling, an alias is optional sugar (not a substitute — an alias only resolves at an interactive prompt, so scripts and editors still need the env var):
+
+```bash
+alias claude-podman='CLAUDE_DOCKER_RUNTIME=podman claude-docker'
+```
+
+Only `docker` and `podman` are accepted; any other value is rejected before anything runs. The image build is the engine's own command — `podman build -t claude-code:local .` on a podman host, mirroring the `docker build` line in the [Quickstart](../README.md#quickstart).
+
+**Windows:** run `claude-docker` from PowerShell (via the [`claude-docker.ps1`](../claude-docker.ps1) launcher), WSL2 or Git Bash — see [Windows](windows.md) for setup and the Git Bash specifics.
+
+## Running claude-docker
+
+```bash
+claude-docker                             # current dir as workspace
+claude-docker ~/repo-a ~/repo-b           # multi-workspace
+claude-docker --yolo ~/repo               # alias for --dangerously-skip-permissions
+claude-docker ~/repo -- --resume          # resume a past session (any claude flag goes after --)
+```
+
+`claude-docker --help` (or `-h`) prints every wrapper flag with a one-line explanation — the canonical reference.
+
+Credential flags (`--aws`, `--gh`, …) are covered in [Credential opt-in](auth.md#credential-opt-in).
+
+### Session flags
+
+| Flag          | Effect                                                                                                                      |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `--ephemeral` | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
+| `--ro`        | Mount every workspace read-only. Prevents the agent from modifying your code.                                               |
+
+`--ro` does **not** block credential flags or restrict network egress (only `--egress-lock` and `--egress-allowlist` do, see [API egress lock](auth.md#api-egress-lock) and [Egress allowlist](auth.md#egress-allowlist)) — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
+
+```bash
+claude-docker --ephemeral --ro ~/untrusted-repo
+```
+
+For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](security.md#threat-model) for what it does and doesn't protect.
+
+### Resuming sessions
+
+The container starts `claude` directly, so there is no shell to type `claude --resume` in. Pass the flag through the wrapper instead, after `--`:
+
+```bash
+claude-docker ~/repo -- --resume                # pick from this workspace's sessions
+claude-docker ~/repo -- --resume <session-id>   # resume a specific session
+claude-docker ~/repo -- --continue              # resume the most recent session
+```
+
+Inside a running session, `/resume` opens the same picker. In the picker, `Ctrl+A` lists sessions from every workspace you've used, not just the current one.
+
+Sessions are listed per container path, `/workspaces/<basename>` of the first workspace. A session started from `~/repo` shows up without `Ctrl+A` only when you launch with a first workspace named `repo` again; two host directories with the same basename share one list.
+
+Conversation history persists in the shared `claude-code-home` volume. Under `--ephemeral` it doesn't, so there is nothing to resume.
+
 ## Host config parity
 
 On every run, these items are dereferenced (symlinks resolved) and bind-mounted read-only into the container at the equivalent `/root/.claude/` path:
@@ -38,7 +102,7 @@ The chosen dir takes the place of `~/.claude` for every item in the parity table
 
 ### Statusline tag for active opt-ins
 
-`run.sh` exports `CLAUDE_DOCKER_FLAGS` into the container with the comma-separated list of active opt-ins (`aws`, `gh`, `gh-direct`, `glab`, `tfe`, `az`, `registry`, `api`, `ephemeral`, `ro`) and wraps the host statusline script so a yellow `docker:<flags>` tag is prepended to whatever your personal statusline renders. The variable is set by the wrapper for the statusline to read — not a user-tunable knob. `--yolo` / `--dangerously-skip-permissions` is not surfaced here — Claude Code's own mode indicator already makes it obvious. The wrapper is a no-op passthrough when no opt-ins are active, so your statusline looks unchanged on a plain `claude-docker ~/repo`.
+`run.sh` exports `CLAUDE_DOCKER_FLAGS` into the container with the comma-separated list of active opt-ins (`aws`, `gh`, `gh-direct`, `glab`, `glab-direct`, `tfe`, `az`, `registry`, `api`, `api-direct`, `egress-lock`, `ephemeral`, `ro`) and wraps the host statusline script so a yellow `docker:<flags>` tag is prepended to whatever your personal statusline renders. The variable is set by the wrapper for the statusline to read — not a user-tunable knob. `--yolo` / `--dangerously-skip-permissions` is not surfaced here — Claude Code's own mode indicator already makes it obvious. The wrapper is a no-op passthrough when no opt-ins are active, so your statusline looks unchanged on a plain `claude-docker ~/repo`.
 
 The image sets `IS_SANDBOX=1` — historically required to let `--yolo` / `--dangerously-skip-permissions` work when claude ran as root. The entrypoint now drops to the host UID before exec'ing claude, so the root-user check no longer triggers in steady state; `IS_SANDBOX=1` remains as a safety net for the legacy `HOST_UID=0` fall-through path. OS-level hardening comes from `--cap-drop ALL` (with `CHOWN`, `SETUID`, `SETGID`, `DAC_READ_SEARCH` re-added for transient entrypoint use only), `--security-opt no-new-privileges`, the Docker default seccomp profile, `--init` (tini reaps subprocess zombies), and the bind-mount layout. See [File ownership](#file-ownership) below and [Threat model](security.md#threat-model).
 
@@ -89,7 +153,7 @@ The container uses the host's DNS server but not the host's `/etc/hosts`, so a f
 export CLAUDE_DOCKER_ADD_HOSTS=gitlab.example.com:10.1.2.3,devops.example.com:10.1.2.4
 ```
 
-Each entry is passed to the runtime as `--add-host`, and so lands in the container's `/etc/hosts`; the `--gh` auth-proxy sidecar gets them too. Under `--gh`, entries for `github.com`, `api.github.com` and `uploads.github.com` are skipped for the agent container with a warning, since those must resolve to the sidecar. An entry that isn't `host:ip` stops `claude-docker` before any container starts.
+Each entry is passed to the runtime as `--add-host`, and so lands in the container's `/etc/hosts`; the `--gh` auth-proxy sidecar gets them too, and so does the `--egress-lock` proxy, which resolves every name the session connects to. Under `--egress-allowlist` an entry decides where a listed name connects, not whether it may: the name must still be on the [allowlist](auth.md#egress-allowlist), and the session's `.meta` records the entries. Under `--gh`, entries for `github.com`, `api.github.com` and `uploads.github.com` are skipped for the agent container with a warning, since those must resolve to the sidecar. An entry that isn't `host:ip` stops `claude-docker` before any container starts.
 
 ## Pasting images
 

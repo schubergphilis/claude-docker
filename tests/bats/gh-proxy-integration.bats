@@ -2,10 +2,11 @@
 # Unit tests for tests/integration/gh-proxy-integration.sh's helpers; docker, script and
 # timeout are stubbed, so no daemon is needed.
 #
-# Not unit-tested here: phase1_main_session, phase2_concurrent and
-# phase3_flags. They are the harness's end-to-end scenarios — real run.sh,
-# real sidecar, real containers — and stubbing docker away leaves nothing of
-# them to test. They are exercised by running the harness itself (#10).
+# Not unit-tested here: phase1_main_session, phase2_concurrent, phase3_flags,
+# phase5_glab_api and phase6_glab_api_fail_closed. They are the harness's
+# end-to-end scenarios — real run.sh, real sidecar, real containers — and
+# stubbing docker away leaves nothing of them to test. They are exercised by
+# running the harness itself (#10).
 
 SUT="${BATS_TEST_DIRNAME}/../integration/gh-proxy-integration.sh"
 
@@ -58,29 +59,36 @@ SKIP: lbl: c" ]
   grep -q "FAIL: lbl: results file missing" "$SCRATCH/out"
 }
 
-@test "new_claude_gh_leftovers ignores the baseline" {
-  # Both read by new_claude_gh_leftovers.
+@test "new_claude_auth_leftovers ignores the baseline" {
+  # Both read by new_claude_auth_leftovers.
   # shellcheck disable=SC2034
-  BASELINE_NETS=" claude-gh-live " BASELINE_SIDECARS=" claude-gh-proxy-live "
-  NETS="claude-gh-live claude-gh-new"
-  SIDECARS="claude-gh-proxy-live claude-gh-proxy-new"
-  run new_claude_gh_leftovers
-  [ "$output" = "net:claude-gh-new container:claude-gh-proxy-new" ]
-  NETS="claude-gh-live" SIDECARS="claude-gh-proxy-live"
-  run new_claude_gh_leftovers
+  BASELINE_NETS=" claude-auth-live " BASELINE_SIDECARS=" claude-auth-proxy-live "
+  NETS="claude-auth-live claude-auth-new"
+  SIDECARS="claude-auth-proxy-live claude-auth-proxy-new"
+  run new_claude_auth_leftovers
+  [ "$output" = "net:claude-auth-new container:claude-auth-proxy-new" ]
+  NETS="claude-auth-live" SIDECARS="claude-auth-proxy-live"
+  run new_claude_auth_leftovers
   [ -z "$output" ]
 }
 
+@test "sweep_stale_claude_auth also sweeps the legacy claude-gh prefix" {
+  sweep_stale_claude_auth
+  grep -q 'name=^claude-auth-proxy-' "$DOCKER_LOG"
+  grep -q 'name=^claude-gh-proxy-' "$DOCKER_LOG"
+  grep -q 'network ls -q --filter name=^claude-gh-' "$DOCKER_LOG"
+}
+
 @test "poll_new_network returns the first network not excluded" {
-  NETS="claude-gh-old claude-gh-new"
-  run poll_new_network 1 "claude-gh-old"
+  NETS="claude-auth-old claude-auth-new"
+  run poll_new_network 1 "claude-auth-old"
   [ "$status" -eq 0 ]
-  [ "$output" = "claude-gh-new" ]
+  [ "$output" = "claude-auth-new" ]
 }
 
 @test "poll_new_network fails when nothing new appears" {
-  NETS="claude-gh-old"
-  run poll_new_network 3 "claude-gh-old"
+  NETS="claude-auth-old"
+  run poll_new_network 3 "claude-auth-old"
   [ "$status" -eq 1 ]
   [ -z "$output" ]
   [ "$(grep -c 'network ls' "$DOCKER_LOG")" -eq 3 ]
@@ -339,18 +347,18 @@ exit_through_cleanup() {
 
 @test "start_concurrent_session backgrounds run.sh and finds its network" {
   run_wrapped() { echo "$*" > "$SCRATCH/wrapped"; }
-  poll_new_network() { echo claude-gh-new; }
+  poll_new_network() { echo claude-auth-new; }
   RUN_SH=/x/run.sh TARGET_IMAGE=img
   start_concurrent_session ws-a ghp_a
   wait "$PID"
-  [ "$NET" = claude-gh-new ]
+  [ "$NET" = claude-auth-new ]
   [ "${BG_PIDS[0]}" = "$PID" ]
   [[ "$(cat "$SCRATCH/wrapped")" == "$SCRATCH/run-ws-a.log env GH_TOKEN=ghp_a "*"bash /x/run.sh --gh $SCRATCH/ws-a" ]]
 }
 
-@test "capture_baseline records live claude-gh resources" {
-  NETS="claude-gh-live" SIDECARS="claude-gh-proxy-live"
+@test "capture_baseline records live claude-auth resources" {
+  NETS="claude-auth-live" SIDECARS="claude-auth-proxy-live"
   capture_baseline > /dev/null
-  [[ "$BASELINE_NETS" == *claude-gh-live* ]]
-  [[ "$BASELINE_SIDECARS" == *claude-gh-proxy-live* ]]
+  [[ "$BASELINE_NETS" == *claude-auth-live* ]]
+  [[ "$BASELINE_SIDECARS" == *claude-auth-proxy-live* ]]
 }

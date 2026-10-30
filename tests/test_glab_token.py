@@ -2,10 +2,13 @@
 # Copyright 2026 Schuberg Philis
 """Drive run.sh with stub `docker` and `glab` to pin --glab token discovery.
 
-With GITLAB_TOKEN unset, --glab asks host glab for a token (GITLAB_HOST, else
-the workspace's origin host -- resolved through worktrees -- then glab's default
-host) and forwards it by bare name, never on argv. An explicit GITLAB_TOKEN
-wins; finding none, or no glab on PATH, warns.
+With GITLAB_TOKEN unset, --glab / --glab-direct ask host glab for a token
+(GITLAB_HOST, else the workspace's origin host -- resolved through worktrees --
+then glab's default host). An explicit GITLAB_TOKEN wins; finding none, or no
+glab on PATH, warns. Discovery is shared, so it is pinned once, under
+--glab-direct, where the token is forwarded by bare name, never on argv.
+Under --glab the token goes to the auth-proxy sidecar instead and the agent
+container gets a placeholder (GlabProxied below).
 
 Stdlib only, so CI's unit-test step keeps running with no install step.
 """
@@ -19,10 +22,26 @@ from pathlib import Path
 RUN_SH = Path(__file__).resolve().parent.parent / "run.sh"
 SECRET = "glpat-from-host-glab"
 
-# Records `run` invocations: argv plus the value docker would read for
-# GITLAB_TOKEN. Every other subcommand (stale-sidecar sweep) is a silent no-op.
+# Records the agent `run --rm`: argv plus the values docker would read for
+# GITLAB_TOKEN / GITLAB_HOST. The sidecar `run -d` is recorded separately, and
+# the subcommands start_auth_sidecar polls answer as a healthy sidecar would.
+# Everything else (stale-sidecar sweep, network) is a silent no-op.
 DOCKER = """#!/bin/sh
-[ "$1" = run ] || exit 0
+case "$1" in
+  logs) echo '{"msg":"serving initial configuration"}'; exit 0 ;;
+  cp) echo CA > "$3"; exit 0 ;;
+  ps) [ "$2" = "-q" ] && echo cid; exit 0 ;;
+  inspect) echo 10.0.0.2; exit 0 ;;
+  run) ;;
+  *) exit 0 ;;
+esac
+if [ "$2" = "-d" ]; then
+  printf '%s\\n' "$@" > "$STUB_LOG/sidecar-argv"
+  printf '%s' "${GLAB_PROXY_BEARER:-}" > "$STUB_LOG/sidecar-bearer"
+  printf '%s' "${GLAB_PROXY_SITE:-}" > "$STUB_LOG/sidecar-site"
+  for a; do case "$a" in *:/etc/caddy:ro) cp -R "${a%%:*}" "$STUB_LOG/caddy" ;; esac; done
+  exit 0
+fi
 printf '%s\\n' "$@" > "$STUB_LOG/argv"
 printf '%s' "${GITLAB_TOKEN:-}" > "$STUB_LOG/token"
 printf '%s' "${GITLAB_HOST:-}" > "$STUB_LOG/host"
@@ -66,7 +85,7 @@ class GlabTokenDiscovery(unittest.TestCase):
         subprocess.run(["git", "init", "-q", str(path)], check=True)
         subprocess.run(["git", "-C", str(path), "remote", "add", "origin", origin], check=True)
 
-    def _run(self, drop=(), path="/usr/bin:/bin", **extra):
+    def _run(self, drop=(), path="/usr/bin:/bin", flag="--glab-direct", **extra):
         env = {
             "PATH": f"{self.bin}:{path}",
             "HOME": str(self.home),
@@ -78,7 +97,7 @@ class GlabTokenDiscovery(unittest.TestCase):
         for k in drop:
             env.pop(k)
         r = subprocess.run(
-            ["bash", str(RUN_SH), "--glab", str(self.ws)],
+            ["bash", str(RUN_SH), flag, str(self.ws)],
             env=env, capture_output=True, text=True, timeout=60,
         )
         self.assertEqual(r.returncode, 0, r.stderr)
@@ -227,6 +246,58 @@ class GlabTokenDiscovery(unittest.TestCase):
     def test_unresolvable_git_pointer_skipped(self):
         (self.ws / ".git").write_text("gitdir: /nonexistent/claude-docker-test\n")
         self._assert_only_default_tried()
+
+
+class GlabProxied(unittest.TestCase):
+    """--glab: same discovery, but the token stays in the sidecar."""
+
+    # Same fixtures; not a subclass, so the discovery cases don't run twice.
+    setUp = GlabTokenDiscovery.setUp
+    tearDown = GlabTokenDiscovery.tearDown
+    _run = GlabTokenDiscovery._run
+
+    def _proxied(self, **extra):
+        argv, token = self._run(flag="--glab", **extra)
+        side = (self.log / "sidecar-argv").read_text().splitlines()
+        return argv, token, side
+
+    def test_token_reaches_only_the_sidecar(self):
+        argv, token, side = self._proxied()
+        self.assertEqual(token, "")  # docker reads no real GITLAB_TOKEN for the agent
+        self.assertIn("GITLAB_TOKEN=claude-docker-proxy", argv)
+        self.assertNotIn("GITLAB_TOKEN", argv)
+        self.assertEqual((self.log / "sidecar-bearer").read_text(), f"Bearer {SECRET}")
+        self.assertEqual((self.log / "sidecar-site").read_text(), "gl.example.com")
+        self.assertIn("gl.example.com:10.0.0.2", argv)
+        self.assertFalse(any(SECRET in a for a in argv + side))
+        self.assertNotIn(SECRET, "".join(f.read_text() for f in (self.log / "caddy").rglob("*") if f.is_file()))
+        self.assertIn("auth-proxy sidecar", self.stderr)
+
+    def test_explicit_token_reaches_only_the_sidecar(self):
+        argv, _, _ = self._proxied(GITLAB_TOKEN="glpat-explicit")
+        self.assertEqual((self.log / "sidecar-bearer").read_text(), "Bearer glpat-explicit")
+        self.assertIn("GITLAB_TOKEN=claude-docker-proxy", argv)
+
+    def test_port_is_kept_for_site_and_dropped_for_add_host(self):
+        argv, _, _ = self._proxied(GITLAB_HOST="port.example.com:8443")
+        self.assertEqual((self.log / "sidecar-site").read_text(), "port.example.com:8443")
+        self.assertIn("port.example.com:10.0.0.2", argv)
+
+    def test_config_copy_has_no_tokens(self):
+        cfg = self.home / ".config" / "glab-cli" / "config.yml"
+        cfg.write_text("hosts:\n  gl.example.com:\n    token: glpat-in-file\n    use_keyring: true\n"
+                       "  gitlab.com:\n    token: glpat-other-in-file\n")
+        self._proxied()
+        copy = (self.log / "glab-config.yml").read_text()
+        self.assertNotIn("glpat-in-file", copy)
+        self.assertNotIn("glpat-other-in-file", copy)
+        self.assertIn("    use_keyring: false\n", copy)
+
+    def test_no_token_starts_no_sidecar(self):
+        argv, _ = self._run(flag="--glab", drop=("GITLAB_HOST",))
+        self.assertFalse((self.log / "sidecar-argv").exists())
+        self.assertFalse(any("GITLAB_TOKEN" in a for a in argv))
+        self.assertIn("no GitLab token found", self.stderr)
 
 
 if __name__ == "__main__":
