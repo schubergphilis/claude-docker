@@ -9,6 +9,8 @@ setup() {
   bats_require_minimum_version 1.5.0
   # shellcheck source=../../run.sh
   source "${BATS_TEST_DIRNAME}/../../run.sh"
+  # What main does first: on macOS the open-file check is inode-only.
+  init_shell
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME"
   CALLS="$BATS_TEST_TMPDIR/calls"
@@ -70,6 +72,11 @@ setup() {
   sleep() { :; }
   WS="$BATS_TEST_TMPDIR/repo"
   mkdir -p "$WS"
+}
+
+# Race tests start a background swapper; never leave it running.
+teardown() {
+  [ -z "${SWAPPER:-}" ] || kill "$SWAPPER" 2>/dev/null || true
 }
 
 # Newline-joined array, for substring assertions.
@@ -574,14 +581,17 @@ http_access allow all" ]
   WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/repo-link") WORKSPACES_RO=(0 1)
   run build_workspace_mounts
   [ "$status" -eq 1 ]
-  [ "$output" = "claude-docker: workspaces '$WS' and '$BATS_TEST_TMPDIR/repo-link' are the same directory, one read-write and one read-only; pass it once" ]
+  # After the notice that the second workspace is a symlink.
+  [ "${lines[-1]}" = "claude-docker: workspaces '$WS' and '$BATS_TEST_TMPDIR/repo-link' are the same directory, one read-write and one read-only; pass it once" ]
 }
 
-@test "build_workspace_mounts: one directory through a symlink in the same mode still mounts" {
+@test "build_workspace_mounts: one directory through a symlink in the same mode is refused" {
+  # Workspaces are mounted by their physical path, so both would be one mount.
   ln -s "$WS" "$BATS_TEST_TMPDIR/repo-link"
   WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/repo-link")
   run build_workspace_mounts
-  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ "$status" -eq 1 ]
+  [ "${lines[-1]}" = "claude-docker: workspaces '$WS' and '$BATS_TEST_TMPDIR/repo-link' are the same directory; pass it once" ]
 }
 
 @test "build_workspace_mounts: the same path twice gets its own error" {
@@ -1647,17 +1657,181 @@ USER squid" ]
 
 # --- stage_host_config ---
 
-@test "stage_host_config: follows a symlink chain to the real dir" {
+@test "stage_host_config: follows one symlink to the real dir" {
+  CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$CLAUDE_CONFIG_DIR" "$stage" "$BATS_TEST_TMPDIR/real/skills"
+  echo hi >"$BATS_TEST_TMPDIR/real/skills/s.md"
+  ln -s ../real/skills "$CLAUDE_CONFIG_DIR/skills"
+  stage_host_config
+  [ "$(cat "$stage/skills/s.md")" = hi ]
+  [ ! -L "$stage/skills" ]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/skills:/root/.claude/skills:ro"* ]]
+}
+
+@test "stage_host_config: a symlink chain is refused with a warning" {
   CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
   stage="$BATS_TEST_TMPDIR/stage"
   mkdir -p "$CLAUDE_CONFIG_DIR" "$stage" "$BATS_TEST_TMPDIR/real/skills"
   echo hi >"$BATS_TEST_TMPDIR/real/skills/s.md"
   ln -s real/skills "$BATS_TEST_TMPDIR/hop"
   ln -s ../hop "$CLAUDE_CONFIG_DIR/skills"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"skipping $CLAUDE_CONFIG_DIR/skills"* ]]
+  [ ! -e "$stage/skills" ]
+}
+
+# A skill linked from a repo the user also opens as a workspace: the session
+# can plant links in that repo, so only links that stay inside it survive.
+setup_linked_skill() {
+  CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
+  stage="$BATS_TEST_TMPDIR/stage"
+  SECRET="$BATS_TEST_TMPDIR/secret"
+  REPO="$BATS_TEST_TMPDIR/repo-skills/foo"
+  mkdir -p "$CLAUDE_CONFIG_DIR/skills" "$stage" "$REPO/lib" "$SECRET"
+  echo key >"$SECRET/id_ed25519"
+  echo body >"$REPO/SKILL.md"
+  printf '#!/bin/sh\n' >"$REPO/lib/run.sh"
+  chmod +x "$REPO/lib/run.sh"
+  ln -s "$REPO" "$CLAUDE_CONFIG_DIR/skills/foo"
+}
+
+@test "stage_host_config: a linked skill is copied, internal links kept" {
+  setup_linked_skill
+  ln -s lib/run.sh "$REPO/entry"
+  ln -s ../SKILL.md "$REPO/lib/up"
   stage_host_config
-  [ "$(cat "$stage/skills/s.md")" = hi ]
-  [ ! -L "$stage/skills" ]
-  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/skills:/root/.claude/skills:ro"* ]]
+  [ "$(cat "$stage/skills/foo/SKILL.md")" = body ]
+  [ -x "$stage/skills/foo/lib/run.sh" ]
+  [ "$(readlink "$stage/skills/foo/entry")" = lib/run.sh ]
+  [ "$(cat "$stage/skills/foo/lib/up")" = body ]
+}
+
+@test "stage_host_config: a linked skill's .git is not copied" {
+  setup_linked_skill
+  mkdir -p "$REPO/.git/objects"
+  echo obj >"$REPO/.git/objects/x"
+  echo hidden >"$REPO/.hidden"
+  stage_host_config
+  [ ! -e "$stage/skills/foo/.git" ]
+  [ "$(cat "$stage/skills/foo/.hidden")" = hidden ]
+}
+
+@test "stage_host_config: links planted inside a linked skill are not followed" {
+  setup_linked_skill
+  ln -s "$SECRET/id_ed25519" "$REPO/abs"
+  ln -s ../../secret/id_ed25519 "$REPO/rel"
+  ln -s ../.. "$REPO/lib/root"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  ! grep -rq key "$stage"
+  [ ! -e "$stage/skills/foo/abs" ] && [ ! -e "$stage/skills/foo/rel" ] && [ ! -e "$stage/skills/foo/lib/root" ]
+  [[ "$stderr" == *"$REPO/abs"* ]]
+  [ "$(cat "$stage/skills/foo/SKILL.md")" = body ]
+}
+
+@test "stage_host_config: an item that is a link gives its entries no hop" {
+  # skills -> a dotfiles repo the user also opens as a workspace: a link the
+  # session plants in there must not reach a host directory.
+  CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
+  stage="$BATS_TEST_TMPDIR/stage"
+  SECRET="$BATS_TEST_TMPDIR/secret"
+  DOT="$BATS_TEST_TMPDIR/dotfiles/skills"
+  mkdir -p "$CLAUDE_CONFIG_DIR" "$stage" "$SECRET" "$DOT/foo"
+  echo key >"$SECRET/id_ed25519"
+  echo body >"$DOT/foo/SKILL.md"
+  ln -s "$DOT" "$CLAUDE_CONFIG_DIR/skills"
+  ln -s "$SECRET" "$DOT/x"
+  ln -s foo "$DOT/alias"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  ! grep -rq key "$stage"
+  [ ! -e "$stage/skills/x" ]
+  [[ "$stderr" == *"skipping $DOT/x"* ]]
+  [ "$(cat "$stage/skills/foo/SKILL.md")" = body ]
+  [ "$(readlink "$stage/skills/alias")" = foo ]
+}
+
+@test "stage_host_config: a kept link whose target starts with - is recreated" {
+  setup_linked_skill
+  echo notes >"$REPO/-notes.md"
+  ln -s -- -notes.md "$REPO/dash"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  [ "$(readlink "$stage/skills/foo/dash")" = -notes.md ]
+  [ "$(cat "$stage/skills/foo/SKILL.md")" = body ]
+}
+
+@test "stage_host_config: a trailing-slash link to a skill swapped for a link is refused" {
+  setup_linked_skill
+  rm "$CLAUDE_CONFIG_DIR/skills/foo"
+  ln -s "$REPO/" "$CLAUDE_CONFIG_DIR/skills/foo"
+  rm -rf "$REPO"
+  ln -s "$SECRET" "$REPO"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  ! grep -rq key "$stage"
+  [[ "$stderr" == *"skipping"*"skills/foo"* ]]
+}
+
+@test "stage_host_config: identity checks that never match skip items, not the launch" {
+  # Stands in for a platform whose stat reports inodes differently (Git Bash).
+  setup_linked_skill
+  echo rules >"$CLAUDE_CONFIG_DIR/CLAUDE.md"
+  file_id() { echo 0:0; }
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"skipping"* ]]
+  [ ! -e "$stage/skills" ] && [ ! -e "$stage/CLAUDE.md" ]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *"/root/.claude/skills"* ]]
+}
+
+@test "one_hop: strips trailing slashes, refuses . and .. targets" {
+  mkdir -p "$BATS_TEST_TMPDIR/t"
+  ln -s "$BATS_TEST_TMPDIR/t//" "$BATS_TEST_TMPDIR/slash"
+  [ "$(one_hop "$BATS_TEST_TMPDIR/slash")" = "$BATS_TEST_TMPDIR/t" ]
+  ln -s "$BATS_TEST_TMPDIR/t/." "$BATS_TEST_TMPDIR/dot"
+  ln -s "$BATS_TEST_TMPDIR/t/.." "$BATS_TEST_TMPDIR/dotdot"
+  ! one_hop "$BATS_TEST_TMPDIR/dot"
+  ! one_hop "$BATS_TEST_TMPDIR/dotdot"
+}
+
+@test "stage_host_config: a linked skill swapped for a link is refused" {
+  setup_linked_skill
+  rm -rf "$REPO"
+  ln -s "$SECRET" "$REPO"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  ! grep -rq key "$stage"
+  [[ "$stderr" == *"skipping"*"skills/foo"* ]]
+}
+
+@test "stage_host_config: CLAUDE.md and settings are staged copies, one hop" {
+  CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$CLAUDE_CONFIG_DIR" "$stage" "$BATS_TEST_TMPDIR/dotfiles"
+  echo rules >"$BATS_TEST_TMPDIR/dotfiles/CLAUDE.md"
+  ln -s ../dotfiles/CLAUDE.md "$CLAUDE_CONFIG_DIR/CLAUDE.md"
+  echo '{}' >"$CLAUDE_CONFIG_DIR/settings.docker.json"
+  stage_host_config
+  [ "$(cat "$stage/CLAUDE.md")" = rules ]
+  [ "$(cat "$stage/settings.docker.json")" = '{}' ]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/CLAUDE.md:/root/.claude/CLAUDE.md:ro"* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/settings.docker.json:/run/claude-docker/settings.json:ro"* ]]
+}
+
+@test "stage_host_config: CLAUDE.md through a second link is refused" {
+  CLAUDE_CONFIG_DIR="$BATS_TEST_TMPDIR/cfg"
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$CLAUDE_CONFIG_DIR" "$stage" "$BATS_TEST_TMPDIR/dotfiles"
+  echo key >"$BATS_TEST_TMPDIR/secret"
+  ln -s ../secret "$BATS_TEST_TMPDIR/dotfiles/CLAUDE.md"
+  ln -s ../dotfiles/CLAUDE.md "$CLAUDE_CONFIG_DIR/CLAUDE.md"
+  run --separate-stderr stage_host_config
+  [ "$status" -eq 0 ]
+  [ ! -e "$stage/CLAUDE.md" ]
+  [[ "$stderr" == *"skipping $CLAUDE_CONFIG_DIR/CLAUDE.md"* ]]
 }
 
 @test "stage_host_config: a symlink cycle is skipped, not looped on" {
@@ -1686,7 +1860,8 @@ run_statusline() {
   chmod +x "$CLAUDE_CONFIG_DIR/statusline-command.sh"
   stage_host_config
   [ -x "$stage/statusline-command.sh" ]
-  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"statusline-command.sh:/root/.claude/statusline-command.original.sh:ro"* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/statusline-command.original.sh:/root/.claude/statusline-command.original.sh:ro"* ]]
+  [ -x "$stage/statusline-command.original.sh" ]
   CLAUDE_DOCKER_FLAGS=gh,aws run_statusline "$CLAUDE_CONFIG_DIR/statusline-command.sh"
   [ "$output" = $'\033[33mdocker:gh,aws\033[0m body' ]
   run_statusline "$CLAUDE_CONFIG_DIR/statusline-command.sh"
@@ -1724,6 +1899,178 @@ run_statusline() {
   stage_git_overlays
   [ ! -e "$stage/git-config-repo" ]
   [ "${#MOUNT_ARGS[@]}" -eq 0 ]
+}
+
+@test "stage_git_overlays: a refused .git/config warns; no repo stays quiet" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage" "$WS/.git" "$BATS_TEST_TMPDIR/norepo"
+  ln -s /etc/hostname "$WS/.git/config"
+  SEEN_NAMES=(repo norepo) SEEN_PATHS=("$WS" "$BATS_TEST_TMPDIR/norepo")
+  run --separate-stderr stage_git_overlays
+  [ "$status" -eq 0 ]
+  [ "$stderr" = "claude-docker: no .git/config overlay for $WS: it is a symlink, or changed while being read; git in the container uses the host file" ]
+}
+
+@test "stage_git_overlays: a stage write error stops the launch, without the symlink warning" {
+  [ "$(id -u)" != 0 ] || skip "root can write a read-only directory"
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage" "$WS/.git"
+  echo "[core]" >"$WS/.git/config"
+  chmod 500 "$stage"
+  SEEN_NAMES=(repo) SEEN_PATHS=("$WS")
+  run --separate-stderr stage_git_overlays
+  chmod 700 "$stage"
+  [ "$status" -eq 1 ]
+  [[ "$stderr" != *"no .git/config overlay"* ]]
+}
+
+@test "stage_git_overlays: a .git dir that is a link to a dir is skipped" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage" "$BATS_TEST_TMPDIR/elsewhere"
+  echo key >"$BATS_TEST_TMPDIR/elsewhere/config"
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$WS/.git"
+  SEEN_NAMES=(repo) SEEN_PATHS=("$WS")
+  stage_git_overlays
+  [ ! -e "$stage/git-config-repo" ]
+  [ "${#MOUNT_ARGS[@]}" -eq 0 ]
+}
+
+@test "stage_git_overlays: only a valid host core.autocrlf is carried" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage" "$WS/.git"
+  echo "[core]" >"$WS/.git/config"
+  SEEN_NAMES=(repo) SEEN_PATHS=("$WS") IS_MSYS=1
+  git() { printf 'true\n[alias]\n\tx = !id\n'; }
+  stage_git_overlays
+  ! grep -q autocrlf "$stage/git-config-repo"
+  ! grep -q alias "$stage/git-config-repo"
+}
+
+# --- cat_nofollow / link_stays_inside ---
+
+@test "cat_nofollow: reads a regular file below the root" {
+  mkdir -p "$WS/.git"
+  echo cfg >"$WS/.git/config"
+  run cat_nofollow "$WS" .git/config
+  [ "$status" -eq 0 ] && [ "$output" = cfg ]
+}
+
+@test "cat_nofollow: an exported CDPATH adds nothing to a relative dir's file" {
+  # A relative --claude-dir reaches cat_nofollow as a relative directory; with
+  # CDPATH set, cd would print it into the staged file. run.sh unsets it.
+  mkdir -p "$BATS_TEST_TMPDIR/myclaude"
+  echo body >"$BATS_TEST_TMPDIR/myclaude/CLAUDE.md"
+  export CDPATH=.
+  run_script_fn "init_shell; cd '$BATS_TEST_TMPDIR' && cat_nofollow myclaude CLAUDE.md"
+  unset CDPATH
+  [ "$status" -eq 0 ] && [ "$output" = body ]
+}
+
+@test "main: init_shell runs first, before anything reads a host file" {
+  [ "$(declare -f main | sed -n '4p' | tr -d ' ;')" = init_shell ]
+}
+
+@test "cat_nofollow: refuses a link at the file or at a directory" {
+  mkdir -p "$BATS_TEST_TMPDIR/sec"
+  echo key >"$BATS_TEST_TMPDIR/sec/config"
+  mkdir -p "$WS/a"
+  ln -s "$BATS_TEST_TMPDIR/sec/config" "$WS/a/config"
+  run cat_nofollow "$WS" a/config
+  [ "$status" -ne 0 ] && [ -z "$output" ]
+  ln -s "$BATS_TEST_TMPDIR/sec" "$WS/b"
+  run cat_nofollow "$WS" b/config
+  [ "$status" -ne 0 ] && [ -z "$output" ]
+}
+
+# The #211 race: a writer keeps swapping $2 between the real thing and a link
+# to the secret's counterpart. The real one is restored by hard link, so its
+# inode holds and reads in between legitimately succeed; none may return the
+# secret. Against the old [ ! -L ] then cp, this leaked in ~half the reads.
+race_reads() {
+  local sec="$BATS_TEST_TMPDIR/sec" target=$1 leaks=0 reads=0
+  (
+    cd "$WS" || exit 1
+    while :; do
+      ln -s "$sec/config" "$target.l" && mv -f "$target.l" "$target"
+      ln -f "$target.keep" "$target.r" && mv -f "$target.r" "$target"
+    done
+  ) 3>&- &
+  SWAPPER=$!
+  for _ in $(seq 600); do
+    if out=$(cat_nofollow "$WS" .git/config); then
+      reads=$((reads + 1))
+      [ "$out" = cfg ] || leaks=$((leaks + 1))
+    fi
+  done
+  kill "$SWAPPER"; wait "$SWAPPER" 2>/dev/null || true
+  echo "# $target: reads=$reads leaks=$leaks" >&3
+  [ "$leaks" -eq 0 ] && [ "$reads" -gt 0 ]
+}
+
+@test "cat_nofollow: never returns a .git/config swapped for a link mid-read" {
+  mkdir -p "$BATS_TEST_TMPDIR/sec" "$WS/.git"
+  echo key >"$BATS_TEST_TMPDIR/sec/config"
+  echo cfg >"$WS/.git/config"
+  ln "$WS/.git/config" "$WS/.git/config.keep"
+  race_reads .git/config
+}
+
+@test "cat_nofollow: never reads through a .git swapped for a link mid-read" {
+  sec="$BATS_TEST_TMPDIR/sec"
+  mkdir -p "$sec" "$WS/.git"
+  echo key >"$sec/config"
+  echo cfg >"$WS/.git/config"
+  # A directory can't be hard-linked: rename it aside and back (same inode).
+  (
+    cd "$WS" || exit 1
+    while :; do
+      mv .git .git.keep && ln -s "$sec" .git
+      rm .git && mv .git.keep .git
+    done
+  ) 3>&- &
+  SWAPPER=$!
+  leaks=0 reads=0
+  for _ in $(seq 600); do
+    if out=$(cat_nofollow "$WS" .git/config); then
+      reads=$((reads + 1))
+      [ "$out" = cfg ] || leaks=$((leaks + 1))
+    fi
+  done
+  kill "$SWAPPER"; wait "$SWAPPER" 2>/dev/null || true
+  echo "# .git: reads=$reads leaks=$leaks" >&3
+  [ "$leaks" -eq 0 ] && [ "$reads" -gt 0 ]
+}
+
+@test "link_stays_inside: relative links that stay in the copy root" {
+  link_stays_inside lib/run.sh 0
+  link_stays_inside ../SKILL.md 1
+  ! link_stays_inside ../x 0
+  ! link_stays_inside ../../x 1
+  ! link_stays_inside /etc/passwd 3
+  ! link_stays_inside a/../../x 2
+  ! link_stays_inside ./x 0
+  ! link_stays_inside .. 0
+}
+
+# --- build_workspace_mounts: symlinked workspace ---
+
+@test "build_workspace_mounts: a symlinked workspace given with trailing slashes is announced" {
+  mkdir -p "$BATS_TEST_TMPDIR/real-target"
+  ln -s "$BATS_TEST_TMPDIR/real-target" "$BATS_TEST_TMPDIR/link-ws"
+  WORKSPACES=("$BATS_TEST_TMPDIR/link-ws//")
+  run --separate-stderr build_workspace_mounts
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"is a symlink; mounting '$BATS_TEST_TMPDIR/real-target'"* ]]
+}
+
+@test "build_workspace_mounts: a symlinked workspace mounts its target, announced" {
+  mkdir -p "$BATS_TEST_TMPDIR/real-target"
+  ln -s "$BATS_TEST_TMPDIR/real-target" "$BATS_TEST_TMPDIR/link-ws"
+  WORKSPACES=("$BATS_TEST_TMPDIR/link-ws")
+  build_workspace_mounts 2>"$BATS_TEST_TMPDIR/err"
+  grep -q "is a symlink; mounting '$BATS_TEST_TMPDIR/real-target'" "$BATS_TEST_TMPDIR/err"
+  [ "${SEEN_NAMES[0]}" = real-target ]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$BATS_TEST_TMPDIR/real-target:/workspaces/real-target"* ]]
 }
 
 # --- build_cmd ---
