@@ -55,6 +55,11 @@ Wrapper flags:
                       volumes. No OAuth token, gh login, shell history, or
                       session history persists across runs.
   --ro                Mount every workspace read-only (review / audit mode).
+  --ro=PATH           Add PATH as a workspace mounted read-only; the others
+                      keep their mode. Repeatable; counts as a workspace, so
+                      pass . too to keep $PWD (`. --ro=../lib`). Not a
+                      sandbox for untrusted content: the agent can still
+                      write what it reads there into the writable workspaces.
   --aws               Opt in to AWS: mount ~/.aws/config + ~/.aws/sso (:ro)
                       and forward AWS_PROFILE / AWS_REGION /
                       AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY /
@@ -218,6 +223,9 @@ EOF
 # Wrapper flags and workspace paths before `--`; verbatim claude flags after.
 # See `print_help` above or `claude-docker --help` for the flag list.
 WORKSPACES=()
+# Parallel to WORKSPACES: 1 for a workspace passed as --ro=PATH. A missing
+# entry reads as 0, so callers may set WORKSPACES alone.
+WORKSPACES_RO=()
 CLAUDE_FLAGS=()
 EPHEMERAL=0
 RO_WORKSPACES=0
@@ -305,7 +313,7 @@ GLAB_POLICY_READ=0
 EGRESS_DNS_CLOSED_CODES="ENOTFOUND EREFUSED ESERVFAIL ENODATA"
 
 parse_args() {
-  local arg saw_sep=0
+  local arg path saw_sep=0
   for arg in "$@"; do
     if [ "$arg" = "--" ]; then saw_sep=1; continue; fi
     if [ "$saw_sep" = "1" ]; then
@@ -316,6 +324,15 @@ parse_args() {
       --yolo)         CLAUDE_FLAGS+=("--dangerously-skip-permissions") ;;
       --ephemeral)    EPHEMERAL=1 ;;
       --ro)           RO_WORKSPACES=1 ;;
+      --ro=*)
+        path="${arg#--ro=}"
+        if [ -z "$path" ]; then
+          echo "claude-docker: --ro= needs a path (--ro=PATH), or use --ro for every workspace" >&2; exit 1
+        fi
+        # The shell does not tilde-expand after `--ro=`; same "~/" rule as CLAUDE_CONFIG_DIR below.
+        # shellcheck disable=SC2088  # literal "~/" is the intended case pattern
+        case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
+        WORKSPACES+=("$path"); WORKSPACES_RO+=(1) ;;
       --aws)          WITH_AWS=1 ;;
       --gh)           WITH_GH=1 ;;
       --gh-direct)    WITH_GH_DIRECT=1 ;;
@@ -333,10 +350,10 @@ parse_args() {
       --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
       --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
       -*)             echo "claude-docker: unknown flag '$arg' (use -- to pass flags to claude)" >&2; exit 1 ;;
-      *)              WORKSPACES+=("$arg") ;;
+      *)              WORKSPACES+=("$arg"); WORKSPACES_RO+=(0) ;;
     esac
   done
-  [ "${#WORKSPACES[@]}" -eq 0 ] && WORKSPACES=("$PWD")
+  if [ "${#WORKSPACES[@]}" -eq 0 ]; then WORKSPACES=("$PWD"); WORKSPACES_RO=(0); fi
 
   # Expand a leading ~/ in CLAUDE_CONFIG_DIR — needed when set via env var, where
   # the shell does not perform tilde expansion. Pattern is "~/" not "~" so a
@@ -1332,14 +1349,15 @@ wait_sidecar() {
 }
 
 build_workspace_mounts() {
-  local ws_suffix ws abs name n i
-  ws_suffix=""
-  [ "$RO_WORKSPACES" = "1" ] && ws_suffix=":ro"
+  local ws_suffix ws abs real shown name n i j k=0
 
   # Parallel arrays (not associative) so macOS system bash 3.2 works.
   # Counter-based iteration avoids ${!arr[@]} which trips set -u on empty arrays.
   SEEN_NAMES=()
   SEEN_PATHS=()
+  SEEN_RO=()
+  SEEN_REAL=()
+  SEEN_SHOWN=()
   for ws in "${WORKSPACES[@]}"; do
     # Checked up front so a typo gets a claude-docker: message, not bash's bare `cd:` error.
     if [ ! -d "$ws" ]; then
@@ -1351,10 +1369,16 @@ build_workspace_mounts() {
     # workspace that is itself a symlink is announced: a session whose
     # workspace holds that link could have pointed it somewhere else. Links
     # higher up (a symlinked /home or /tmp) are common and not announced.
+    # Messages name the workspace as given ($shown), symlinks unresolved.
     abs=$(cd -P "$ws" && pwd -P) || exit 1
+    real="$abs"
+    shown=$(cd "$ws" && pwd) || exit 1
     if [ -L "${ws%/}" ]; then
       echo "claude-docker: workspace '$ws' is a symlink; mounting '$abs'" >&2
     fi
+    ws_suffix=""
+    { [ "$RO_WORKSPACES" = "1" ] || [ "${WORKSPACES_RO[$k]:-0}" = "1" ]; } && ws_suffix=":ro"
+    k=$((k + 1))
     name=$(basename "$abs")
     # Safe: -v/-w/--add-dir all receive the path as a single quoted argv element; only : and empty break docker -v parsing.
     # `/` (or `//`) has basename `/`, which would mount at /workspaces//.
@@ -1366,6 +1390,19 @@ build_workspace_mounts() {
     n=${#SEEN_NAMES[@]}
     i=0
     while [ "$i" -lt "$n" ]; do
+      # The same directory twice, as the same path or through a symlink: mounts
+      # are of the physical path, so both would be one mount. Read-write and
+      # read-only at once gets its own message (the :ro would protect nothing).
+      if [ "${SEEN_PATHS[$i]}" = "$abs" ]; then
+        if [ "${SEEN_SHOWN[$i]}" = "$shown" ]; then
+          echo "claude-docker: workspace '$shown' is given more than once; pass it once, as PATH (read-write) or --ro=PATH (read-only)" >&2
+        elif [ "${SEEN_RO[$i]}" != "${ws_suffix:+1}" ]; then
+          echo "claude-docker: workspaces '${SEEN_SHOWN[$i]}' and '$shown' are the same directory, one read-write and one read-only; pass it once" >&2
+        else
+          echo "claude-docker: workspaces '${SEEN_SHOWN[$i]}' and '$shown' are the same directory; pass it once" >&2
+        fi
+        exit 1
+      fi
       if [ "${SEEN_NAMES[$i]}" = "$name" ]; then
         echo "claude-docker: workspace basename collision — '$abs' and '${SEEN_PATHS[$i]}' both map to /workspaces/$name" >&2
         exit 1
@@ -1374,8 +1411,28 @@ build_workspace_mounts() {
     done
     SEEN_NAMES+=("$name")
     SEEN_PATHS+=("$abs")
+    SEEN_REAL+=("$real")
+    SEEN_SHOWN+=("$shown")
+    SEEN_RO+=("${ws_suffix:+1}")
     MOUNT_ARGS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
     CONTAINER_PATHS+=("/workspaces/$name")
+  done
+
+  # A read-only workspace inside a writable one stays writable through the
+  # writable mount; say so rather than let ro-partial overstate the protection.
+  # Compared with symlinks resolved.
+  n=${#SEEN_PATHS[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    j=0
+    while [ -n "${SEEN_RO[$i]}" ] && [ "$j" -lt "$n" ]; do
+      case "${SEEN_REAL[$i]}" in
+        "${SEEN_REAL[$j]}"/*)
+          [ -z "${SEEN_RO[$j]}" ] && echo "claude-docker: warning: read-only workspace '${SEEN_SHOWN[$i]}' is inside writable workspace '${SEEN_SHOWN[$j]}', so it stays writable under ${CONTAINER_PATHS[$j]}" >&2 ;;
+      esac
+      j=$((j + 1))
+    done
+    i=$((i + 1))
   done
   CWD="${CONTAINER_PATHS[0]}"
 }
@@ -1783,7 +1840,7 @@ forward_git_identity() {
 }
 
 build_flags_env() {
-  local old_ifs DOCKER_FLAGS_CSV
+  local old_ifs DOCKER_FLAGS_CSV ro_count=0 k=0
   # Surface active opt-ins in-container via CLAUDE_DOCKER_FLAGS so the statusline
   # wrapper (below) can tag the session with what was actually granted. Order
   # mirrors the Credential opt-in table in docs/auth.md so the tag reads
@@ -1803,7 +1860,15 @@ build_flags_env() {
   [ "$WITH_API_DIRECT" = "1" ] && DOCKER_FLAGS+=("api-direct")
   [ "$WITH_EGRESS_LOCK" = "1" ] && DOCKER_FLAGS+=("egress-lock")
   [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
-  [ "$RO_WORKSPACES" = "1" ] && DOCKER_FLAGS+=("ro")
+  while [ "$k" -lt "${#WORKSPACES[@]}" ]; do
+    [ "${WORKSPACES_RO[$k]:-0}" = "1" ] && ro_count=$((ro_count + 1))
+    k=$((k + 1))
+  done
+  if [ "$RO_WORKSPACES" = "1" ] || { [ "$ro_count" -gt 0 ] && [ "$ro_count" -eq "${#WORKSPACES[@]}" ]; }; then
+    DOCKER_FLAGS+=("ro")
+  elif [ "$ro_count" -gt 0 ]; then
+    DOCKER_FLAGS+=("ro-partial")
+  fi
   if [ "${#DOCKER_FLAGS[@]}" -gt 0 ]; then
     old_ifs=$IFS; IFS=','; DOCKER_FLAGS_CSV="${DOCKER_FLAGS[*]}"; IFS=$old_ifs
     ENV_ARGS+=("-e" "CLAUDE_DOCKER_FLAGS=$DOCKER_FLAGS_CSV")

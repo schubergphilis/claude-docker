@@ -30,3 +30,4 @@
 - [x] 5.3 `unset CDPATH`, so `cd` into a relative config dir prints nothing into a staged file
 - [x] 5.4 The `.git/config` stage file is created before the read, so a write error stops the launch instead of reading as a refused symlink
 - [x] 5.5 BATS cases for each
+- [x] 5.6 Merged with #240 (`--ro=PATH`): workspaces still mount their physical path; one directory through a symlink in the same mode is refused; messages name the paths as given

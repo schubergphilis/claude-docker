@@ -70,3 +70,10 @@ On Windows hosts, the host's `core.autocrlf` value SHALL be carried into the ove
 - **WHEN** the user runs `claude-docker ~/link-ws`
 - **THEN** `~/real-target` is mounted at `/workspaces/real-target`
 - **AND** stderr names `~/real-target` as the mounted directory
+
+#### Scenario: One directory through a symlink in the same mode is refused
+
+- **GIVEN** `~/repo-link` is a symbolic link to `~/repo`
+- **WHEN** the user runs `claude-docker ~/repo ~/repo-link`
+- **THEN** `run.sh` exits non-zero with a message naming both paths as the same directory, since both would be the same physical mount
+- **AND** no container is started
