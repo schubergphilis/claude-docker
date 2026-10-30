@@ -9,6 +9,8 @@ setup() {
   bats_require_minimum_version 1.5.0
   # shellcheck source=../../run.sh
   source "${BATS_TEST_DIRNAME}/../../run.sh"
+  # What main does first: on macOS the open-file check is inode-only.
+  init_shell
   export HOME="$BATS_TEST_TMPDIR/home"
   mkdir -p "$HOME"
   CALLS="$BATS_TEST_TMPDIR/calls"
@@ -1959,9 +1961,13 @@ run_statusline() {
   mkdir -p "$BATS_TEST_TMPDIR/myclaude"
   echo body >"$BATS_TEST_TMPDIR/myclaude/CLAUDE.md"
   export CDPATH=.
-  run_script_fn "cd '$BATS_TEST_TMPDIR' && cat_nofollow myclaude CLAUDE.md"
+  run_script_fn "init_shell; cd '$BATS_TEST_TMPDIR' && cat_nofollow myclaude CLAUDE.md"
   unset CDPATH
   [ "$status" -eq 0 ] && [ "$output" = body ]
+}
+
+@test "main: init_shell runs first, before anything reads a host file" {
+  [ "$(declare -f main | sed -n '4p' | tr -d ' ;')" = init_shell ]
 }
 
 @test "cat_nofollow: refuses a link at the file or at a directory" {
@@ -2047,6 +2053,15 @@ race_reads() {
 }
 
 # --- build_workspace_mounts: symlinked workspace ---
+
+@test "build_workspace_mounts: a symlinked workspace given with trailing slashes is announced" {
+  mkdir -p "$BATS_TEST_TMPDIR/real-target"
+  ln -s "$BATS_TEST_TMPDIR/real-target" "$BATS_TEST_TMPDIR/link-ws"
+  WORKSPACES=("$BATS_TEST_TMPDIR/link-ws//")
+  run --separate-stderr build_workspace_mounts
+  [ "$status" -eq 0 ]
+  [[ "$stderr" == *"is a symlink; mounting '$BATS_TEST_TMPDIR/real-target'"* ]]
+}
 
 @test "build_workspace_mounts: a symlinked workspace mounts its target, announced" {
   mkdir -p "$BATS_TEST_TMPDIR/real-target"

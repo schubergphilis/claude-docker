@@ -7,10 +7,6 @@
 # git-identity forwarding, host-config bind-mounts — without forking it.
 IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
 
-# An exported CDPATH makes `cd` to a relative directory print that directory
-# on stdout, which would land in the files staged from `( cd dir && cat … )`.
-unset CDPATH
-
 # Auth-proxy sidecar image (Caddy), used by --gh / --glab when a host token is
 # found and by --api (see openspec/specs/gh-auth-proxy and friends).
 # Digest-pinned and deliberately excluded from update_pins.py: a Caddy
@@ -874,9 +870,17 @@ file_id() { stat -L -c '%d:%i' "$1" 2>/dev/null || stat -L -f '%d:%i' "$1" 2>/de
 # dev:inode of $1 itself (lstat).
 link_id() { stat -c '%d:%i' "$1" 2>/dev/null || stat -f '%d:%i' "$1" 2>/dev/null; }
 # macOS reports /dev/fd/N on the fdesc device with the file's inode, so there the
-# open file is matched by inode alone; elsewhere by dev:inode.
+# open file is matched by inode alone; elsewhere by dev:inode. Set by init_shell.
 FD_INODE_ONLY=0
-[ "$(uname -s 2>/dev/null)" = Darwin ] && FD_INODE_ONLY=1
+
+# Process-wide settings, before anything else in main.
+init_shell() {
+  # An exported CDPATH makes `cd` to a relative directory print that directory
+  # on stdout, which would land in the files staged from `( cd dir && cat … )`.
+  unset CDPATH
+  [ "$(uname -s 2>/dev/null)" = Darwin ] && FD_INODE_ONLY=1
+  return 0
+}
 
 # Print ./$1, in the current directory, if it is a regular file and, once open,
 # still the file lstat names. Opens it on fd 9 of the calling shell. A FIFO
@@ -1349,14 +1353,13 @@ wait_sidecar() {
 }
 
 build_workspace_mounts() {
-  local ws_suffix ws abs real shown name n i j k=0
+  local ws_suffix ws abs shown link name n i j k=0
 
   # Parallel arrays (not associative) so macOS system bash 3.2 works.
   # Counter-based iteration avoids ${!arr[@]} which trips set -u on empty arrays.
   SEEN_NAMES=()
   SEEN_PATHS=()
   SEEN_RO=()
-  SEEN_REAL=()
   SEEN_SHOWN=()
   for ws in "${WORKSPACES[@]}"; do
     # Checked up front so a typo gets a claude-docker: message, not bash's bare `cd:` error.
@@ -1371,9 +1374,11 @@ build_workspace_mounts() {
     # higher up (a symlinked /home or /tmp) are common and not announced.
     # Messages name the workspace as given ($shown), symlinks unresolved.
     abs=$(cd -P "$ws" && pwd -P) || exit 1
-    real="$abs"
     shown=$(cd "$ws" && pwd) || exit 1
-    if [ -L "${ws%/}" ]; then
+    # Every trailing slash goes first: `[ -L link/ ]` looks through the link.
+    link=$ws
+    while [ "${link%/}" != "$link" ] && [ "${link%/}" != "" ]; do link=${link%/}; done
+    if [ -L "$link" ]; then
       echo "claude-docker: workspace '$ws' is a symlink; mounting '$abs'" >&2
     fi
     ws_suffix=""
@@ -1411,7 +1416,6 @@ build_workspace_mounts() {
     done
     SEEN_NAMES+=("$name")
     SEEN_PATHS+=("$abs")
-    SEEN_REAL+=("$real")
     SEEN_SHOWN+=("$shown")
     SEEN_RO+=("${ws_suffix:+1}")
     MOUNT_ARGS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
@@ -1420,14 +1424,14 @@ build_workspace_mounts() {
 
   # A read-only workspace inside a writable one stays writable through the
   # writable mount; say so rather than let ro-partial overstate the protection.
-  # Compared with symlinks resolved.
+  # SEEN_PATHS are physical, so this sees through symlinks.
   n=${#SEEN_PATHS[@]}
   i=0
   while [ "$i" -lt "$n" ]; do
     j=0
     while [ -n "${SEEN_RO[$i]}" ] && [ "$j" -lt "$n" ]; do
-      case "${SEEN_REAL[$i]}" in
-        "${SEEN_REAL[$j]}"/*)
+      case "${SEEN_PATHS[$i]}" in
+        "${SEEN_PATHS[$j]}"/*)
           [ -z "${SEEN_RO[$j]}" ] && echo "claude-docker: warning: read-only workspace '${SEEN_SHOWN[$i]}' is inside writable workspace '${SEEN_SHOWN[$j]}', so it stays writable under ${CONTAINER_PATHS[$j]}" >&2 ;;
       esac
       j=$((j + 1))
@@ -2915,6 +2919,7 @@ run_container() {
 
 main() {
   set -euo pipefail
+  init_shell
   parse_args "$@"
   validate_opts
   select_runtime
