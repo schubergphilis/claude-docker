@@ -33,6 +33,32 @@ The [GitHub auth proxy](auth.md#github-auth-proxy) sidecar's Caddy image is pinn
 
 The [API egress lock](auth.md#api-egress-lock)'s proxy image is the same kind of manual pin: `EGRESS_PROXY_BASE` (an Alpine digest) and `EGRESS_PROXY_SQUID_MIN` (a version floor) in `run.sh`. Users build it on first use, and its tag is the checksum of the Containerfile `run.sh` generates, so changing either value builds a new image. Bumping the base means checking the generated squid config against that Alpine release's squid; the `--egress-lock` CI cells do that against the real image.
 
+## Homebrew tap
+
+This repository is its own Homebrew tap: [`Formula/claude-docker.rb`](../Formula/claude-docker.rb) is what `brew install claude-docker` reads, from `main`. Its `url` and `sha256` name the latest stable release. A release cannot name its own archive's checksum, so the formula moves in a pull request after each release:
+
+1. After `docker.yml` publishes a tag's image, its `homebrew` job calls [`homebrew.yml`](../.github/workflows/homebrew.yml).
+2. For a stable `vX.Y.Z` tag, that checks the image is published, rewrites `url` and `sha256` to the tag's source archive, pushes a `homebrew/<tag>` branch and opens a `chore(homebrew): claude-docker <version>` pull request. Any other tag is skipped. `chore` keeps the merge from cutting another release.
+3. Like the pins refresh, the pull request is opened with `GITHUB_TOKEN`, so its checks wait until a maintainer approves the run. Merge it, and `brew upgrade` picks the release up.
+
+**A release opened no Homebrew pull request.** Check the `homebrew` job of that tag's Docker run:
+
+- **Skipped:** the publishing job failed, so there is no image to point at. Fix that first (see [Prebuilt image from GHCR](installation.md#prebuilt-image-from-ghcr)).
+- **Failed:** see its log, then run `gh workflow run homebrew.yml -f tag=<tag>`. Re-running `docker.yml` does not help, since it refuses a tag that is already published. A dispatch never moves the formula backwards, so an old tag is a no-op.
+
+To change the formula itself, such as the launcher or the caveats, test it locally before opening the pull request:
+
+```bash
+brew tap <you>/claude-docker-test "$PWD"
+brew install <you>/claude-docker-test/claude-docker
+brew test claude-docker
+brew audit --strict --online <you>/claude-docker-test/claude-docker
+brew style <you>/claude-docker-test/claude-docker
+brew uninstall claude-docker && brew untap <you>/claude-docker-test
+```
+
+`brew tap` reads committed files only, so commit before tapping.
+
 ## CI smoke tests
 
 The container's runtime behaviour — privilege-drop, capability set, credential isolation, file ownership — is exercised by a smoke harness ([`tests/smoke/smoke.sh`](../tests/smoke/smoke.sh) + [`tests/smoke/assert-in-container.sh`](../tests/smoke/assert-in-container.sh)), which drives the real `run.sh` with fixture credentials under a fake `$HOME`. It runs in CI on **Linux** on every change (in the `docker-build` job, reusing the built image), across a matrix of cells: host UID 1000 / 501 / 0, cold and warm volumes, the `--aws` / `--glab` / `--tfe` / `--api` / `--az` opt-ins (singly and combined), `--ephemeral`, and `--ro`. Most of the container's behaviour lives inside Docker's Linux VM and is identical regardless of host OS, so Linux CI covers the bulk of it.

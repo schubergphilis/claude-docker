@@ -1,0 +1,133 @@
+# yamllint disable rule:line-length
+---
+name: Homebrew
+
+# This repository is its own Homebrew tap, and Formula/claude-docker.rb names
+# the latest stable release. A release cannot name its own archive's checksum,
+# so after each one this opens a pull request that moves the formula to it.
+# docker.yml calls this once a tag's image is published, so the formula never
+# points at an image that was not: a tag whose scan fails publishes nothing
+# and gets no pull request.
+#
+# A reusable workflow called from docker.yml rather than a `workflow_run` on
+# it: same ordering, without a trigger that runs with write access on another
+# workflow's behalf.
+#
+# The dispatch is the fallback for a tag whose bump did not happen; re-running
+# docker.yml cannot do it, since it refuses a tag that is already published.
+"on":
+  workflow_call:
+    inputs:
+      tag:
+        description: Release tag to move the formula to
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Published stable release tag to move the formula to, e.g. v1.2.3
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  # Two bumps at once would race on main's formula. Never cancel one in
+  # flight; it may be mid-push.
+  group: homebrew
+  cancel-in-progress: false
+
+jobs:
+  bump:
+    name: Bump the Homebrew formula
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      # Release candidates are published to ghcr on purpose but are not
+      # supported, so they never reach Homebrew. Only a stable tag whose image
+      # is published goes on, and a dispatch is held to the same rule.
+      - name: Check the tag is a published stable release
+        id: tag
+        env:
+          TAG: ${{ inputs.tag }}
+          IMAGE: ghcr.io/${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ ! "${TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "${TAG} is not a stable vX.Y.Z tag, so it does not go to Homebrew." >> "$GITHUB_STEP_SUMMARY"
+            echo "stable=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! docker buildx imagetools inspect "${IMAGE,,}:${TAG}" >/dev/null; then
+            echo "::error title=Image not published::${IMAGE,,}:${TAG} is not published, so the formula would point at an image that does not exist. Publish it first: gh workflow run docker.yml --ref ${TAG}"
+            exit 1
+          fi
+          echo "stable=true" >> "$GITHUB_OUTPUT"
+
+      # main, not the tag: the formula is read from the tap's default branch.
+      - if: steps.tag.outputs.stable == 'true'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          # No persisted credentials: only the push below needs write access,
+          # and it authenticates explicitly.
+          persist-credentials: false
+
+      - name: Open the pull request
+        if: steps.tag.outputs.stable == 'true'
+        env:
+          TAG: ${{ inputs.tag }}
+          # A pull request opened with GITHUB_TOKEN holds its checks until a
+          # maintainer approves the run, as pins-updater.yml's does.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          formula=Formula/claude-docker.rb
+          version="${TAG#v}"
+
+          # A dispatch for an older tag must not move the formula backwards.
+          current="$(sed -nE 's|^  url ".*/refs/tags/v([0-9.]+)\.tar\.gz"$|\1|p' "${formula}")"
+          if [[ -z "${current}" ]]; then
+            echo "::error title=Formula not recognised::No release url found in ${formula}."
+            exit 1
+          fi
+          if [[ "$(printf '%s\n' "${current}" "${version}" | sort -V | tail -n1)" != "${version}" ]]; then
+            echo "The formula is at ${current}, newer than ${version}; leaving it." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ "${current}" == "${version}" ]]; then
+            echo "The formula is already at ${version}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
+          sha="$(curl -fsSL "${url}" | sha256sum | cut -d' ' -f1)"
+          sed -i -E \
+            -e "s|^  url \".*\"$|  url \"${url}\"|" \
+            -e "s|^  sha256 \"[0-9a-f]{64}\"$|  sha256 \"${sha}\"|" \
+            "${formula}"
+          grep -qxF "  url \"${url}\"" "${formula}"
+          grep -qxF "  sha256 \"${sha}\"" "${formula}"
+
+          # chore: auto-release cuts a version only for feat, fix and perf,
+          # so merging the bump does not release again.
+          title="chore(homebrew): claude-docker ${version}"
+          branch="homebrew/${TAG}"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "${branch}"
+          git commit -m "${title}" -m "Automated by .github/workflows/homebrew.yml after ${TAG}'s image was published." -- "${formula}"
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/${branch}"
+
+          body="Moves the Homebrew formula to ${TAG}, whose image \`ghcr.io/${GITHUB_REPOSITORY,,}:${TAG}\` is published. Until this merges, \`brew upgrade claude-docker\` stays on ${current}."
+          number="$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')"
+          if [[ -n "${number}" ]]; then
+            gh pr edit "${number}" --title "${title}" --body "${body}"
+          else
+            gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"
+          fi

@@ -34,7 +34,6 @@ concurrency:
 
 permissions:
   contents: read
-  packages: write
 
 jobs:
   docker:
@@ -42,6 +41,10 @@ jobs:
     # only-fixed=false, so an unrelated upstream CVE can turn this red.
     name: Docker build, scan and publish
     runs-on: ubuntu-24.04
+    # Only this job pushes to ghcr; the Homebrew job below cannot.
+    permissions:
+      contents: read
+      packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -119,3 +122,17 @@ jobs:
           # is accepted anywhere in the image.
           dockle-accept-file: settings.py
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  # Runs only once the image above is published, so a failed scan, which
+  # publishes nothing, also opens no formula pull request. homebrew.yml skips
+  # any tag that is not a stable vX.Y.Z.
+  homebrew:
+    needs: docker
+    if: startsWith(github.ref, 'refs/tags/v')
+    # Pushes the bump branch and opens its pull request; no packages access.
+    permissions:
+      contents: write
+      pull-requests: write
+    uses: ./.github/workflows/homebrew.yml
+    with:
+      tag: ${{ github.ref_name }}
