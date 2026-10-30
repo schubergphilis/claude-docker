@@ -64,7 +64,7 @@ TXT
 
 @test "defaults: plain cell, IMAGE or the local tag" {
   parse_args
-  [ "$WITH_GH" = 0 ] && [ -z "$ENDPOINT_PORT" ] && [ "$IMAGE" = claude-code:local ]
+  [ "$WITH_GH" = 0 ] && [ "$WITH_ALLOWLIST" = 0 ] && [ -z "$ENDPOINT_PORT" ] && [ "$IMAGE" = claude-code:local ]
   IMAGE=img:tag
   parse_args --gh --endpoint-port
   [ "$WITH_GH" = 1 ] && [ "$ENDPOINT_PORT" = 22 ] && [ "$IMAGE" = img:tag ]
@@ -232,7 +232,7 @@ TXT
   STUB_PS="cid" STUB_NETWORKS="nid"
   run assert_teardown
   [ "$status" -eq 1 ]
-  [[ "$output" == *"claude-egress-proxy-a1B2c3 claude-auth-proxy-a1B2c3 network:claude-egress-a1B2c3"* ]]
+  [[ "$output" == *"claude-egress-proxy-a1B2c3 claude-auth-proxy-a1B2c3 claude-egress-proxy-a1B2c3-probe-control claude-egress-proxy-a1B2c3-probe-check network:claude-egress-a1B2c3"* ]]
 }
 
 @test "assert_teardown fails without a session id" {
@@ -242,4 +242,75 @@ TXT
   run assert_teardown
   [ "$status" -eq 1 ]
   [[ "$output" == *"no session id in the startup banner"* ]]
+}
+
+# --- --allowlist cell ------------------------------------------------------
+
+@test "run_session: the allowlist cell adds the file, --gh and --tfe, and the file is outside the workspace" {
+  setup_cell --allowlist
+  [ "$WITH_ALLOWLIST" = 1 ]
+  script() { printf '%s\n' "$2" > "$BATS_TEST_TMPDIR/cmd"; echo "RESULT: PASS" > "$3"; echo 0 > "$TMPROOT/rc"; }
+  timeout() { shift 3; "$@"; }
+  unset EGRESS_SMOKE_GH_TOKEN
+  run_session >/dev/null
+  [ "${flags[*]}" = "--api --egress-lock --ephemeral --gh --tfe --egress-allowlist=$TMPROOT/team.allow" ]
+  [[ "$ALLOWLIST" != "$WS"/* ]]
+  grep -qx 'example.org' "$ALLOWLIST" && grep -qx '.github.com' "$ALLOWLIST"
+  grep -q 'EXPECT_EGRESS_ALLOWLIST=1' "$BATS_TEST_TMPDIR/cmd"
+  # Without a real token: the fake one's "Bad credentials" check, no clone.
+  grep -q 'EXPECT_EGRESS_GH=1' "$BATS_TEST_TMPDIR/cmd"
+  grep -q 'EXPECT_EGRESS_GH_CLONE=0' "$BATS_TEST_TMPDIR/cmd"
+  EGRESS_SMOKE_GH_TOKEN=ghs_real
+  run_session >/dev/null
+  grep -q 'EXPECT_EGRESS_GH_CLONE=1' "$BATS_TEST_TMPDIR/cmd"
+  grep -q 'EXPECT_EGRESS_GH=0' "$BATS_TEST_TMPDIR/cmd"
+  grep -q 'GH_TOKEN=ghs_real' "$BATS_TEST_TMPDIR/cmd"
+}
+
+# The allowlist evidence a passing allowlist session leaves next to s.log.
+fake_allowlist_evidence() {
+  local dir="$TMPROOT/state/claude-docker/egress"
+  ALLOWLIST="$TMPROOT/team.allow"
+  printf 'example.org\n' > "$ALLOWLIST"
+  printf '%s\n' "allowlist_file=$ALLOWLIST" \
+    "allowlist_sha256=$(sha256sum "$ALLOWLIST" | cut -d' ' -f1)" \
+    "allowlist_add_hosts=github.com:10.0.0.2" >> "$dir/s.meta"
+  printf 'http_access deny all\n' > "$dir/s.conf"
+  chmod 600 "$dir/s.conf"
+  echo "claude-docker: egress proxy blocked: app.terraform.io " >> "$transcript"
+}
+
+@test "assert_allowlist_evidence passes on a complete session" {
+  setup_cell --allowlist
+  fake_session
+  fake_allowlist_evidence
+  run assert_allowlist_evidence "$TMPROOT/state/claude-docker/egress/s.log"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"PASS: allowlist evidence"* ]]
+}
+
+@test "assert_allowlist_evidence fails on a wrong hash, a missing or readable conf" {
+  setup_cell --allowlist
+  fake_session
+  fake_allowlist_evidence
+  local dir="$TMPROOT/state/claude-docker/egress"
+  chmod 644 "$dir/s.conf"
+  run assert_allowlist_evidence "$dir/s.log"
+  [ "$status" -eq 1 ] && [[ "$output" == *"not owner-only"* ]]
+  rm "$dir/s.conf"
+  run assert_allowlist_evidence "$dir/s.log"
+  [ "$status" -eq 1 ] && [[ "$output" == *"no squid config saved"* ]]
+  echo changed >> "$ALLOWLIST"
+  run assert_allowlist_evidence "$dir/s.log"
+  [ "$status" -eq 1 ] && [[ "$output" == *"allowlist_sha256 does not match"* ]]
+}
+
+@test "assert_teardown names a leftover DNS probe" {
+  setup_cell
+  transcript="$TMPROOT/transcript.txt"
+  echo "claude-docker: egress proxy 'claude-egress-proxy-a1B2c3' is active" > "$transcript"
+  docker() { case "$1 $*" in *probe-check*) [ "$1" = ps ] && echo cid ;; esac; return 0; }
+  run assert_teardown
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"claude-egress-proxy-a1B2c3-probe-check"* ]]
 }

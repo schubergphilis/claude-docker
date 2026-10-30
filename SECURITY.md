@@ -58,7 +58,9 @@ the [threat model](docs/security.md#threat-model) before reporting:
   `--egress-lock` restricts model traffic only, and logs the rest.
 - **Runtime code-fetch.** `npx`, `pnpm dlx`, `uvx`, `tfenv install` and the Go
   toolchain fetch and execute third-party code on demand, by design.
-- **Workspaces are read-write** unless `--ro` is passed.
+- **Workspaces are read-write** unless `--ro` (all) or `--ro=PATH` (that one)
+  is passed. `--ro=PATH` does not isolate an untrusted repo: content read
+  there can still drive writes to the writable workspaces.
 - **Opted-in credentials are readable in-session.** That is what the flag does;
   the container is a blast-radius reduction, not a secret boundary.
 - **State persists across sessions** in the `claude-code-root` and

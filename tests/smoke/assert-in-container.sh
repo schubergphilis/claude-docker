@@ -743,6 +743,25 @@ check_egress() {
   assert_eq "egress-port: CONNECT to a non-443 port refused" \
     "$(egress_code http_connect https://example.com:8443/)" "403"
 
+  if [ "${EXPECT_EGRESS_ALLOWLIST:-0}" = "1" ]; then
+    # tests/smoke/egress.sh --allowlist lists example.org and .github.com:
+    # every other host is refused, including --tfe's, which the flag doesn't add.
+    assert_eq "egress-allowlist: CONNECT to an unlisted host (example.net) refused" \
+      "$(egress_code http_connect https://example.net/)" "403"
+    assert_eq "egress-allowlist: plain HTTP to an unlisted host (example.net) refused" \
+      "$(egress_code http_code http://example.net/)" "403"
+    assert_eq "egress-allowlist: --tfe's host (app.terraform.io) refused when not listed" \
+      "$(egress_code http_connect https://app.terraform.io/)" "403"
+    assert_eq "egress-allowlist: a listed .suffix (codeload.github.com) allowed" \
+      "$(egress_code http_connect https://codeload.github.com/)" "200"
+  fi
+  if [ "${EXPECT_EGRESS_GH_CLONE:-0}" = "1" ]; then
+    if git clone -q --depth 1 https://github.com/schubergphilis/claude-docker /tmp/egress-clone >/dev/null 2>&1; then
+      pass "egress-allowlist-clone: git clone through the gh sidecar with .github.com listed"
+    else
+      fail "egress-allowlist-clone: git clone through the gh sidecar failed"
+    fi
+  fi
   if [ "${EXPECT_EGRESS_GH:-0}" = "1" ]; then
     # --cacert replaces the default bundle, so a completed handshake proves the
     # auth-proxy sidecar terminated TLS (squid routed api.github.com to it). /user needs

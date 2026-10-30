@@ -17,7 +17,7 @@ setup() {
     CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_GLAB_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA \
     CLAUDE_DOCKER_ADD_HOSTS CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS \
     ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BASE_URL CLAUDE_DOCKER_GLAB_UPSTREAM XDG_STATE_HOME \
-    CLAUDE_DOCKER_EGRESS_PROXY_IMAGE
+    CLAUDE_DOCKER_EGRESS_PROXY_IMAGE CLAUDE_DOCKER_EGRESS_ALLOWLIST CLAUDE_DOCKER_GH_UPSTREAM
   # Computed when run.sh was sourced, before HOME moved above.
   EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress"
   RUNTIME=docker
@@ -28,6 +28,10 @@ setup() {
   # prints on stderr (the container's stderr, e.g. squid's cache_log).
   STUB_FAIL="" STUB_PS="" STUB_ALIVE="cid" STUB_IP="10.0.0.2"
   STUB_LOGS="serving initial configuration" STUB_LOGS_ERR=""
+  # What the --egress-allowlist DNS probes print, and where the stub copies
+  # the squid config the proxy is started with.
+  STUB_PROBE_CONTROL="ADDR 93.184.215.14" STUB_PROBE_CHECK="ERR ENOTFOUND"
+  STUB_SQUID_CONF="$BATS_TEST_TMPDIR/squid-mounted.conf"
   docker() {
     echo "docker $*" >>"$CALLS"
     case " $STUB_FAIL " in *" $1 "*|*" $1:${2:-} "*) return 1 ;; esac
@@ -38,6 +42,15 @@ setup() {
       network) [ "$2" = "ls" ] && echo "net1"; return 0 ;;
       cp) echo "CA" >"$3" ;;
       inspect) echo "$STUB_IP" ;;
+      run)
+        local a
+        case "$*" in
+          *-probe-control*) echo "$STUB_PROBE_CONTROL" ;;
+          *-probe-check*) echo "$STUB_PROBE_CHECK" ;;
+        esac
+        for a in "$@"; do
+          case "$a" in *:/etc/squid/squid.conf:ro) cp "${a%:/etc/squid/squid.conf:ro}" "$STUB_SQUID_CONF" ;; esac
+        done ;;
       logs)
         printf '%s\n' "$STUB_LOGS"
         [ -z "$STUB_LOGS_ERR" ] || printf '%s\n' "$STUB_LOGS_ERR" >&2 ;;
@@ -68,7 +81,8 @@ lines_of() { printf '%s\n' "$@"; }
 # functions.
 export_stubs() {
   export -f docker podman gh glab git sleep
-  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP STUB_LOGS STUB_LOGS_ERR
+  export CALLS STUB_FAIL STUB_PS STUB_ALIVE STUB_IP STUB_LOGS STUB_LOGS_ERR \
+    STUB_PROBE_CONTROL STUB_PROBE_CHECK STUB_SQUID_CONF
 }
 run_script() {
   export_stubs
@@ -106,6 +120,39 @@ run_script_fn() {
   cd "$WS"
   parse_args
   [ "${WORKSPACES[0]}" = "$WS" ]
+}
+
+@test "parse_args: --ro=PATH marks only that workspace, in order" {
+  parse_args a --ro=b c
+  [ "$(lines_of "${WORKSPACES[@]}")" = "$(printf 'a\nb\nc')" ]
+  [ "$(lines_of "${WORKSPACES_RO[@]}")" = "$(printf '0\n1\n0')" ]
+  [ "$RO_WORKSPACES" = 0 ]
+}
+
+@test "parse_args: --ro=~/x expands the tilde" {
+  parse_args a '--ro=~/x'
+  [ "${WORKSPACES[1]}" = "$HOME/x" ]
+}
+
+@test "parse_args: --ro=PATH counts as a workspace, so PWD is not added" {
+  cd "$WS"
+  parse_args --ro=b --ro=c
+  [ "$(lines_of "${WORKSPACES[@]}")" = "$(printf 'b\nc')" ]
+  [ "$(lines_of "${WORKSPACES_RO[@]}")" = "$(printf '1\n1')" ]
+}
+
+@test "parse_args: --ro=. mounts PWD read-only as the working dir" {
+  cd "$WS"
+  parse_args --ro=.
+  build_workspace_mounts
+  [ "$CWD" = /workspaces/repo ]
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/workspaces/repo:ro' "$WS")" ]
+}
+
+@test "parse_args: empty --ro= is rejected" {
+  run parse_args --ro= a
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--ro= needs a path"* ]]
 }
 
 @test "parse_args: --iterm and --tmux set CLAUDE_DOCKER_TMUX" {
@@ -497,6 +544,63 @@ http_access allow all" ]
   [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/workspaces/repo:ro\n-v\n%s:/workspaces/other:ro' "$WS" "$BATS_TEST_TMPDIR/other")" ]
 }
 
+@test "build_workspace_mounts: --ro=PATH mounts only that workspace :ro" {
+  mkdir -p "$BATS_TEST_TMPDIR/other"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/other") WORKSPACES_RO=(0 1)
+  build_workspace_mounts
+  [ "$CWD" = /workspaces/repo ]
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/workspaces/repo\n-v\n%s:/workspaces/other:ro' "$WS" "$BATS_TEST_TMPDIR/other")" ]
+}
+
+@test "build_workspace_mounts: warns when a read-only workspace is inside a writable one" {
+  mkdir -p "$WS/vendor"
+  WORKSPACES=("$WS" "$WS/vendor") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ]
+  [ "$output" = "claude-docker: warning: read-only workspace '$WS/vendor' is inside writable workspace '$WS', so it stays writable under /workspaces/repo" ]
+}
+
+@test "build_workspace_mounts: the nesting warning sees through symlinks" {
+  mkdir -p "$WS/vendor"
+  ln -s "$WS/vendor" "$BATS_TEST_TMPDIR/vendor-link"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/vendor-link") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"read-only workspace '$BATS_TEST_TMPDIR/vendor-link' is inside writable workspace '$WS'"* ]]
+}
+
+@test "build_workspace_mounts: one directory through a symlink as both rw and ro is refused" {
+  ln -s "$WS" "$BATS_TEST_TMPDIR/repo-link"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/repo-link") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 1 ]
+  [ "$output" = "claude-docker: workspaces '$WS' and '$BATS_TEST_TMPDIR/repo-link' are the same directory, one read-write and one read-only; pass it once" ]
+}
+
+@test "build_workspace_mounts: one directory through a symlink in the same mode still mounts" {
+  ln -s "$WS" "$BATS_TEST_TMPDIR/repo-link"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/repo-link")
+  run build_workspace_mounts
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "build_workspace_mounts: the same path twice gets its own error" {
+  WORKSPACES=("$WS" "$WS") WORKSPACES_RO=(0 1)
+  run build_workspace_mounts
+  [ "$status" -eq 1 ]
+  [ "$output" = "claude-docker: workspace '$WS' is given more than once; pass it once, as PATH (read-write) or --ro=PATH (read-only)" ]
+}
+
+@test "build_workspace_mounts: no nesting warning when the outer one is read-only too" {
+  mkdir -p "$WS/vendor" "$BATS_TEST_TMPDIR/repo-b"
+  WORKSPACES=("$WS/vendor" "$WS" "$BATS_TEST_TMPDIR/repo-b") WORKSPACES_RO=(1 1 0)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  WORKSPACES=("$WS" "$WS/vendor") WORKSPACES_RO=(1 0)
+  run build_workspace_mounts
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
 @test "build_workspace_mounts: a missing workspace gets a prefixed error" {
   WORKSPACES=("$BATS_TEST_TMPDIR/missing")
   run build_workspace_mounts
@@ -881,6 +985,21 @@ TABLE
   WITH_API=1 WITH_EGRESS_LOCK=1
   build_flags_env
   [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=api,egress-lock" ]
+}
+
+@test "build_flags_env: some --ro=PATH workspaces tag ro-partial" {
+  WORKSPACES=(a b) WORKSPACES_RO=(0 1)
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=ro-partial" ]
+}
+
+@test "build_flags_env: all workspaces read-only tag ro" {
+  WORKSPACES=(a b) WORKSPACES_RO=(1 1)
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=ro" ]
+  WORKSPACES_RO=(0 1) RO_WORKSPACES=1
+  build_flags_env
+  [ "${ENV_ARGS[*]: -1}" = "CLAUDE_DOCKER_FLAGS=ro" ]
 }
 
 @test "build_flags_env: no opt-ins, no tag" {
@@ -1857,4 +1976,536 @@ YML
   [ "$status" -eq 1 ]
   [[ "$output" == *"points at one"* ]]
   [ ! -s "$CALLS" ]
+}
+
+# --- --egress-allowlist ---
+
+# A --api --egress-lock --egress-allowlist session's options, with the file
+# $HOME/team.allow holding $1.
+allowlist_setup() {
+  WITH_API=1 WITH_EGRESS_LOCK=1 WITH_EGRESS_ALLOWLIST=1 ANTHROPIC_AUTH_TOKEN=t
+  ANTHROPIC_BASE_URL=https://gw.example.eu
+  WORKSPACES=("$WS")
+  printf '%s' "$1" >"$HOME/team.allow"
+  EGRESS_ALLOWLIST_ARG="$HOME/team.allow"
+}
+
+# The http_access lines of the generated config, one per line.
+rules_of() { grep '^http_access' <<<"$1"; }
+# Line number of http_access rule $2 in rule list $1.
+rule_at() { grep -nxF "http_access $2" <<<"$1" | cut -d: -f1; }
+
+# Write config $2 for case $1 where the squid harness (tests/egress-proxy)
+# parses it with the real squid; expected-configs.txt lists every case.
+save_for_harness() {
+  local dir="${BATS_TEST_DIRNAME}/../egress-proxy/generated"
+  mkdir -p "$dir"
+  printf '%s\n' "$2" >"$dir/$1.conf"
+}
+
+@test "parse_args: --egress-allowlist with and without =FILE" {
+  parse_args --egress-allowlist "$WS"
+  [ "$WITH_EGRESS_ALLOWLIST" = 1 ] && [ -z "$EGRESS_ALLOWLIST_ARG" ]
+  parse_args --egress-allowlist=~/team.allow "$WS"
+  [ "$EGRESS_ALLOWLIST_ARG" = "~/team.allow" ]
+}
+
+@test "validate_opts: the flag's file wins over CLAUDE_DOCKER_EGRESS_ALLOWLIST" {
+  allowlist_setup "example.com"
+  printf 'pypi.org\n' >"$HOME/env.allow"
+  CLAUDE_DOCKER_EGRESS_ALLOWLIST="$HOME/env.allow"
+  validate_opts
+  [ "$(lines_of "${EGRESS_ALLOW_NAMES[@]}")" = "example.com" ]
+  EGRESS_ALLOWLIST_ARG=""
+  validate_opts
+  [ "$(lines_of "${EGRESS_ALLOW_NAMES[@]}")" = "pypi.org" ]
+  [ "$egress_allowlist_file" = "$HOME/env.allow" ]
+  EGRESS_ALLOWLIST_ARG="~/team.allow"
+  validate_opts
+  [ "$egress_allowlist_file" = "$HOME/team.allow" ]
+  CLAUDE_DOCKER_EGRESS_ALLOWLIST="~/env.allow" EGRESS_ALLOWLIST_ARG=""
+  validate_opts
+  [ "$egress_allowlist_file" = "$HOME/env.allow" ]
+}
+
+@test "validate_opts: entries are trimmed, lowercased and kept with their ports" {
+  allowlist_setup $'# team list\nPyPI.org  # index\n.corp.example\ngit.example.com:8443\n.internal.example:08443\npypi.org#x\nexample.org\t#c\r\n  \nlast.example'
+  validate_opts
+  [ "$(lines_of "${EGRESS_ALLOW_NAMES[@]}")" = "pypi.org
+.corp.example
+git.example.com
+.internal.example
+pypi.org
+example.org
+last.example" ]
+  local IFS=,
+  [ "${EGRESS_ALLOW_PORTS[*]}" = ",,8443,8443,,," ]
+}
+
+@test "validate_opts: boundary values are accepted" {
+  local h
+  h="$(printf 'a%.0s' {1..63}).$(printf 'b%.0s' {1..63}).$(printf 'c%.0s' {1..63}).$(printf 'd%.0s' {1..61})"
+  [ "${#h}" = 253 ]
+  allowlist_setup "$h"$'\na.example:1\nb.example:65535\n'
+  validate_opts
+  [ "${EGRESS_ALLOW_NAMES[0]}" = "$h" ]
+  local IFS=,
+  [ "${EGRESS_ALLOW_PORTS[*]}" = ",1,65535" ]
+}
+
+@test "validate_opts: the hash covers the bytes read, CRLF and an unterminated last line included" {
+  allowlist_setup $'example.org\r\npypi.org'
+  validate_opts
+  [ "$egress_allowlist_sha256" = "$(sha256sum "$HOME/team.allow" | cut -d' ' -f1)" ]
+  [ "${EGRESS_ALLOW_NAMES[1]}" = pypi.org ]
+}
+
+# A PATH with the tools validate_opts needs, plus the hash tools named.
+hash_path() {
+  local dir="$BATS_TEST_TMPDIR/bin" t
+  mkdir -p "$dir"
+  for t in cat wc tr dirname basename readlink "$@"; do
+    [ "$t" = shasum ] && continue
+    ln -sf "$(command -v "$t")" "$dir/$t"
+  done
+  case " $* " in *" shasum "*)
+    # Records its argv and answers like `shasum -a 256`.
+    printf '#!/bin/sh\necho "$@" >"%s"\nexec %s\n' \
+      "$BATS_TEST_TMPDIR/shasum-argv" "$(command -v sha256sum)" >"$dir/shasum"
+    chmod +x "$dir/shasum" ;;
+  esac
+  printf '%s' "$dir"
+}
+
+@test "validate_opts: hashes with sha256sum, else shasum -a 256, else refuses" {
+  allowlist_setup $'pypi.org\n'
+  local want p
+  want=$(sha256sum "$HOME/team.allow" | cut -d' ' -f1)
+  p=$(hash_path sha256sum)
+  PATH="$p" validate_opts
+  [ "$egress_allowlist_sha256" = "$want" ]
+  egress_allowlist_sha256=""
+  p=$(hash_path shasum)
+  rm -f "$p/sha256sum"
+  PATH="$p" validate_opts
+  [ "$egress_allowlist_sha256" = "$want" ]
+  [ "$(cat "$BATS_TEST_TMPDIR/shasum-argv")" = "-a 256" ]
+  rm -f "$p/shasum"
+  PATH="$p" run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"needs sha256sum or shasum"* ]]
+}
+
+@test "gen_egress_squid_conf: allowlist names, ports and overlaps" {
+  allowlist_setup $'api.example.com\n.example.com\npypi.org\npypi.org\ngit.corp.example:8443\n.internal.example:8443\n.a.internal.example\n'
+  validate_opts
+  API_SIDECAR_ACTIVE=1
+  run gen_egress_squid_conf
+  save_for_harness allowlist-overlap "$output"
+  [ "$(grep '^acl egress_allowed_names ' <<<"$output")" = "acl egress_allowed_names dstdomain -n gw.example.eu
+acl egress_allowed_names dstdomain -n claude-docker-api-proxy
+acl egress_allowed_names dstdomain -n .example.com
+acl egress_allowed_names dstdomain -n pypi.org
+acl egress_allowed_names dstdomain -n git.corp.example
+acl egress_allowed_names dstdomain -n .internal.example" ]
+  [[ "$output" == *$'\nacl egress_allow_1 dstdomain -n git.corp.example\nacl egress_allow_1_port port 8443\nacl egress_allow_2 dstdomain -n .internal.example\nacl egress_allow_2_port port 8443\n'* ]]
+  # Every dstdomain skips reverse lookups.
+  run ! grep -E '^acl [^ ]+ dstdomain( [^-]|$)' <<<"$output"
+}
+
+@test "gen_egress_squid_conf: allowlist rule order" {
+  allowlist_setup $'git.corp.example:8443\n'
+  validate_opts
+  API_SIDECAR_ACTIVE=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gitlab.corp.example:8443
+  local conf rules
+  conf=$(gen_egress_squid_conf)
+  save_for_harness allowlist-order "$conf"
+  rules=$(rules_of "$conf")
+  # The cache manager and metadata names first, then the name-only deny,
+  # before any dst rule.
+  [ "$(rule_at "$rules" "deny manager")" = 1 ]
+  [ "$(rule_at "$rules" "deny egress_metadata_names")" = 2 ]
+  [ "$(rule_at "$rules" "deny !egress_allowed_names")" = 3 ]
+  local deny_names=3 r
+  for r in "deny egress_metadata_addrs" "deny egress_linklocal" "deny egress_loopback" "deny egress_model_providers"; do
+    [ "$(rule_at "$rules" "$r")" -gt "$deny_names" ]
+    # Address and provider denies above every allow.
+    [ "$(rule_at "$rules" "$r")" -lt "$(rule_at "$rules" "allow egress_model_endpoint egress_model_port")" ]
+  done
+  for r in "allow egress_model_endpoint egress_model_port" "allow egress_auth_proxy_api egress_auth_proxy_api_port" \
+           "allow egress_auth_proxy_glab egress_auth_proxy_glab_port" "allow egress_allow_1 egress_allow_1_port"; do
+    [ "$(rule_at "$rules" "$r")" -lt "$(rule_at "$rules" "deny !egress_ports")" ]
+  done
+  [ "$(rule_at "$rules" "deny !egress_ports")" -lt "$(rule_at "$rules" "deny CONNECT !egress_tls_port")" ]
+  [ "$(rule_at "$rules" "deny CONNECT !egress_tls_port")" -lt "$(rule_at "$rules" "allow egress_allowed_names")" ]
+  [ "$(tail -1 <<<"$rules")" = "http_access deny all" ]
+  [[ "$rules" != *"allow all"* ]]
+  [ "$(grep -c '^http_access deny egress_model_providers$' <<<"$rules")" = 1 ]
+}
+
+@test "gen_egress_squid_conf: --api-direct allows the endpoint, no sidecar name, and ends in deny all" {
+  allowlist_setup ""
+  WITH_API=0 WITH_API_DIRECT=1
+  validate_opts
+  local conf rules
+  conf=$(gen_egress_squid_conf)
+  save_for_harness allowlist-api-direct "$conf"
+  rules=$(rules_of "$conf")
+  [[ "$rules" == *"http_access allow egress_model_endpoint egress_model_port"* ]]
+  [[ "$conf" != *claude-docker-api-proxy* ]]
+  [ "$(tail -1 <<<"$rules")" = "http_access deny all" ]
+  [ "$(grep '^acl egress_allowed_names ' <<<"$conf")" = "acl egress_allowed_names dstdomain -n gw.example.eu" ]
+}
+
+@test "gen_egress_squid_conf: credential flags add no host to the allowlist" {
+  allowlist_setup ""
+  WITH_TFE=1 WITH_GH_DIRECT=1 WITH_AZ=1 WITH_AWS=1 WITH_REGISTRY=1
+  validate_opts
+  API_SIDECAR_ACTIVE=1
+  run gen_egress_squid_conf
+  save_for_harness allowlist-empty "$output"
+  [ "$(grep '^acl egress_allowed_names ' <<<"$output")" = "acl egress_allowed_names dstdomain -n gw.example.eu
+acl egress_allowed_names dstdomain -n claude-docker-api-proxy" ]
+}
+
+@test "gen_egress_squid_conf: IPv4 endpoint and endpoint port under the allowlist" {
+  allowlist_setup $'example.com\n.corp.example:8443\nlocalhost:8080\n'
+  ANTHROPIC_BASE_URL=https://10.0.0.5:8443
+  validate_opts
+  API_SIDECAR_ACTIVE=1
+  run gen_egress_squid_conf
+  save_for_harness allowlist-ipv4-endpoint "$output"
+  [[ "$output" == *$'\nacl egress_model_endpoint dstdomain -n 10.0.0.5\nacl egress_model_port port 8443\n'* ]]
+  grep -qx 'acl egress_allowed_names dstdomain -n 10.0.0.5' <<<"$output"
+}
+
+@test "gen_egress_squid_conf: an endpoint port and a --glab port under the allowlist, for the harness" {
+  allowlist_setup $'example.com\ngit.corp.example:8443\n.corp.example\nx.example:8443\n'
+  ANTHROPIC_BASE_URL=https://gw.example.eu:8443
+  validate_opts
+  API_SIDECAR_ACTIVE=1 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gitlab.corp.example:8443
+  run gen_egress_squid_conf
+  save_for_harness allowlist-ports "$output"
+  grep -qx 'acl egress_model_port port 8443' <<<"$output"
+}
+
+@test "gen_egress_squid_conf: without --egress-allowlist, byte-identical to the pre-change configs" {
+  local golden="${BATS_TEST_DIRNAME}/../egress-proxy/golden"
+  API_SIDECAR_ACTIVE=1
+  egress_api_host=llm.example.eu egress_api_port=443
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock.conf")" ]
+  save_for_harness lock "$(gen_egress_squid_conf)"
+  egress_api_host=gw.example.eu egress_api_port=8443
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock-endpoint-port.conf")" ]
+  save_for_harness lock-endpoint-port "$(gen_egress_squid_conf)"
+  egress_api_host=llm.example.eu egress_api_port=443 GLAB_SIDECAR_ACTIVE=1 GLAB_PROXY_HOST=gitlab.corp.example:8443
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock-glab.conf")" ]
+  save_for_harness lock-glab "$(gen_egress_squid_conf)"
+  # An entry list left over from somewhere else changes nothing without the flag.
+  EGRESS_ALLOW_NAMES=(x.example) EGRESS_ALLOW_PORTS=("")
+  [ "$(gen_egress_squid_conf)" = "$(cat "$golden/lock-glab.conf")" ]
+}
+
+@test "gen_egress_squid_conf: endpoint hosts starting with - are written as given (squid refuses them, see the harness)" {
+  local h dir="${BATS_TEST_DIRNAME}/../egress-proxy/generated-negative"
+  mkdir -p "$dir"
+  WITH_API=1 WITH_EGRESS_LOCK=1 ANTHROPIC_AUTH_TOKEN=t
+  for h in -gw.example.eu --gw.example.eu -n --; do
+    ANTHROPIC_BASE_URL="https://$h"
+    validate_opts
+    [ "$egress_api_host" = "$h" ]
+    API_SIDECAR_ACTIVE=0
+    run gen_egress_squid_conf
+    grep -qxF -- "acl egress_model_endpoint dstdomain -n $h" <<<"$output"
+    printf '%s\n' "$output" >"$dir/endpoint$h.conf"
+  done
+}
+
+@test "check_allowlist_session: --gh needs GitHub's three hosts, exactly or by a covering suffix" {
+  allowlist_setup $'.github.io\nnotgithub.com\nuploads.github.com\n'
+  validate_opts
+  WITH_GH=1 GH_HOST_TOKEN=t
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *": github.com api.github.com" ]]
+  allowlist_setup $'github.com\napi.github.com\n'
+  validate_opts
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *": uploads.github.com" ]]
+  local list
+  for list in $'.github.com' $'.GitHub.com:443' $'github.com:443\napi.github.com\nuploads.github.com'; do
+    allowlist_setup "$list"
+    validate_opts
+    check_allowlist_session
+  done
+}
+
+@test "check_allowlist_session: --glab needs its proxied host, port or not" {
+  allowlist_setup ""
+  validate_opts
+  WITH_GLAB=1 GLAB_HOST_TOKEN=t GLAB_PROXY_HOST=gitlab.corp.example
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"gitlab.corp.example"* ]]
+  local list
+  for list in .corp.example gitlab.corp.example:8443 GITLAB.corp.example; do
+    allowlist_setup "$list"
+    validate_opts
+    GLAB_PROXY_HOST=gitlab.corp.example:8443
+    check_allowlist_session
+  done
+  for list in notcorp.example .other.corp2.example; do
+    allowlist_setup "$list"
+    validate_opts
+    GLAB_PROXY_HOST=gitlab.corp.example:8443
+    run check_allowlist_session
+    [ "$status" -eq 1 ]
+  done
+}
+
+@test "check_allowlist_session: no sidecar, no host check" {
+  allowlist_setup ""
+  validate_opts
+  # No token: --gh and --glab go through squid like any other client.
+  WITH_GH=1 GH_HOST_TOKEN="" WITH_GLAB=1 GLAB_HOST_TOKEN=""
+  check_allowlist_session
+  # An exported GH_TOKEN without --gh (plain, or under --gh-direct).
+  WITH_GH=0 GH_HOST_TOKEN=t WITH_GLAB=0
+  check_allowlist_session
+  WITH_GH_DIRECT=1
+  check_allowlist_session
+  # And nothing at all without the flag.
+  WITH_EGRESS_ALLOWLIST=0 WITH_GH=1 RUNTIME=podman
+  check_allowlist_session
+}
+
+@test "check_allowlist_session: docker only" {
+  allowlist_setup ""
+  validate_opts
+  RUNTIME=podman
+  run check_allowlist_session
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docker only"*"podman"* ]]
+}
+
+@test "main: a --gh host missing from the allowlist stops before any container resource" {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://gw.example.eu GH_TOKEN=t
+  printf 'github.com\n' >"$HOME/team.allow"
+  run_script --ephemeral --gh --api --egress-lock "--egress-allowlist=$HOME/team.allow" "$WS"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"api.github.com uploads.github.com"* ]]
+  run ! grep -qE "^docker (network create|run)" "$CALLS"
+}
+
+@test "egress_dns_probe: probes from the agent image, control on the outbound network, then the internal one" {
+  WITH_EGRESS_ALLOWLIST=1 HOST_UID=1000 HOST_GID=1000 IMAGE=claude-code:local
+  EGRESS_NETWORK=claude-egress-x EGRESS_OUT_NETWORK=claude-egress-out-x
+  EGRESS_PROBE_CONTROL=claude-egress-proxy-x-probe-control EGRESS_PROBE_CHECK=claude-egress-proxy-x-probe-check
+  egress_dns_probe
+  [ "$(grep -c '^docker run' "$CALLS")" = 2 ]
+  grep -q "^docker run --rm --name claude-egress-proxy-x-probe-control --network claude-egress-out-x --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges --entrypoint node claude-code:local -e .*Resolver.*timeout:3000,tries:1.*example.org" "$CALLS"
+  [ "$(sed -n 2p "$CALLS" | cut -d' ' -f1-7)" = "docker run --rm --name claude-egress-proxy-x-probe-check --network claude-egress-x" ]
+  # Both names are under the stopped-only prune's prefix.
+  [[ "$EGRESS_PROBE_CONTROL" == claude-egress-proxy-* && "$EGRESS_PROBE_CHECK" == claude-egress-proxy-* ]]
+}
+
+@test "egress_dns_probe: only an answer without an address passes" {
+  WITH_EGRESS_ALLOWLIST=1 EGRESS_PROBE_CONTROL=c-probe-control EGRESS_PROBE_CHECK=c-probe-check
+  local code
+  for code in ENOTFOUND EREFUSED ESERVFAIL ENODATA; do
+    STUB_PROBE_CHECK="ERR $code"
+    egress_dns_probe
+  done
+  for code in "ADDR 93.184.215.14" "ERR ETIMEOUT" "ERR ECONNREFUSED" "ERR EOTHER" ""; do
+    STUB_PROBE_CHECK="$code"
+    run egress_dns_probe
+    [ "$status" -eq 1 ] || { echo "passed: '$code'"; return 1; }
+    [[ "$output" == *DNS* ]]
+  done
+  STUB_PROBE_CHECK="ADDR 93.184.215.14"
+  run egress_dns_probe
+  [[ "$output" == *"DNS is open"* ]]
+}
+
+@test "egress_dns_probe: a control that doesn't resolve, or can't run, is inconclusive" {
+  WITH_EGRESS_ALLOWLIST=1 EGRESS_PROBE_CONTROL=c-probe-control EGRESS_PROBE_CHECK=c-probe-check
+  local out
+  for out in "ERR ETIMEOUT" "ERR ENOTFOUND" ""; do
+    STUB_PROBE_CONTROL="$out"
+    run egress_dns_probe
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"DNS check is inconclusive"* ]]
+  done
+  STUB_PROBE_CONTROL="ADDR 1.2.3.4" STUB_FAIL="run"
+  run egress_dns_probe
+  [ "$status" -eq 1 ]
+  [ "$(grep -c '^docker run' "$CALLS")" -ge 1 ]
+}
+
+@test "egress_dns_probe: no-op without the flag" {
+  egress_dns_probe
+  [ ! -s "$CALLS" ]
+}
+
+# A main() run of an --egress-allowlist session; $HOME/team.allow holds $1.
+allowlist_main() {
+  export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://gw.example.eu
+  STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
+  printf '%s' "$1" >"$HOME/team.allow"
+  shift
+  run_script --ephemeral --api --egress-lock "$@" "$WS"
+}
+
+@test "main: --egress-allowlist probes DNS after the networks and before both sidecars" {
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 0 ]
+  local net ctl chk auth proxy
+  net=$(grep -n "^docker network create --internal" "$CALLS" | cut -d: -f1)
+  ctl=$(grep -n "^docker run --rm --name claude-egress-proxy-.*-probe-control" "$CALLS" | cut -d: -f1)
+  chk=$(grep -n "^docker run --rm --name claude-egress-proxy-.*-probe-check" "$CALLS" | cut -d: -f1)
+  auth=$(grep -n "^docker run -d --name claude-auth-proxy-" "$CALLS" | cut -d: -f1)
+  proxy=$(grep -n "^docker run -d --name claude-egress-proxy-" "$CALLS" | cut -d: -f1)
+  [ "$net" -lt "$ctl" ] && [ "$ctl" -lt "$chk" ] && [ "$chk" -lt "$auth" ] && [ "$auth" -lt "$proxy" ]
+  # The EXIT trap removes both probes by name.
+  grep -q "^docker rm -f claude-egress-proxy-[^ ]*-probe-control claude-egress-proxy-[^ ]*-probe-check$" "$CALLS"
+}
+
+@test "main: a failed DNS check starts no sidecar and cleans up" {
+  STUB_PROBE_CHECK="ADDR 93.184.215.14"
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"DNS is open"* ]]
+  run ! grep -q "^docker run -d" "$CALLS"
+  grep -q "^docker network rm claude-egress-" "$CALLS"
+}
+
+@test "main: --egress-allowlist saves the config and the list's evidence" {
+  printf 'pypi.org\n' >"$HOME/real.allow"
+  mkdir -p "$HOME/etc"
+  mv "$HOME/real.allow" "$HOME/etc/team"
+  ln -s "$HOME/etc/team" "$HOME/link.allow"
+  export CLAUDE_DOCKER_ADD_HOSTS=git.corp.example:10.0.0.5
+  allowlist_main "" "--egress-allowlist=$HOME/link.allow"
+  [ "$status" -eq 0 ]
+  local dir="$HOME/.local/state/claude-docker/egress" meta conf
+  meta=$(ls "$dir"/*.meta)
+  conf="${meta%.meta}.conf"
+  grep -qx "allowlist_file=$HOME/etc/team" "$meta"
+  grep -qx "allowlist_sha256=$(sha256sum "$HOME/etc/team" | cut -d' ' -f1)" "$meta"
+  grep -q "^allowlist_add_hosts=.*git.corp.example:10.0.0.5" "$meta"
+  grep -q "^allowlist_add_hosts=.*claude-docker-api-proxy:10.0.0.2" "$meta"
+  [ "$(grep -c '^[a-z_0-9]*=' "$meta")" -eq 13 ]
+  # The config the proxy was started with, owner-only.
+  cmp "$conf" "$STUB_SQUID_CONF"
+  [ "$(stat -c %a "$conf")" = 600 ]
+  grep -qx "acl egress_allowed_names dstdomain -n pypi.org" "$conf"
+}
+
+@test "main: --gh sidecar hosts are in the allowlist evidence" {
+  export GH_TOKEN=t
+  allowlist_main ".github.com" --gh "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 0 ]
+  grep -q "^allowlist_add_hosts=github.com:10.0.0.2 api.github.com:10.0.0.2 uploads.github.com:10.0.0.2 " \
+    "$HOME"/.local/state/claude-docker/egress/*.meta
+}
+
+@test "main: without --egress-allowlist, the same meta keys and no .conf, env var or not" {
+  local v
+  for v in "" /nonexistent; do
+    rm -rf "$HOME/.local/state"
+    : >"$CALLS"
+    if [ -n "$v" ]; then export CLAUDE_DOCKER_EGRESS_ALLOWLIST="$v"; fi
+    export ANTHROPIC_AUTH_TOKEN=sk-test ANTHROPIC_BASE_URL=https://gw.example.eu
+    STUB_LOGS=$'serving initial configuration\nAccepting HTTP Socket connections'
+    run_script --ephemeral --api --egress-lock "$WS"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *allowlist* ]]
+    [ "$(grep -c '^[a-z_]*=' "$HOME"/.local/state/claude-docker/egress/*.meta)" -eq 10 ]
+    run ! ls "$HOME"/.local/state/claude-docker/egress/*.conf
+    run ! grep -q -- "-probe-" "$CALLS"
+  done
+}
+
+@test "main: an evidence dir that can't be created aborts before the proxy starts" {
+  : >"$BATS_TEST_TMPDIR/file"
+  export XDG_STATE_HOME="$BATS_TEST_TMPDIR/file/state"
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"could not save the --egress-allowlist squid config to $XDG_STATE_HOME/claude-docker/egress/"* ]]
+  run ! grep -q "^docker run -d --name claude-egress-proxy-" "$CALLS"
+}
+
+@test "main: the saved config survives a failed log copy" {
+  allowlist_main "" "--egress-allowlist=$HOME/team.allow"
+  [ "$status" -eq 0 ]
+  local conf
+  conf=$(ls "$HOME"/.local/state/claude-docker/egress/*.conf)
+  rm "${conf%.conf}".{log,meta}
+  # Teardown again, now with an engine that can't return the log.
+  egress_started="$(basename "$conf" | cut -d- -f1)" proxy_sid="$(basename "$conf" .conf | cut -d- -f2)"
+  EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress" WITH_EGRESS_ALLOWLIST=1 STUB_FAIL="logs"
+  run egress_save_log
+  [[ "$output" == *"missing or incomplete"* ]]
+  [ -s "$conf" ]
+}
+
+@test "egress_save_log: a .meta that can't be written still lets the trap remove everything" {
+  STUB_LOGS="x"
+  (
+    create_stage
+    egress_started=20260101T000000Z WITH_EGRESS_ALLOWLIST=1
+    mkdir -p "$EGRESS_LOG_DIR/20260101T000000Z-${stage##*.}.meta"
+    echo "${stage##*.}" >"$BATS_TEST_TMPDIR/sid"
+  ) 2>"$BATS_TEST_TMPDIR/stderr"
+  local sid
+  sid=$(cat "$BATS_TEST_TMPDIR/sid")
+  grep -q "could not write" "$BATS_TEST_TMPDIR/stderr"
+  grep -q "^docker rm -f claude-egress-proxy-$sid$" "$CALLS"
+  grep -q "^docker network rm claude-egress-$sid claude-egress-out-$sid$" "$CALLS"
+}
+
+@test "create_stage: a failed probe removal still removes the sidecars and networks" {
+  STUB_FAIL="rm"
+  (
+    create_stage
+    WITH_EGRESS_ALLOWLIST=1
+    echo "${stage##*.}" >"$BATS_TEST_TMPDIR/sid"
+  ) 2>/dev/null
+  local sid
+  sid=$(cat "$BATS_TEST_TMPDIR/sid")
+  grep -q "^docker rm -f claude-egress-proxy-$sid-probe-control claude-egress-proxy-$sid-probe-check$" "$CALLS"
+  grep -q "^docker network rm claude-auth-$sid$" "$CALLS"
+  grep -q "^docker network rm claude-egress-$sid claude-egress-out-$sid$" "$CALLS"
+}
+
+@test "stage_gh_proxy_site: under --egress-allowlist, stages the bytes that were checked" {
+  printf 'route /x { respond 1 }\n' >"$HOME/gh.caddy"
+  allowlist_setup ".github.com"
+  WITH_GH=1 CLAUDE_DOCKER_GH_POLICY="$HOME/gh.caddy"
+  validate_opts
+  # The file changes after the check; the stage gets what was checked.
+  printf 'route /y { respond 2 }\n' >"$HOME/gh.caddy"
+  mkdir -p "$BATS_TEST_TMPDIR/caddy/sites"
+  stage_gh_proxy_site "$BATS_TEST_TMPDIR/caddy"
+  [ "$(cat "$BATS_TEST_TMPDIR/caddy/policy.caddy")" = "route /x { respond 1 }" ]
+}
+
+@test "--help: documents --egress-allowlist and its env var" {
+  local flag env
+  # The flag's own entry: from its name to the next flag.
+  flag=$(print_help | sed -n '/^  --egress-allowlist\[=FILE\]$/,/^  --iterm/p' | sed '$d')
+  [[ "$flag" == *"Needs --egress-lock"* ]]
+  [[ "$flag" == *"FILE"* ]]
+  [[ "$flag" == *"CLAUDE_DOCKER_EGRESS_ALLOWLIST"* ]]
+  env=$(print_help | sed -n '/^  CLAUDE_DOCKER_EGRESS_ALLOWLIST$/,/^  XDG_STATE_HOME/p')
+  [[ "$env" == *"--egress-allowlist"* ]]
+  [[ "$(print_help)" == *"--egress-lock       With --api or --api-direct"* ]]
+}
+
+@test "the squid harness's expected config list matches what these tests write" {
+  local dir="${BATS_TEST_DIRNAME}/../egress-proxy"
+  diff <(sed -e '/^#/d' -e '/^$/d' "$dir/expected-configs.txt" | sort) \
+       <(grep -o '^ *save_for_harness [a-z0-9-][a-z0-9-]*' "$BATS_TEST_FILENAME" \
+         | awk '{print $2 ".conf"}' | sort -u)
 }
