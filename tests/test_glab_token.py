@@ -13,7 +13,7 @@ container gets a placeholder (GlabProxied below).
 Stdlib only, so CI's unit-test step keeps running with no install step.
 """
 
-import os
+import shutil
 import subprocess
 import tempfile
 import unittest
@@ -21,6 +21,11 @@ from pathlib import Path
 
 RUN_SH = Path(__file__).resolve().parent.parent / "run.sh"
 SECRET = "glpat-from-host-glab"
+# The host commands run.sh calls under --glab-direct with the stub docker, for
+# a PATH without glab. Listed rather than copied from /usr/bin, so the test
+# doesn't depend on what the runner image ships. If run.sh starts calling
+# another command, the run fails with "command not found": add it here.
+RUN_SH_TOOLS = ("basename", "bash", "cp", "git", "id", "mkdir", "mktemp", "rm", "sed", "uname")
 
 # Records the agent `run --rm`: argv plus the values docker would read for
 # GITLAB_TOKEN / GITLAB_HOST. The sidecar `run -d` is recorded separately, and
@@ -176,10 +181,10 @@ class GlabTokenDiscovery(unittest.TestCase):
         (self.bin / "glab").unlink()
         sysbin = Path(self.tmp.name) / "sysbin"
         sysbin.mkdir()
-        for d in ("/usr/bin", "/bin"):
-            for name in os.listdir(d):
-                if name != "glab" and not (sysbin / name).exists():
-                    (sysbin / name).symlink_to(Path(d) / name)
+        for name in RUN_SH_TOOLS:
+            real = shutil.which(name)
+            self.assertIsNotNone(real, f"{name} not on PATH")
+            (sysbin / name).symlink_to(real)
         argv, token = self._run(drop=("GITLAB_HOST",), path=str(sysbin))
         self.assertEqual(token, "")
         self.assertNotIn("GITLAB_TOKEN", argv)

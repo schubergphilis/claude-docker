@@ -173,6 +173,70 @@ status_fixture() {
   [[ "$output" == *done* ]]
 }
 
+# --- check_git_trust ---------------------------------------------------------
+
+# git stands in for the system config and `git init`; git_opens answers per
+# path: OUTSIDE for a repo outside the workspace, INSIDE for one under it.
+git_trust_stubs() {
+  WORKSPACE="$BATS_TEST_TMPDIR/ws"
+  mkdir -p "$WORKSPACE"
+  SYSTEM_TRUST="$WORKSPACE"$'\n'"$WORKSPACE/*"
+  OUTSIDE="fatal: detected dubious ownership in repository at '/tmp/x'"
+  INSIDE=ok
+  INIT_FAILS=""
+  git() {
+    case "$1" in
+      config) printf '%s\n' "$SYSTEM_TRUST" ;;
+      init) [ -z "$INIT_FAILS" ] && mkdir -p "$3" ;;
+    esac
+  }
+  git_opens() {
+    case "$1" in "$WORKSPACE"/*) echo "$INSIDE" ;; *) echo "$OUTSIDE" ;; esac
+  }
+}
+
+@test "check_git_trust: the vouched-for workspace is trusted and a foreign repo refused" {
+  git_trust_stubs
+  run check_git_trust
+  [[ "$output" == *"PASS: git-safe-directory-system: got '$WORKSPACE,$WORKSPACE/*'"* ]]
+  [[ "$output" == *"PASS: git-trust: foreign-owned repo outside /workspaces refused"* ]]
+  [[ "$output" == *"PASS: git-trust: foreign-owned repo under a trusted workspace opens"* ]]
+  [[ "$output" == *"PASS: git-trust: survives an exported GIT_CONFIG_* set"* ]]
+  [[ "$output" != *FAIL* ]]
+}
+
+@test "check_git_trust: a wider system entry fails" {
+  git_trust_stubs
+  SYSTEM_TRUST='/workspaces/*'
+  run check_git_trust
+  [[ "$output" == *"FAIL: git-safe-directory-system"* ]]
+}
+
+@test "check_git_trust: a foreign repo outside /workspaces that opens fails" {
+  git_trust_stubs
+  OUTSIDE=ok
+  run check_git_trust
+  [[ "$output" == *"FAIL: git-trust: foreign-owned repo outside /workspaces was not refused"* ]]
+}
+
+@test "check_git_trust: under EXPECT_RO=1 the workspace repo is skipped" {
+  git_trust_stubs
+  EXPECT_RO=1 run check_git_trust
+  [[ "$output" == *"PASS: git-trust-workspace: skipped (EXPECT_RO=1"* ]]
+  [[ "$output" != *"under a trusted workspace"* ]]
+}
+
+@test "check_git_trust: a failed git init is a FAIL, not an abort, and leaves no repo" {
+  git_trust_stubs
+  INIT_FAILS=1
+  run bash -c 'set -euo pipefail; source "$1"; '"$(declare -f git_trust_stubs)"'; git_trust_stubs; INIT_FAILS=1; WORKSPACE=$2; check_git_trust; echo done' _ \
+    "${BATS_TEST_DIRNAME}/../smoke/assert-in-container.sh" "$WORKSPACE"
+  [[ "$output" == *"FAIL: git-trust: could not create a repo outside /workspaces"* ]]
+  [[ "$output" == *"FAIL: git-trust: could not create a repo under $WORKSPACE"* ]]
+  [[ "$output" == *done* ]]
+  [ -z "$(ls -A "$WORKSPACE")" ]
+}
+
 # --- check_mask_set ----------------------------------------------------------
 
 # One tmpfs line per mountpoint, plus a non-tmpfs mount under /root to ignore.
@@ -387,6 +451,7 @@ stub_checks() {
   check_identity() { pass c2; }
   check_security() { pass c3; }
   check_path_order() { pass c4; }
+  check_git_trust() { pass c4b; }
   check_workspace_write() { pass c5; }
   check_credentials() { pass c6; }
   check_aws_state_masking() { pass c7; }
@@ -399,7 +464,7 @@ stub_checks() {
   check_settings() { fail settings; }
   run main
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Results: 9 passed, 1 failed"* ]]
+  [[ "$output" == *"Results: 10 passed, 1 failed"* ]]
   [[ "$output" == *"RESULT: FAIL" ]]
   [[ "$output" != *"RESULT: PASS"* ]]
 }

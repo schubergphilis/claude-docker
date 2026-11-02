@@ -7,8 +7,9 @@ setup() {
   SEED_SETTINGS="$BATS_TEST_TMPDIR/seed.json"
   ROOT_HOME="$BATS_TEST_TMPDIR/root"
   CA_DIR="$BATS_TEST_TMPDIR/ca"
+  GIT_SYSTEM_CONFIG="$BATS_TEST_TMPDIR/gitconfig"
   mkdir -p "$ROOT_HOME" "$CA_DIR"
-  unset HOST_UID HOST_GID
+  unset HOST_UID HOST_GID CLAUDE_DOCKER_TRUSTED_WORKSPACES
   # Each stub echoes its call so tests can assert on what ran.
   chown() { echo "chown $*"; }
   groupadd() { echo "groupadd $*"; }
@@ -127,6 +128,46 @@ setup() {
   xargs() { echo "LC_ALL=${LC_ALL-}" >&2; }
   HOST_UID=1000 HOST_GID=1000 run main true
   [[ "$output" == *"entrypoint: WARN chown: LC_ALL=C"* ]]
+}
+
+# --- trust_workspaces ---
+
+# The safe.directory values written to the stand-in system config.
+trusted() { command git config --file "$GIT_SYSTEM_CONFIG" --get-all safe.directory | paste -sd,; }
+
+@test "trust_workspaces: each vouched-for workspace and its nested repos are trusted" {
+  CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo:/workspaces/other run trust_workspaces
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ "$(trusted)" = "/workspaces/repo,/workspaces/repo/*,/workspaces/other,/workspaces/other/*" ]
+}
+
+@test "trust_workspaces: no list writes nothing" {
+  run trust_workspaces
+  [ "$status" -eq 0 ]
+  [ ! -e "$GIT_SYSTEM_CONFIG" ]
+}
+
+@test "trust_workspaces: anything but /workspaces/<name> is refused with a WARN" {
+  CLAUDE_DOCKER_TRUSTED_WORKSPACES='*:/workspaces/*:/workspaces/a/b:/workspaces/..:/workspaces/:/etc:/workspaces/ok' \
+    run trust_workspaces
+  [ "$status" -eq 0 ]
+  [ "$(trusted)" = "/workspaces/ok,/workspaces/ok/*" ]
+  [ "$(grep -c 'entrypoint: WARN not trusting' <<<"$output")" -eq 6 ]
+}
+
+@test "trust_workspaces: also runs when the session stays root" {
+  # Container root is not the host owner either, so git still needs the entry.
+  CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo run main echo hello
+  [ "$status" -eq 0 ] && [ "$output" = hello ]
+  [ "$(trusted)" = "/workspaces/repo,/workspaces/repo/*" ]
+}
+
+@test "trust_workspaces: a failed write stops main before the exec" {
+  git() { return 1; }
+  CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo run main echo should-not-run
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"entrypoint: ERROR could not trust /workspaces/repo for git"* ]]
+  [[ "$output" != *should-not-run* ]]
 }
 
 @test "no claude-docker CA skips update-ca-certificates" {
