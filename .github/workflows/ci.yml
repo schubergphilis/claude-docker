@@ -266,6 +266,9 @@ jobs:
       - name: Vulnerability scan (egress proxy) — HIGH/CRITICAL with a fix available (gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Trivy and its DB are already set up by the first scan in this job.
+          skip-setup-trivy: true
+          cache: false
           scan-type: image
           scan-ref: claude-docker-egress-proxy:ci
           severity: HIGH,CRITICAL
@@ -304,6 +307,9 @@ jobs:
         # step with a failure annotation while it is doing exactly its job.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Trivy and its DB are already set up by the first scan in this job.
+          skip-setup-trivy: true
+          cache: false
           scan-type: image
           scan-ref: claude-docker:ci
           severity: HIGH,CRITICAL
@@ -327,6 +333,9 @@ jobs:
         # weaken severity or exit-code here.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Trivy and its DB are already set up by the first scan in this job.
+          skip-setup-trivy: true
+          cache: false
           scan-type: image
           scan-ref: claude-docker:ci
           severity: HIGH,CRITICAL

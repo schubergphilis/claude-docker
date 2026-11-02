@@ -184,14 +184,25 @@ run_table() {
     [ -n "$expect" ] || continue
     printf '%s\n' "$req" >>"$WORK/requests"
   done <"$table"
-  # One status line per request; nc -w bounds a tunnel that stays open. The
-  # sleep keeps the client's side open: squid abandons a request whose
-  # client half-closed while its DNS lookup was still pending.
+  # One status line per request, in table order; nc -w bounds a tunnel that
+  # stays open. The sleep keeps the client's side open: squid abandons a
+  # request whose client half-closed while its DNS lookup was still pending.
+  # The requests run in parallel, except the last: it is sent alone once
+  # every other one has its answer, so a table's barrier (a listed name,
+  # last) is still the last DNS query any request can cause.
   docker run --rm --network "$NET" -v "$WORK/requests:/requests:ro" --entrypoint sh "$HELPER_IMAGE" -c '
+    last=$(wc -l </requests) n=0
     while IFS= read -r r; do
-      s=$({ printf "$r"; sleep 2; } | nc -w 4 '"$SQUID_IP"' 3128 2>/dev/null | head -1 | cut -d" " -f2)
-      echo "${s:-none}"
-    done </requests' >"$WORK/codes"
+      n=$((n + 1))
+      [ "$n" -lt "$last" ] || wait
+      {
+        s=$({ printf "$r"; sleep 2; } | nc -w 4 '"$SQUID_IP"' 3128 2>/dev/null | head -1 | cut -d" " -f2)
+        echo "${s:-none}" >"/tmp/code.$n"
+      } &
+    done </requests
+    wait
+    i=1
+    while [ "$i" -le "$n" ]; do cat "/tmp/code.$i"; i=$((i + 1)); done' >"$WORK/codes"
   while IFS=$'\t' read -r expect req; do
     [ -n "$expect" ] || continue
     n=$((n + 1))
