@@ -515,11 +515,11 @@ http_access allow all" ]
   [ "$IS_MSYS" = 0 ]
 }
 
-@test "detect_msys: Git Bash uses UID 1000 and trusts only /workspaces" {
+@test "detect_msys: Git Bash uses UID 1000 and passes no git config" {
   uname() { echo MINGW64_NT-10.0; }
   detect_msys
   [ "$HOST_UID" = 1000 ] && [ "$HOST_GID" = 1000 ]
-  [ "$(lines_of "${GIT_CFG[@]}")" = $'safe.directory\n/workspaces/*' ]
+  [ "${#GIT_CFG[@]}" -eq 0 ]
 }
 
 @test "detect_msys: Linux keeps id -u and adds no git config" {
@@ -639,6 +639,137 @@ http_access allow all" ]
   run build_workspace_mounts
   [ "$status" -eq 1 ]
   [[ "$output" == *"workspace basename collision"* ]]
+}
+
+# --- build_git_trust ---
+
+# Two workspaces, both repos; FOREIGN lists the host paths another user owns.
+setup_git_trust() {
+  mkdir -p "$WS/.git" "$BATS_TEST_TMPDIR/other/.git"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/other")
+  build_workspace_mounts
+  FOREIGN=""
+  owned_by_me() { [[ " $FOREIGN " != *" $1 "* ]]; }
+  IS_MSYS=0
+}
+# The CLAUDE_DOCKER_TRUSTED_WORKSPACES value build_git_trust passed.
+trusted_value() {
+  local a
+  for a in "${ENV_ARGS[@]}"; do
+    case "$a" in CLAUDE_DOCKER_TRUSTED_WORKSPACES=*) printf '%s\n' "${a#*=}" ;; esac
+  done
+}
+
+@test "build_git_trust: workspaces you own, with .git you own, are trusted" {
+  setup_git_trust
+  build_git_trust
+  [ "$(trusted_value)" = /workspaces/repo:/workspaces/other ]
+}
+
+@test "build_git_trust: a workspace another user owns is not trusted, and said so" {
+  setup_git_trust
+  FOREIGN="$BATS_TEST_TMPDIR/other"
+  build_git_trust 2>"$BATS_TEST_TMPDIR/err"
+  [ "$(trusted_value)" = /workspaces/repo ]
+  grep -q "'$BATS_TEST_TMPDIR/other' or its git directory belongs to another user, so git in the container won't trust it" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "build_git_trust: a workspace whose .git another user owns is not trusted" {
+  setup_git_trust
+  FOREIGN="$WS/.git"
+  build_git_trust 2>/dev/null
+  [ "$(trusted_value)" = /workspaces/other ]
+}
+
+@test "build_git_trust: a workspace without .git is trusted when you own it" {
+  setup_git_trust
+  rm -rf "$WS/.git"
+  build_git_trust
+  [ "$(trusted_value)" = /workspaces/repo:/workspaces/other ]
+}
+
+@test "build_git_trust: no workspace you own passes an empty list" {
+  setup_git_trust
+  FOREIGN="$WS $BATS_TEST_TMPDIR/other"
+  build_git_trust 2>/dev/null
+  [ "$(trusted_value)" = "" ] && [ "$(trusted_value | wc -l)" -eq 1 ]
+}
+
+@test "build_git_trust: on Windows every workspace is trusted, without a notice" {
+  setup_git_trust
+  FOREIGN="$WS $BATS_TEST_TMPDIR/other"
+  IS_MSYS=1
+  build_git_trust 2>"$BATS_TEST_TMPDIR/err"
+  [ "$(trusted_value)" = /workspaces/repo:/workspaces/other ]
+  [ ! -s "$BATS_TEST_TMPDIR/err" ]
+}
+
+@test "build_git_trust: a worktree whose gitdir another user owns is not trusted" {
+  setup_git_trust
+  rm -rf "$WS/.git"
+  mkdir -p "$BATS_TEST_TMPDIR/main/.git/worktrees/repo"
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/main/.git/worktrees/repo" >"$WS/.git"
+  FOREIGN="$BATS_TEST_TMPDIR/main/.git/worktrees/repo"
+  build_git_trust 2>/dev/null
+  [ "$(trusted_value)" = /workspaces/other ]
+}
+
+@test "build_git_trust: a worktree whose commondir another user owns is not trusted" {
+  setup_git_trust
+  rm -rf "$WS/.git"
+  mkdir -p "$BATS_TEST_TMPDIR/main/.git/worktrees/repo"
+  printf '../..\n' >"$BATS_TEST_TMPDIR/main/.git/worktrees/repo/commondir"
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/main/.git/worktrees/repo" >"$WS/.git"
+  FOREIGN="$BATS_TEST_TMPDIR/main/.git/worktrees/repo/../.."
+  build_git_trust 2>/dev/null
+  [ "$(trusted_value)" = /workspaces/other ]
+  FOREIGN=""
+  ENV_ARGS=()
+  build_git_trust
+  [ "$(trusted_value)" = /workspaces/repo:/workspaces/other ]
+}
+
+@test "build_git_trust: a relative gitdir resolves against the workspace" {
+  setup_git_trust
+  rm -rf "$WS/.git"
+  mkdir -p "$WS/../main/.git/worktrees/repo"
+  printf 'gitdir: ../main/.git/worktrees/repo\n' >"$WS/.git"
+  FOREIGN="$WS/../main/.git/worktrees/repo"
+  build_git_trust 2>/dev/null
+  [ "$(trusted_value)" = /workspaces/other ]
+}
+
+@test "build_git_trust: a .git file without a gitdir line is not trusted" {
+  setup_git_trust
+  rm -rf "$WS/.git"
+  printf 'not a pointer\n' >"$WS/.git"
+  build_git_trust 2>/dev/null
+  [ "$(trusted_value)" = /workspaces/other ]
+}
+
+@test "build_git_trust: a .git symlink is not trusted" {
+  setup_git_trust
+  rm -rf "$WS/.git"
+  mkdir -p "$BATS_TEST_TMPDIR/elsewhere"
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$WS/.git"
+  build_git_trust 2>/dev/null
+  [ "$(trusted_value)" = /workspaces/other ]
+}
+
+@test "build_git_trust: a foreign workspace inside a trusted one is named as trusted anyway" {
+  mkdir -p "$WS/.git" "$WS/vendor/.git"
+  WORKSPACES=("$WS" "$WS/vendor") WORKSPACES_RO=(0 1)
+  build_workspace_mounts 2>/dev/null
+  FOREIGN="$WS/vendor"
+  owned_by_me() { [[ " $FOREIGN " != *" $1 "* ]]; }
+  IS_MSYS=0
+  build_git_trust 2>"$BATS_TEST_TMPDIR/err"
+  [ "$(trusted_value)" = /workspaces/repo ]
+  grep -q "'$WS/vendor' or its git directory belongs to another user, but it sits inside '$WS', so git in the container trusts it anyway; pass it on its own, or leave it out" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "owned_by_me: a directory you created is yours" {
+  owned_by_me "$WS"
 }
 
 # --- build_cred_mounts ---
@@ -915,10 +1046,11 @@ TABLE
 @test "build_git_config: one credential helper per forge host" {
   WITH_GH_DIRECT=1 WITH_GLAB_DIRECT=1 WITH_AZ=1
   GITLAB_HOST=https://gitlab.example.com:8443/ AZURE_DEVOPS_ORG_URL=https://ado.example.com/tfs/Coll
-  GIT_CFG=(safe.directory "/workspaces/*")
+  # An entry already on the list keeps its place in front of the helpers.
+  GIT_CFG=(credential.https://git.example.com.helper "!true")
   build_git_config
   env=$(lines_of "${ENV_ARGS[@]}")
-  [[ "$env" == *$'GIT_CONFIG_KEY_0=safe.directory\n-e\nGIT_CONFIG_VALUE_0=/workspaces/*'* ]]
+  [[ "$env" == *$'GIT_CONFIG_KEY_0=credential.https://git.example.com.helper\n-e\nGIT_CONFIG_VALUE_0=!true'* ]]
   [[ "$env" == *$'GIT_CONFIG_KEY_1=credential.https://github.com.helper\n-e\nGIT_CONFIG_VALUE_1=!gh auth git-credential'* ]]
   [[ "$env" == *$'GIT_CONFIG_KEY_2=credential.https://gitlab.example.com:8443.helper\n-e\nGIT_CONFIG_VALUE_2=!glab auth git-credential'* ]]
   [[ "$env" == *"GIT_CONFIG_KEY_3=credential.https://ado.example.com.helper"* ]]

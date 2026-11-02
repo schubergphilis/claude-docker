@@ -460,7 +460,7 @@ So that git can fetch and push over HTTPS with the token a forge flag already fo
 - `--glab`: `credential.https://<host>.helper` set to `glab auth git-credential`, where `<host>` is `GITLAB_HOST` after token discovery (keeping any port), else `gitlab.com`.
 - `--az`: `credential.https://<host>.helper` for the host of `AZURE_DEVOPS_ORG_URL`, else `dev.azure.com`, set to a helper that answers `get` with `AZURE_DEVOPS_EXT_PAT` read from the container env when git calls it. The PAT SHALL NOT appear in argv or in the helper string.
 
-Each helper SHALL be scoped to its host so git never offers that token to another host. A `<host>` that is not a plain `host[:port]` (empty, as from `AZURE_DEVOPS_ORG_URL=https://`, or a `*` glob) SHALL get no helper, with a warning on stderr: git matches an empty host against every host. The config SHALL be passed as `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` env, on one list with any other such entries (`safe.directory` on Git Bash), so nothing is written to `~/.gitconfig`. `run.sh` SHALL NOT rewrite SSH remotes.
+Each helper SHALL be scoped to its host so git never offers that token to another host. A `<host>` that is not a plain `host[:port]` (empty, as from `AZURE_DEVOPS_ORG_URL=https://`, or a `*` glob) SHALL get no helper, with a warning on stderr: git matches an empty host against every host. The config SHALL be passed as `GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_<n>` / `GIT_CONFIG_VALUE_<n>` env, so nothing is written to `~/.gitconfig`. `run.sh` SHALL NOT rewrite SSH remotes.
 
 #### Scenario: HTTPS push works under --glab
 
@@ -482,5 +482,5 @@ Each helper SHALL be scoped to its host so git never offers that token to anothe
 
 #### Scenario: No forge flag, no helper
 
-- **WHEN** user runs `claude-docker ~/repo` on a Linux or macOS host
+- **WHEN** user runs `claude-docker ~/repo` on any host
 - **THEN** no `GIT_CONFIG_*` env is passed to the container
