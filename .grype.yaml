@@ -20,23 +20,6 @@ ignore:
       type: binary
     reason: AWS CLI v2's vendored interpreter; moves with pins/awscli.env.
 
-  # az's cryptography, held at 48.x by azure-cli-core's exact msal==1.36.0 pin
-  # (msal <1.39 caps cryptography <49); only a core release moves it. Scoped to
-  # this version and /opt/az, so a newer resolution or any other copy of
-  # cryptography stays enforced. Mirrors the two .trivyignore entries.
-  - package:
-      name: cryptography
-      version: 48.0.1
-      location: /opt/az/**
-    reason: Held by azure-cli-core's msal pin; moves with pins/az.env.
-  # The same pin as the action's second scan (the repo checkout) sees it: the
-  # hash-locked requirements file the Dockerfile installs /opt/az from.
-  - package:
-      name: cryptography
-      version: 48.0.1
-      location: "**/pins/az-requirements.txt"
-    reason: Held by azure-cli-core's msal pin; moves with pins/az.env.
-
   # GHSA-vfj7-8cjw-p6xm (stack-exhaustion DoS on deeply nested brace patterns)
   # covers every braces release; 3.0.3 is the latest and none is patched. It
   # reaches us only as openspec -> fast-glob -> micromatch -> braces, all three
@@ -53,8 +36,8 @@ ignore:
   # npm's own bundle (pins/npm.env). npm vendors its deps, so this clears only
   # with an npm release that carries the fix; npm 12.2.1 still ships undici
   # 6.29.0. Scoped to version and npm's tree, so an npm bump that moves it, or
-  # any other copy, stays enforced. Mirrors the npm-tree half of the
-  # CVE-2026-109869 .trivyignore entry.
+  # any other copy, stays enforced. Mirrors the npm-tree half of the undici
+  # .trivyignore entries (CVE-2026-109869, 109383, 87018).
   #
   # When a pin refresh moves a bundled version, this rule stops matching.
   # ci.yml's grype gate fails the PR on it, fixable or not, even though
@@ -67,15 +50,3 @@ ignore:
     reason: >-
       Bundled by npm 12.2.1 (pinned) at 6.29.0; no npm release carries
       6.29.1 yet. Moves with pins/npm.env.
-
-  # pnpm's bundle (pins/pnpm.env) vendors undici 6.29.0 under pnpm/dist; the
-  # fix for CVE-2026-109869 needs 6.29.1. pnpm 12.15.0 carries it and leaves
-  # the 7-day soak on 2026-10-28. Mirrors the .trivyignore entry, scoped to
-  # this version and pnpm's tree like the npm rules above.
-  - package:
-      name: undici
-      version: 6.29.0
-      location: "**/node_modules/pnpm/**"
-    reason: >-
-      Bundled by pnpm; the fixed 12.15.0 is still in the soak window. Moves
-      with pins/pnpm.env.
