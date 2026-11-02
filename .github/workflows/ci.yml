@@ -69,6 +69,9 @@ jobs:
         # it, so nothing here touches GitHub.
         run: bash tests/draft-release/run_tests.sh
 
+      - name: PR-title action tests
+        run: bash tests/validate-pr-title/run_tests.sh
+
       - name: Hadolint Dockerfile
         uses: hadolint/hadolint-action@06be81baf89a55ffd0e24b8f04a4185738dd3387 # v3.5.0
         with:

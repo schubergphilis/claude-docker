@@ -11,6 +11,11 @@ Contributions to `claude-docker` are welcome from anyone.
 3. If the change touches behaviour or a spec, follow [OpenSpec
    changes](#openspec-changes) below.
 4. Open a PR against `main`; a maintainer will review before it is merged.
+   Write its title as a [Conventional Commit](https://www.conventionalcommits.org/)
+   (`feat(run): add a flag`), like the commits: the next release's version
+   and notes are counted from PR titles, and CI checks the title. Mark a
+   breaking change with `!` in the title or a `BREAKING CHANGE:` footer in
+   the description.
 
 By submitting a contribution, you agree that it is licensed under the
 [Apache License 2.0](LICENSE), the same license as the project.
