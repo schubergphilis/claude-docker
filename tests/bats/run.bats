@@ -933,18 +933,17 @@ TABLE
 }
 
 @test "discover_tokens: --glab with an explicit token and no host glab proxies gitlab.com" {
-  # A PATH with everything but glab, so the gitlab.com fallback is taken.
+  # An empty PATH, so there is no glab and the gitlab.com fallback is taken.
+  # discover_tokens calls nothing else here; a copy of the host's bin dirs
+  # would make the test depend on what the runner image ships.
   unset -f glab
-  nobin="$BATS_TEST_TMPDIR/no-glab-bin"; mkdir -p "$nobin"
-  for f in /usr/local/bin/* /usr/bin/* /bin/*; do
-    case "${f##*/}" in glab) continue ;; esac
-    [ -e "$nobin/${f##*/}" ] || ln -s "$f" "$nobin/${f##*/}"
-  done
-  PATH="$nobin"
+  local saved_path=$PATH
+  PATH="$BATS_TEST_TMPDIR/empty-bin"
   [ -z "$(command -v glab)" ]
   WITH_GLAB=1 GITLAB_TOKEN=glpat_explicit
   SEEN_PATHS=("$WS")
   discover_tokens
+  PATH=$saved_path
   [ "$GLAB_HOST_TOKEN" = glpat_explicit ]
   [ "$GLAB_PROXY_HOST" = gitlab.com ]
   [ "$GITLAB_HOST" = gitlab.com ]
