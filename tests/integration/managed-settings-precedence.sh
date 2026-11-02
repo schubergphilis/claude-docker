@@ -52,7 +52,8 @@ main() {
   write_managed_settings
   # The four runs share nothing (each container has --network none and its
   # own loopback servers), so they run in parallel; each one's output is
-  # printed whole, in a fixed order, once it has finished.
+  # printed whole, in a fixed order, once it has finished. A Ctrl-C while they
+  # run leaves the other --rm containers to finish on their own.
   local rc=0 suite mode i pids=() outs=()
   for suite in endpoint proxy; do
     for mode in control managed; do

@@ -81,6 +81,9 @@ jobs:
       - name: Vulnerability scan — HIGH/CRITICAL with a fix available (gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Trivy and its DB are set up once, by the advisory scan above.
+          skip-setup-trivy: true
+          cache: false
           scan-type: image
           scan-ref: claude-docker:ci
           severity: HIGH,CRITICAL
