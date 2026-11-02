@@ -86,9 +86,10 @@ jobs:
         with:
           globs: "**/*.md"
 
+  # Runs alongside validate rather than after it: waiting cost ~2.5 min per
+  # PR, and both are required checks, so a red validate still blocks the merge.
   docker-build:
     name: Docker build (validate, no push)
-    needs: [validate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -218,14 +219,17 @@ jobs:
         # The --egress-allowlist rules against the squid image run.sh built
         # in the step above, with a stub resolver that logs every query:
         # allow/refuse per rule, no DNS query for a name off the list, and
-        # `squid -k parse` on every config the run.sh BATS suite generates
-        # (so that suite runs here first, to write them). Its passing output is
-        # noise here, but a failure prints the failing tests.
+        # `squid -k parse` on every config the run.sh BATS suite generates.
+        # Only the tests that write those configs run here (the whole suite
+        # runs in validate); the last one checks the set matches
+        # expected-configs.txt. Their passing output is noise here, but a
+        # failure prints the failing tests.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bats
-          bats tests/bats/run.bats > "$RUNNER_TEMP/run-bats.tap" \
+          bats -f "^gen_egress_squid_conf: |squid harness's expected config list" \
+            tests/bats/run.bats > "$RUNNER_TEMP/run-bats.tap" \
             || { grep -A20 '^not ok' "$RUNNER_TEMP/run-bats.tap" \
                    || tail -n 50 "$RUNNER_TEMP/run-bats.tap"; exit 1; }
           bash tests/egress-proxy/harness.sh
@@ -342,7 +346,9 @@ jobs:
       # with its default grype, the image and the repo checkout, and the
       # action's hardcoded severity-cutoff=high and only-fixed=false. So unlike
       # Trivy's gate, these also fail on a finding with no fix: publish would
-      # fail on it too. Accept such a finding in .grype.yaml. tests/
+      # fail on it too. Accept such a finding in .grype.yaml. cache-db only
+      # restores grype's DB from the actions cache; grype still checks it for
+      # updates, so the findings are those of a fresh DB. tests/
       # test_grype_gate.py checks the two workflows agree; bump the SHA together
       # with docker.yml's mcvs-docker-action (docs/maintenance.md).
       #
@@ -359,6 +365,7 @@ jobs:
           only-fixed: false
           fail-build: true
           output-format: table
+          cache-db: true
 
       - name: Vulnerability scan (grype) — repo checkout, HIGH/CRITICAL incl. unfixed (gate)
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
@@ -369,3 +376,4 @@ jobs:
           only-fixed: false
           fail-build: true
           output-format: table
+          cache-db: true
