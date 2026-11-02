@@ -10,6 +10,7 @@ To release, open the draft, check the version and the notes, and click **Publish
 
 - **Another version:** edit the tag in the draft and publish straight away. The next push to `main` redraws the draft and overwrites a hand edit that hasn't been published.
 - **Preview:** run the workflow by hand with `gh workflow run release.yml -f dry_run=true`. It writes the version and notes to the run's summary and leaves the draft alone.
+- **A draft that opens with a warning:** some merged pull requests could not be read. Their type comes from the merge commit, but a `BREAKING CHANGE:` footer in their description is unknown, so the version may be too low. Re-run the workflow (`gh workflow run release.yml`) and check the draft again before you publish.
 - **Only the marked draft is touched:** the workflow recognises its own draft by a marker comment in the body and never changes a published release or a draft you wrote yourself. If two drafts carry the marker, it stops and asks you to delete one.
 
 ## Updating pinned tool versions

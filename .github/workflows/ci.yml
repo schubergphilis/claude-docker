@@ -222,12 +222,15 @@ jobs:
         # in the step above, with a stub resolver that logs every query:
         # allow/refuse per rule, no DNS query for a name off the list, and
         # `squid -k parse` on every config the run.sh BATS suite generates
-        # (so that suite runs here first, to write them).
+        # (so that suite runs here first, to write them). Its passing output is
+        # noise here, but a failure prints the failing tests.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bats
-          bats tests/bats/run.bats >/dev/null
+          bats tests/bats/run.bats > "$RUNNER_TEMP/run-bats.tap" \
+            || { grep -A20 '^not ok' "$RUNNER_TEMP/run-bats.tap" \
+                   || tail -n 50 "$RUNNER_TEMP/run-bats.tap"; exit 1; }
           bash tests/egress-proxy/harness.sh
 
       - name: Managed settings precedence (Claude Code in the image)
