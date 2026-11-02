@@ -31,59 +31,20 @@
 # published image is built without that cache. Changing the apt RUN in the
 # Dockerfile rebuilds the layer and clears it; don't add an entry here for it.
 
-# gh vendors golang.org/x/mod v0.39.0 and the fix needs 0.40.0, which shipped
-# 2026-08-13, three weeks before gh 2.99.0 — upstream skipped it once already.
-# The version is compiled into the binary, so there is nothing to bump here;
-# only a new gh release can clear it. At expiry, check whether gh has picked
-# up x/mod 0.40.0 and drop this if so.
-CVE-2026-56864 exp:2026-11-04
-# Same upstream gap, same binary: gh's vendored golang.org/x/mod v0.39.0
-# against a fix that needs 0.40.0. Each entry carries its own reason because
-# suppression is per-ID and the two are only incidentally related.
-CVE-2026-56865 exp:2026-11-04
-# gh 2.102.0 is built with Go 1.27.1; the net/http fix needs Go 1.26.9 or
-# 1.27.2, both tagged 2026-10-08. gh 2.103.0 (2026-10-21) is built with Go
-# 1.27.3 and clears it, and a fresh build installs it (gh floats to the latest
-# release). This entry stays only for CI builds that reuse a cached gh layer
-# (see the header), which keep the older gh until a RUN before it changes.
-# The Go toolchain pin carries the fix, so this hides nothing a bump here can
-# clear. At expiry, check that CI's gh is >= 2.103.0 and drop this.
-CVE-2026-78667 exp:2026-11-04
-# Same gh binary and Go 1.27.1 gap: crypto/tls ECH extensions, same fix
-# versions. Its own entry because suppression is per-ID.
-CVE-2026-97031 exp:2026-11-04
-# Same gh binary and Go 1.27.1 gap: HTTP/2 SETTINGS flood DoS in net/http and
-# golang.org/x/net (fixed in Go 1.27.2 / x/net 0.60.0). Trivy's DB picked it up
-# after 2026-10-09. Same expiry and reason.
-CVE-2026-78669 exp:2026-11-04
 # undici CVE-2026-109869 (DoS on an unhandled stream error); the fix needs
-# 6.29.1, released upstream 2026-10-15. npm 12.2.1 (pins/npm.env), the
-# latest, vendors 6.29.0. No npm release carries 6.29.1 yet, and npm releases
-# every 1-4 weeks. pnpm 12.12.1 (pins/pnpm.env) vendors 6.29.0; pnpm 12.15.0
-# (2026-10-21) carries 6.29.1 and leaves the 7-day soak on 2026-10-28, so the
-# weekly refresh picks it up. At expiry, check the undici bundled by both pins
-# and drop this if both are fixed.
-CVE-2026-109869 exp:2026-11-04
+# 6.29.1, released upstream 2026-10-15. npm 12.2.1 (pins/npm.env), still the
+# latest npm on 2026-11-02, vendors 6.29.0. pnpm 12.14.0 (pins/pnpm.env) does
+# too, until the pin refresh moves it to 12.15.0, which carries 6.29.1.
+# Expiry: npm's longest gap between releases since July is 28 days (08-26 to
+# 09-22), so the next one is due by ~11-12; the 7-day soak ends ~11-19 and the
+# Monday refresh picks it up 11-23, plus two days to merge. At expiry, check
+# the undici bundled by both pins and drop this if both are fixed.
+CVE-2026-109869 exp:2026-11-25
 # undici CVE-2026-109383 (certificate validation bypass via TLS options dropped
 # in Agent), flagged from 2026-10-28. Fixed in 6.29.1, and it hits the
 # same npm and pnpm copies of 6.29.0, so CVE-2026-109869's expiry and reason
 # apply.
-CVE-2026-109383 exp:2026-11-04
+CVE-2026-109383 exp:2026-11-25
 # undici CVE-2026-87018 (DoS via TLS renegotiation with a mismatched
 # certificate). Same fix, copies, expiry and reason as CVE-2026-109383.
-CVE-2026-87018 exp:2026-11-04
-# Scope note: trivy ignores are per-CVE-ID and image-wide, unlike the path- and
-# version-scoped .grype.yaml rule for the same two CVEs. That is fine while
-# /opt/az holds the image's only cryptography 48.x copy (pins/az-requirements.txt);
-# re-check if another component ever vendors cryptography.
-# az (/opt/az): azure-cli-core 2.90.0 pins msal==1.36.0, which caps
-# cryptography <49, so the venv resolves 48.0.1; the fix is 50.0.0. Full
-# azure-cli ships the same pin — only an azure-cli-core release that moves msal
-# can clear it (msal 1.39.0 already allows <51). PKCS#7 EnvelopedData
-# decryption, which the Azure DevOps commands never call. At expiry, check
-# whether pins/az.env's core release has moved msal and drop this if so.
-CVE-2026-69247 exp:2026-11-04
-# Same msal==1.36.0 cap on the same cryptography 48.0.1 in /opt/az (fix 49.0.0):
-# X.509 path building on duplicate self-signed intermediates. Its own entry
-# because suppression is per-ID.
-CVE-2026-69249 exp:2026-11-04
+CVE-2026-87018 exp:2026-11-25
