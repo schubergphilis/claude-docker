@@ -224,7 +224,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bats
-          bats tests/bats/run.bats >/dev/null
+          bats tests/bats/run.bats > "$RUNNER_TEMP/run-bats.tap" \
+            || { grep -A20 '^not ok' "$RUNNER_TEMP/run-bats.tap"; exit 1; }
           bash tests/egress-proxy/harness.sh
 
       - name: Managed settings precedence (Claude Code in the image)
