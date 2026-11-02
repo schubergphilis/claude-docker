@@ -2118,7 +2118,7 @@ run_statusline() {
 # inode holds and reads in between legitimately succeed; none may return the
 # secret. Against the old [ ! -L ] then cp, this leaked in ~half the reads.
 race_reads() {
-  local sec="$BATS_TEST_TMPDIR/sec" target=$1 leaks=0 reads=0
+  local sec="$BATS_TEST_TMPDIR/sec" target=$1
   (
     cd "$WS" || exit 1
     while :; do
@@ -2127,14 +2127,26 @@ race_reads() {
     done
   ) 3>&- &
   SWAPPER=$!
-  for _ in $(seq 600); do
+  read_while_swapping "$target"
+}
+
+# Read .git/config through cat_nofollow while $SWAPPER runs, then stop it.
+# None of the reads may return the secret, and at least one must succeed, or
+# the race was never exercised. At least 600 attempts and 5 successful
+# reads, up to 6000 attempts: reads succeed only between swaps (~2% of
+# attempts for the .git swap on an idle machine), and on a busy one the
+# swapper won all of a fixed 600 (CI saw reads=0).
+read_while_swapping() {
+  local label=$1 leaks=0 reads=0 tries=0 out
+  while { [ "$tries" -lt 600 ] || [ "$reads" -lt 5 ]; } && [ "$tries" -lt 6000 ]; do
+    tries=$((tries + 1))
     if out=$(cat_nofollow "$WS" .git/config); then
       reads=$((reads + 1))
       [ "$out" = cfg ] || leaks=$((leaks + 1))
     fi
   done
   kill "$SWAPPER"; wait "$SWAPPER" 2>/dev/null || true
-  echo "# $target: reads=$reads leaks=$leaks" >&3
+  echo "# $label: reads=$reads/$tries leaks=$leaks" >&3
   [ "$leaks" -eq 0 ] && [ "$reads" -gt 0 ]
 }
 
@@ -2160,16 +2172,7 @@ race_reads() {
     done
   ) 3>&- &
   SWAPPER=$!
-  leaks=0 reads=0
-  for _ in $(seq 600); do
-    if out=$(cat_nofollow "$WS" .git/config); then
-      reads=$((reads + 1))
-      [ "$out" = cfg ] || leaks=$((leaks + 1))
-    fi
-  done
-  kill "$SWAPPER"; wait "$SWAPPER" 2>/dev/null || true
-  echo "# .git: reads=$reads leaks=$leaks" >&3
-  [ "$leaks" -eq 0 ] && [ "$reads" -gt 0 ]
+  read_while_swapping .git
 }
 
 @test "link_stays_inside: relative links that stay in the copy root" {
