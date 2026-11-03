@@ -288,6 +288,11 @@ y.example:8443
     # The barrier: a listed name, last.
     printf 'allowed\t%s\n' "$(connect barrier.example.net:443)"
   } >"$t"
+  # run_table sends a table's last request alone, after every other one has
+  # its answer. Unless that is the barrier, the off-list check below could
+  # pass without having waited for the other requests' lookups.
+  [[ "$(tail -n 1 "$t")" == *barrier.example.net:443* ]] \
+    || die "the barrier must be the last row of the allowlist table"
   run_table "$t"
   await_query control.example.net && log "PASS: positive control: a listed name is resolved"
   await_query barrier.example.net
