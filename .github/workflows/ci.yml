@@ -89,9 +89,10 @@ jobs:
         with:
           globs: "**/*.md"
 
+  # Runs alongside validate rather than after it: waiting cost ~2.5 min per
+  # PR, and both are required checks, so a red validate still blocks the merge.
   docker-build:
     name: Docker build (validate, no push)
-    needs: [validate]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -221,14 +222,17 @@ jobs:
         # The --egress-allowlist rules against the squid image run.sh built
         # in the step above, with a stub resolver that logs every query:
         # allow/refuse per rule, no DNS query for a name off the list, and
-        # `squid -k parse` on every config the run.sh BATS suite generates
-        # (so that suite runs here first, to write them). Its passing output is
-        # noise here, but a failure prints the failing tests.
+        # `squid -k parse` on every config the run.sh BATS suite generates.
+        # Only the tests that write those configs run here (the whole suite
+        # runs in validate); the last one checks the set matches
+        # expected-configs.txt. Their passing output is noise here, but a
+        # failure prints the failing tests.
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bats
-          bats tests/bats/run.bats > "$RUNNER_TEMP/run-bats.tap" \
+          bats -f "^gen_egress_squid_conf: |squid harness's expected config list" \
+            tests/bats/run.bats > "$RUNNER_TEMP/run-bats.tap" \
             || { grep -A20 '^not ok' "$RUNNER_TEMP/run-bats.tap" \
                    || tail -n 50 "$RUNNER_TEMP/run-bats.tap"; exit 1; }
           bash tests/egress-proxy/harness.sh
@@ -265,6 +269,10 @@ jobs:
       - name: Vulnerability scan (egress proxy) — HIGH/CRITICAL with a fix available (gate)
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Trivy and its DB are set up once, by the egress proxy's advisory scan,
+          # the first Trivy step in this job; keep that one first.
+          skip-setup-trivy: true
+          cache: false
           scan-type: image
           scan-ref: claude-docker-egress-proxy:ci
           severity: HIGH,CRITICAL
@@ -303,6 +311,10 @@ jobs:
         # step with a failure annotation while it is doing exactly its job.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Trivy and its DB are set up once, by the egress proxy's advisory scan,
+          # the first Trivy step in this job; keep that one first.
+          skip-setup-trivy: true
+          cache: false
           scan-type: image
           scan-ref: claude-docker:ci
           severity: HIGH,CRITICAL
@@ -326,6 +338,10 @@ jobs:
         # weaken severity or exit-code here.
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
+          # Trivy and its DB are set up once, by the egress proxy's advisory scan,
+          # the first Trivy step in this job; keep that one first.
+          skip-setup-trivy: true
+          cache: false
           scan-type: image
           scan-ref: claude-docker:ci
           severity: HIGH,CRITICAL

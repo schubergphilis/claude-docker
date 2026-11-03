@@ -50,10 +50,21 @@ main() {
   TMP=$(mktemp -d)
   trap 'rm -rf "$TMP"' EXIT
   write_managed_settings
-  local rc=0 suite
+  # The four runs share nothing (each container has --network none and its
+  # own loopback servers), so they run in parallel; each one's output is
+  # printed whole, in a fixed order, once it has finished. A Ctrl-C while they
+  # run leaves the other --rm containers to finish on their own.
+  local rc=0 suite mode i pids=() outs=()
   for suite in endpoint proxy; do
-    run_mode control "$suite" || rc=1
-    run_mode managed "$suite" || rc=1
+    for mode in control managed; do
+      run_mode "$mode" "$suite" >"$TMP/out-$mode-$suite" 2>&1 &
+      pids+=("$!")
+      outs+=("$TMP/out-$mode-$suite")
+    done
+  done
+  for i in "${!pids[@]}"; do
+    wait "${pids[$i]}" || rc=1
+    cat "${outs[$i]}"
   done
   [ "$rc" = 0 ] && echo "RESULT: PASS" || echo "RESULT: FAIL"
   return "$rc"

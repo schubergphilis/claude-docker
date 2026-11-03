@@ -212,10 +212,32 @@ fails=0" ]
   run main
   [ "$status" -eq 0 ]
   [ "${lines[-1]}" = "RESULT: PASS" ]
-  [ "$(grep -o '/precedence.sh .*' "$DOCKER_LOG")" = "/precedence.sh control endpoint
-/precedence.sh managed endpoint
+  # The runs are parallel, so the calls come in any order.
+  [ "$(grep -o '/precedence.sh .*' "$DOCKER_LOG" | sort)" = "/precedence.sh control endpoint
 /precedence.sh control proxy
+/precedence.sh managed endpoint
 /precedence.sh managed proxy" ]
+}
+
+@test "main: prints each run's output whole, in a fixed order" {
+  docker() {
+    local args=("$@")
+    # The first run finishes last: its output must still come first.
+    [ "${args[-2]}/${args[-1]}" = control/endpoint ] && command sleep 0.3
+    echo "start ${args[-2]}/${args[-1]}"
+    echo "end ${args[-2]}/${args[-1]}"
+  }
+  run main
+  [ "$status" -eq 0 ]
+  [ "$output" = "start control/endpoint
+end control/endpoint
+start managed/endpoint
+end managed/endpoint
+start control/proxy
+end control/proxy
+start managed/proxy
+end managed/proxy
+RESULT: PASS" ]
 }
 
 @test "main: one failing run fails the result but the rest still run" {
