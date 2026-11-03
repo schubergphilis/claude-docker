@@ -358,9 +358,7 @@ jobs:
       # with its default grype, the image and the repo checkout, and the
       # action's hardcoded severity-cutoff=high and only-fixed=false. So unlike
       # Trivy's gate, these also fail on a finding with no fix: publish would
-      # fail on it too. Accept such a finding in .grype.yaml. cache-db only
-      # restores grype's DB from the actions cache; grype still checks it for
-      # updates, so the findings are those of a fresh DB. tests/
+      # fail on it too. Accept such a finding in .grype.yaml. tests/
       # test_grype_gate.py checks the two workflows agree; bump the SHA together
       # with docker.yml's mcvs-docker-action (docs/maintenance.md).
       #
@@ -377,7 +375,6 @@ jobs:
           only-fixed: false
           fail-build: true
           output-format: table
-          cache-db: true
 
       - name: Vulnerability scan (grype) — repo checkout, HIGH/CRITICAL incl. unfixed (gate)
         uses: anchore/scan-action@27805bf3b4e84b4a5c980df22ed233c00390a439 # v7.4.2
@@ -388,4 +385,3 @@ jobs:
           only-fixed: false
           fail-build: true
           output-format: table
-          cache-db: true
