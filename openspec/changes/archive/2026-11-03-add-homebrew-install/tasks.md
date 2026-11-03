@@ -17,7 +17,7 @@
 - [x] 3.2 Bump on a branch with a `chore(homebrew)` pull request opened with `GITHUB_TOKEN`; `packages: write` moved to the publishing job
 - [x] 3.3 The bump script, run in Ubuntu 24.04: an older tag and the current tag leave the formula alone; v1.0.0 → v1.1.0 writes v1.1.0's url and sha256
 - [x] 3.4 `tests/test_homebrew_workflow.py`: the tag filter rejects `-rc.N`, the image check precedes the bump, the bump is a `chore` pull request and never a push to `main`, the formula names a stable release of this repository and the launcher default, only the publishing job can write packages
-- [x] 3.5 zizmor (offline, `min-severity: low` as CI) and yamllint clean over the changed workflows; actionlint clean on `homebrew.yml` (it does not know the `$/` self-repository syntax in `docker.yml` yet; not run in CI)
+- [x] 3.5 zizmor (offline, `min-severity: low` as CI) and yamllint clean over the changed workflows; actionlint 1.7.12 clean on `homebrew.yml`; on `docker.yml` it reports only the `$/` self-repository call, a syntax it does not know yet (it reports `release.yml`'s `$/` on `main` the same way; not run in CI)
 
 ## 4. Docs
 
@@ -27,5 +27,5 @@
 
 ## 5. Archive
 
-- [ ] 5.1 `/opsx:archive` (syncs `openspec/specs/`)
+- [x] 5.1 `/opsx:archive` (syncs `openspec/specs/`)
 - [ ] 5.2 First release after merge: tag → image → bump pull request → `brew upgrade` picks it up
