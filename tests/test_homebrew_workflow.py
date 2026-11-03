@@ -80,7 +80,7 @@ class HomebrewWorkflowTests(unittest.TestCase):
         self.assertTrue(homebrew, "docker.yml should have a homebrew job")
         self.assertIn("needs: docker", homebrew)
         self.assertIn("if: startsWith(github.ref, 'refs/tags/v')", homebrew)
-        self.assertIn("uses: $/.github/workflows/homebrew.yml", homebrew)
+        self.assertIn("uses: ./.github/workflows/homebrew.yml", homebrew)
         self.assertIn("tag: ${{ github.ref_name }}", homebrew)
 
     def test_only_the_publishing_job_can_write_packages(self):

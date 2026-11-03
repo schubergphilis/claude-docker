@@ -134,6 +134,6 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
-    uses: $/.github/workflows/homebrew.yml
+    uses: ./.github/workflows/homebrew.yml  # zizmor: ignore[self-repository]
     with:
       tag: ${{ github.ref_name }}
