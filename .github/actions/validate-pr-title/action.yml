@@ -43,15 +43,16 @@ runs:
           echo "::error title=No pull request title::The 'title' input is empty. It defaults to the pull_request event, so pass it on any other event." >&2
           exit 1
         fi
+        # Escaped as a workflow command's data, and printed only like this on
+        # either path, so the title can't end the annotation early or start a
+        # command of its own on a line of its own.
+        shown="${TITLE//%/%25}"
+        shown="${shown//$'\r'/%0D}"
+        shown="${shown//$'\n'/%0A}"
         # Bash's own match, not grep: grep matches line by line, so a second
         # line could pass a title whose first line doesn't.
         if [[ ! "${TITLE}" =~ ${pattern} ]]; then
-          # Escaped as a workflow command's data, so the title can't end the
-          # annotation early or start a command of its own.
-          shown="${TITLE//%/%25}"
-          shown="${shown//$'\r'/%0D}"
-          shown="${shown//$'\n'/%0A}"
           echo "::error title=PR title is not a Conventional Commit::${shown} -- Expected <type>[(scope)][!]: <subject>, where <type> is one of: ${types}. The draft release reads the version bump and the notes from it. Edit the title and this check runs again." >&2
           exit 1
         fi
-        echo "Title OK: ${TITLE}"
+        echo "Title OK: ${shown}"

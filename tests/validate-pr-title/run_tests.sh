@@ -78,9 +78,21 @@ else
   passed=$((passed + 1))
 fi
 TITLE=$'Fix typo\n::warning::injected 100%' TYPES="${TYPES_DEFAULT}" bash "${work}/step.sh" > "${work}/out" 2>&1
-if grep -q '^::warning::' "${work}/out" || ! grep -q 'Fix typo%0A::warning::injected 100%25' "${work}/out"; then
+if grep -qE '^[[:space:]]*::warning::' "${work}/out" || ! grep -q 'Fix typo%0A::warning::injected 100%25' "${work}/out"; then
   failed=$((failed + 1))
   echo 'FAIL: the title was not escaped in the annotation'
+  sed 's/^/    /' "${work}/out"
+else
+  passed=$((passed + 1))
+fi
+# A passing title is printed escaped too: its first line matches, so a second
+# line must not reach the log as a workflow command.
+rc=0
+TITLE=$'feat: ok\n::error title=forged::x' TYPES="${TYPES_DEFAULT}" bash "${work}/step.sh" > "${work}/out" 2>&1 || rc=$?
+if [[ "${rc}" -ne 0 ]] || grep -qE '^[[:space:]]*::' "${work}/out" \
+  || ! grep -qF 'Title OK: feat: ok%0A::error title=forged::x' "${work}/out"; then
+  failed=$((failed + 1))
+  echo "FAIL: a passing title was not escaped (rc=${rc})"
   sed 's/^/    /' "${work}/out"
 else
   passed=$((passed + 1))
