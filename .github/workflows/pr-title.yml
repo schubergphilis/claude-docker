@@ -1,0 +1,22 @@
+---
+name: PR title
+# The draft release counts the next version and its notes from the titles of
+# the merged pull requests (.github/actions/draft-release), so each title has
+# to be a Conventional Commit. Commit subjects are checked by lint-commit in
+# general.yml.
+"on":
+  pull_request:
+    # `edited` fires on a title change, so a corrected title is checked again
+    # without a push.
+    types: [opened, edited, reopened, synchronize]
+permissions: {}
+jobs:
+  conventional-title:
+    name: Conventional Commit title
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      # No checkout: `$/` loads the action from the repository at this run's
+      # ref, and the check reads nothing else.
+      - name: Validate the title
+        uses: $/.github/actions/validate-pr-title

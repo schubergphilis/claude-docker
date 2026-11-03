@@ -1,0 +1,58 @@
+# yamllint disable rule:line-length
+---
+name: Validate PR title
+description: >-
+  Checks that a pull request title is a Conventional Commit. The draft release
+  counts the next version and its notes from these titles.
+inputs:
+  types:
+    description: >-
+      Allowed Conventional Commit types, separated by spaces or commas. The
+      default is the set commitlint's config-conventional enforces on the
+      commits, so the title and the commits follow the same rules.
+    required: false
+    default: build chore ci docs feat fix perf refactor revert style test
+  title:
+    description: Title to validate. Defaults to the triggering pull request's.
+    required: false
+    default: ${{ github.event.pull_request.title }}
+runs:
+  using: composite
+  steps:
+    - name: Validate the title
+      shell: bash
+      # The title is the pull request author's, so it reaches the script
+      # through the environment, never interpolated into it.
+      env:
+        TYPES: ${{ inputs.types }}
+        TITLE: ${{ inputs.title }}
+      run: |
+        set -euo pipefail
+
+        types="$(printf '%s' "${TYPES}" | tr ',' ' ' | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//')"
+        if [[ -z "${types}" ]]; then
+          echo "::error title=No types configured::The 'types' input is empty, so no title could pass." >&2
+          exit 1
+        fi
+
+        # type, optional scope, optional breaking-change marker, colon, one
+        # space, then a subject that does not start with whitespace.
+        pattern="^(${types// /|})(\([^()]+\))?!?: [^[:space:]]"
+
+        if [[ -z "${TITLE}" ]]; then
+          echo "::error title=No pull request title::The 'title' input is empty. It defaults to the pull_request event, so pass it on any other event." >&2
+          exit 1
+        fi
+        # Escaped as a workflow command's data, and printed only like this on
+        # either path, so the title can't end the annotation early or start a
+        # command of its own on a line of its own.
+        shown="${TITLE//%/%25}"
+        shown="${shown//$'\r'/%0D}"
+        shown="${shown//$'\n'/%0A}"
+        # Bash's own match, not grep: grep matches line by line, so a second
+        # line could pass a title whose first line doesn't.
+        if [[ ! "${TITLE}" =~ ${pattern} ]]; then
+          echo "::error title=PR title is not a Conventional Commit::${shown} -- Expected <type>[(scope)][!]: <subject>, where <type> is one of: ${types}. The draft release reads the version bump and the notes from it. Edit the title and this check runs again." >&2
+          exit 1
+        fi
+        echo "Title OK: ${shown}"
