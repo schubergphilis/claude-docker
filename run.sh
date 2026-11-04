@@ -154,9 +154,17 @@ Wrapper flags:
                       mounted at their host path instead of
                       /workspaces/<name>, and TMPDIR points at a host-shared
                       dir, so `docker run -v "$PWD:..."` sources resolve on
-                      the host. Containers, images, volumes and networks the
-                      session creates on the engine are removed at exit.
+                      the host. At start it asks whether containers, images,
+                      volumes and networks that appear on the engine during
+                      the session are removed at exit or kept; kept ones are
+                      listed at exit with a command that removes them.
                       Cannot be combined with --egress-lock.
+  --docker-keep       --docker, keeping what appears on the engine (no
+                      question asked). Without a terminal this is the default.
+  --docker-clean      --docker, removing what appears on the engine at exit
+                      (no question asked). The engine records no creator, so
+                      that includes anything started on it by hand during
+                      the session.
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -261,6 +269,9 @@ WITH_EGRESS_LOCK=0
 WITH_EGRESS_ALLOWLIST=0
 EGRESS_ALLOWLIST_ARG=""
 WITH_DOCKER=0
+DOCKER_KEEP=0
+DOCKER_CLEAN=0
+DOCKER_EXIT=""   # keep | clean: what happens to the engine's new resources at exit
 DOCKER_SOCKET=""
 # Extra `<runtime> run` options, set only by --docker (rootless podman's
 # --userns=keep-id).
@@ -368,6 +379,8 @@ parse_args() {
       --egress-allowlist) WITH_EGRESS_ALLOWLIST=1 ;;
       --egress-allowlist=*) WITH_EGRESS_ALLOWLIST=1 EGRESS_ALLOWLIST_ARG="${arg#--egress-allowlist=}" ;;
       --docker)       WITH_DOCKER=1 ;;
+      --docker-keep)  WITH_DOCKER=1 DOCKER_KEEP=1 ;;
+      --docker-clean) WITH_DOCKER=1 DOCKER_CLEAN=1 ;;
       --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
       --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
       --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -643,6 +656,12 @@ validate_opts() {
     echo "claude-docker: --docker cannot be combined with --egress-lock — a container started through the host engine's socket bypasses the egress proxy" >&2
     exit 1
   fi
+  if [ "$DOCKER_KEEP" = "1" ] && [ "$DOCKER_CLEAN" = "1" ]; then
+    echo "claude-docker: --docker-keep and --docker-clean contradict each other; pass one" >&2
+    exit 1
+  fi
+  [ "$DOCKER_KEEP" = "1" ] && DOCKER_EXIT=keep
+  [ "$DOCKER_CLEAN" = "1" ] && DOCKER_EXIT=clean
 
   # --api without a gateway token would let Claude Code send the volume's claude.ai
   # OAuth token to ANTHROPIC_BASE_URL as its bearer. Empty counts as unset, so a
@@ -2056,7 +2075,7 @@ create_stage() {
   # those subordinate UIDs are ours (`podman unshare`), and only warn if the
   # dir still survives (rootful engine + nested root-owned files needs sudo).
   trap '
-  docker_cleanup || true
+  docker_exit || true
   case "$stage" in "$HOME/.cache/claude-docker/host."*)
     rm -rf "$stage" 2>/dev/null || true
     if [ -e "$stage" ] && [ "$RUNTIME" = podman ]; then "$RUNTIME" unshare rm -rf "$stage" 2>/dev/null || true; fi
@@ -2930,12 +2949,12 @@ stage_docker_tmp() {
   MOUNT_ARGS+=("-v" "$stage/tmp:$stage/tmp")
   ENV_ARGS+=("-e" "TMPDIR=$stage/tmp")
   # Marks this agent container as a --docker session, so another session's
-  # exit cleanup (docker_cleanup) can tell it is still running.
+  # exit cleanup (docker_exit) can tell it is still running.
   RUN_OPTS+=("--label" "claude-docker.docker=$proxy_sid")
 }
 
 # The host engine behind --docker, addressed through the socket the session
-# got (the runtime's own socket as a rule; docker_snapshot/docker_cleanup
+# got (the runtime's own socket as a rule; docker_snapshot/docker_exit
 # must see what the session saw). podman reads its own API only, so a
 # podman host whose only socket is docker's is refused by docker_snapshot.
 engine() {
@@ -2945,19 +2964,29 @@ engine() {
     podman --remote --url "unix://$DOCKER_SOCKET" "$@"
   fi
 }
+# The same engine from a host shell, for the removal command docker_exit
+# prints: bare when the socket is the runtime's default, addressed otherwise.
+engine_cmd() {
+  if [ "$RUNTIME" = docker ]; then
+    [ "$DOCKER_SOCKET" = /var/run/docker.sock ] && printf 'docker' || printf 'docker -H unix://%s' "$DOCKER_SOCKET"
+  else
+    [ "$DOCKER_SOCKET" = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" ] && printf 'podman' || printf 'podman --remote --url unix://%s' "$DOCKER_SOCKET"
+  fi
+}
 
-# --docker: everything the session creates on the host engine is removed when
-# it ends, so a compose stack or a Testcontainers run doesn't outlive the
-# session and images it pulled don't pile up. The engine records no creator,
-# so this is a before/after diff of IDs: docker_snapshot lists what exists at
-# start (in the stage dir, so a crash leaves nothing behind), docker_cleanup
-# removes what is new at exit. The diff cannot tell who created something:
-# a container the user starts from another terminal on the same engine while
-# the session runs is in it too, which is why the notice names what went.
-# Two guards keep the diff from reaching past the session: resources of
-# other claude-docker sessions (claude-* names: the auth-proxy and egress
-# sidecars, their networks, the egress image) are never touched, and while
-# another --docker session is still running (its agent carries the
+# --docker: what the session creates on the host engine (a compose stack, a
+# Testcontainers run, pulled images) is either removed when it ends or listed
+# with a command that removes it; ask_docker_exit settles which at start. The
+# engine records no creator, so this is a before/after diff of IDs:
+# docker_snapshot lists what exists at start (in the stage dir, so a crash
+# leaves nothing behind), docker_exit acts on what is new at exit. The diff
+# cannot tell who created something: a container the user starts from
+# another terminal on the same engine while the session runs is in it too,
+# which is why the question says so and the notice names everything. Two
+# guards keep a removal from reaching past the session: resources of other
+# claude-docker sessions (claude-* names: the auth-proxy and egress sidecars,
+# their networks, the egress image) are never touched, and while another
+# --docker session is still running (its agent carries the
 # claude-docker.docker label) nothing is removed at all, since what it
 # created since this session started is in the diff too. A resource the
 # engine refuses to remove (an image a container still uses) is left and
@@ -2965,6 +2994,19 @@ engine() {
 # snapshot would make everything on the engine look new at exit. Order:
 # containers first (rm -f stops them and -v drops their anonymous volumes),
 # then networks, volumes, images.
+has_tty() { [ -t 0 ] && [ -t 2 ]; }
+ask_docker_exit() {
+  local answer
+  [ "$WITH_DOCKER" = "1" ] && [ -z "$DOCKER_EXIT" ] || return 0
+  if ! has_tty; then
+    DOCKER_EXIT=keep
+    echo "claude-docker: --docker: no terminal to ask on, so what appears on the host engine during the session is kept at exit (pass --docker-clean or --docker-keep to choose)" >&2
+    return 0
+  fi
+  printf 'claude-docker: --docker: remove what appears on the host engine while the session runs (containers, networks, volumes, images) when it exits? Anything you start on this engine by hand meanwhile is in that list too; kept ones are listed at exit with a removal command. [y/N] ' >&2
+  read -r answer || answer=""
+  case "$answer" in y|Y|yes|YES|Yes) DOCKER_EXIT=clean ;; *) DOCKER_EXIT=keep ;; esac
+}
 engine_ls() {
   case "$1" in
     containers) engine ps -a --no-trunc --format '{{.ID}} {{.Names}}' ;;
@@ -2978,7 +3020,7 @@ docker_snapshot() {
   [ "$WITH_DOCKER" = "1" ] || return 0
   for kind in containers images volumes networks; do
     if ! listing=$(engine_ls "$kind"); then
-      echo "claude-docker: --docker: $RUNTIME cannot list the $kind on the engine behind $DOCKER_SOCKET, so the exit cleanup could not tell the session's own from what was already there. Point CLAUDE_DOCKER_SOCKET at the $RUNTIME engine's socket, or CLAUDE_DOCKER_RUNTIME at the engine's runtime" >&2
+      echo "claude-docker: --docker: $RUNTIME cannot list the $kind on the engine behind $DOCKER_SOCKET, so at exit it could not tell what appeared during the session from what was already there. Point CLAUDE_DOCKER_SOCKET at the $RUNTIME engine's socket, or CLAUDE_DOCKER_RUNTIME at the engine's runtime" >&2
       exit 1
     fi
     { [ -z "$listing" ] || printf '%s\n' "$listing" | cut -d' ' -f1; } >"$stage/engine-$kind" || exit 1
@@ -3002,11 +3044,32 @@ engine_desc() {
   names=$(printf '%s\n' "$3" | cut -d' ' -f2- | grep -v '^$' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
   printf '%s %s%s' "$1" "$2" "${names:+ ($names)}"
 }
-docker_cleanup() {
-  local mine others kind new ids gone n left removed="" kept=""
+docker_exit() {
+  local mine others kind new ids gone n left removed="" kept="" found="" cmd="" eng
   [ "$WITH_DOCKER" = "1" ] && [ -f "$stage/engine-containers" ] || return 0
   if ! engine_ls containers >/dev/null; then
-    echo "claude-docker: --docker: the engine behind $DOCKER_SOCKET did not answer, so nothing the session created on it was removed" >&2
+    echo "claude-docker: --docker: the engine behind $DOCKER_SOCKET did not answer, so what appeared on it during the session is unknown and nothing was removed" >&2
+    return 0
+  fi
+  if [ "$DOCKER_EXIT" != clean ]; then
+    eng=$(engine_cmd)
+    for kind in containers networks volumes images; do
+      new=$(engine_new "$kind")
+      [ -n "$new" ] || continue
+      n=$(printf '%s\n' "$new" | wc -l | tr -d ' ')
+      found="${found:+$found, }$(engine_desc "$n" "$kind" "$new")"
+      # Names for what has them (unique per engine), IDs for images.
+      case "$kind" in
+        containers) ids=$(printf '%s\n' "$new" | cut -d' ' -f2- | tr '\n' ' ') ; cmd="${cmd:+$cmd; }$eng rm -fv ${ids% }" ;;
+        networks)   ids=$(printf '%s\n' "$new" | cut -d' ' -f2- | tr '\n' ' ') ; cmd="${cmd:+$cmd; }$eng network rm ${ids% }" ;;
+        volumes)    ids=$(printf '%s\n' "$new" | cut -d' ' -f2- | tr '\n' ' ') ; cmd="${cmd:+$cmd; }$eng volume rm ${ids% }" ;;
+        images)     ids=$(printf '%s\n' "$new" | cut -d' ' -f1 | sed 's/^sha256://; s/^\(............\).*/\1/' | tr '\n' ' ') ; cmd="${cmd:+$cmd; }$eng image rm -f ${ids% }" ;;
+      esac
+    done
+    [ -n "$found" ] || return 0
+    echo "claude-docker: --docker: left on the host engine, appeared during the session: $found" >&2
+    echo "claude-docker: --docker: to remove them (check the names first: anything started on this engine by hand meanwhile is in the list too):" >&2
+    echo "  $cmd" >&2
     return 0
   fi
   mine=$(engine ps -q --filter "label=claude-docker.docker=$proxy_sid" 2>/dev/null) || true
@@ -3248,6 +3311,7 @@ main() {
   init_shell
   parse_args "$@"
   validate_opts
+  ask_docker_exit
   select_runtime
   prune_stale_auth_proxy
   detect_msys

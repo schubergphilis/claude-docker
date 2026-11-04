@@ -13,7 +13,7 @@ Handing the session the host engine's API socket is the standard answer (Docker-
 - **Identity.** Under rootless podman the agent container runs with `--userns=keep-id`, so the dropped-to user is the host user and can open the host-user-owned socket. Under a rootful engine the entrypoint adds the socket's group to the `claude` user.
 - **The entrypoint trusts the host-path workspaces for git** (`safe.directory`), as it trusts `/workspaces/<name>` paths today; the widening values stay refused.
 - **History and memory carry over.** Claude Code keys its project by directory; the entrypoint links the host-path key to the `/workspaces/<name>` one, so `--resume` and memory are shared between a `--docker` session and a regular one.
-- **Nothing the session creates outlives it.** Containers, images, volumes and networks that appear on the engine while the session runs are removed at exit (a before/after diff of IDs), never another claude-docker session's `claude-*` resources, and nothing at all while another `--docker` session is still running. Under rootless podman the stage directory is removed through `podman unshare`, since nested containers leave files owned by subordinate UIDs in the shared `TMPDIR`.
+- **What appears on the engine during the session is kept or removed, as chosen at start.** `--docker` asks (default keep), `--docker-keep` / `--docker-clean` answer on the command line, no terminal means keep. Both act on a before/after diff of IDs, which also holds anything started on the engine by hand meanwhile: keeping lists it by name with a removal command for the host shell; removing never touches another claude-docker session's `claude-*` resources, and nothing at all while another `--docker` session is still running. Under rootless podman the stage directory is removed through `podman unshare`, since nested containers leave files owned by subordinate UIDs in the shared `TMPDIR`.
 - Not supported from Git Bash (Docker Desktop on Windows exposes a named pipe). Refused with `--egress-lock`.
 
 ## Capabilities
@@ -32,7 +32,7 @@ Handing the session the host engine's API socket is the standard answer (Docker-
 ## Non-goals
 
 - A daemon inside the container (docker-in-docker) or a per-session engine with its own storage. Images live in the host engine's storage; a session starts from what the engine has and leaves it as it found it.
-- Attributing engine resources to the session that created them. The engine records no creator, so cleanup is a diff of IDs with the guards above; a session that is killed outright runs no cleanup.
+- Attributing engine resources to the session that created them. The engine records no creator, so the exit step is a diff of IDs with the guards above, which is why it asks first and names everything; a session that is killed outright runs no exit step.
 - Git Bash on Windows. WSL is the supported route.
 
 ## Impact

@@ -431,6 +431,66 @@ http_access allow all" ]
   [ "$status" -eq 1 ]
 }
 
+@test "parse_args: --docker-keep and --docker-clean imply --docker" {
+  parse_args --docker-keep
+  [ "$WITH_DOCKER" = 1 ] && [ "$DOCKER_KEEP" = 1 ] && [ "$DOCKER_CLEAN" = 0 ]
+  WITH_DOCKER=0 DOCKER_KEEP=0
+  parse_args --docker-clean
+  [ "$WITH_DOCKER" = 1 ] && [ "$DOCKER_CLEAN" = 1 ] && [ "$DOCKER_KEEP" = 0 ]
+}
+
+@test "validate_opts: --docker-keep with --docker-clean is rejected, one of them settles the exit" {
+  WITH_DOCKER=1 DOCKER_KEEP=1 DOCKER_CLEAN=1 WITH_API=1 ANTHROPIC_API_KEY=k
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--docker-keep and --docker-clean contradict each other"* ]]
+  DOCKER_CLEAN=0
+  validate_opts
+  [ "$DOCKER_EXIT" = keep ]
+  DOCKER_KEEP=0 DOCKER_CLEAN=1 DOCKER_EXIT=""
+  validate_opts
+  [ "$DOCKER_EXIT" = clean ]
+}
+
+@test "ask_docker_exit: asks on a terminal; y removes, anything else keeps" {
+  WITH_DOCKER=1 DOCKER_EXIT=""
+  has_tty() { return 0; }
+  ask_docker_exit <<<"y" 2>"$BATS_TEST_TMPDIR/err"
+  [ "$DOCKER_EXIT" = clean ]
+  grep -q "remove what appears on the host engine while the session runs" "$BATS_TEST_TMPDIR/err"
+  grep -q "by hand meanwhile is in that list too" "$BATS_TEST_TMPDIR/err"
+  grep -q '\[y/N\]' "$BATS_TEST_TMPDIR/err"
+  DOCKER_EXIT=""
+  ask_docker_exit <<<"" 
+  [ "$DOCKER_EXIT" = keep ]
+  DOCKER_EXIT=""
+  ask_docker_exit <<<"n"
+  [ "$DOCKER_EXIT" = keep ]
+  DOCKER_EXIT=""
+  ask_docker_exit </dev/null
+  [ "$DOCKER_EXIT" = keep ]
+}
+
+@test "ask_docker_exit: no terminal keeps and says how to choose" {
+  WITH_DOCKER=1 DOCKER_EXIT=""
+  has_tty() { return 1; }
+  run ask_docker_exit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"no terminal to ask on, so what appears on the host engine during the session is kept at exit (pass --docker-clean or --docker-keep to choose)"* ]]
+  has_tty() { return 1; }; WITH_DOCKER=1 DOCKER_EXIT=""; ask_docker_exit 2>/dev/null; [ "$DOCKER_EXIT" = keep ]
+}
+
+@test "ask_docker_exit: silent when the flags already settled it or without --docker" {
+  WITH_DOCKER=1 DOCKER_EXIT=clean
+  has_tty() { return 0; }
+  run ask_docker_exit </dev/null
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  WITH_DOCKER=0 DOCKER_EXIT=""
+  run ask_docker_exit </dev/null
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ -z "$DOCKER_EXIT" ]
+}
+
 @test "validate_opts: --docker with --egress-lock is rejected" {
   WITH_DOCKER=1 WITH_EGRESS_LOCK=1 WITH_API=1 ANTHROPIC_API_KEY=k
   run validate_opts
@@ -2270,7 +2330,7 @@ run_statusline() {
   [ "$(lines_of "${RUN_OPTS[@]}")" = "$(printf -- '--label\nclaude-docker.docker=abc123')" ]
 }
 
-# --- docker_snapshot / docker_cleanup ---
+# --- docker_snapshot / docker_exit ---
 
 # An engine whose listings come from files the test edits between the
 # snapshot and the cleanup. OTHERS is the `ps -q --filter label=` answer.
@@ -2288,7 +2348,7 @@ engine_stub() {
     esac
     return 0
   }
-  WITH_DOCKER=1 DOCKER_SOCKET=/s.sock proxy_sid=sid1
+  WITH_DOCKER=1 DOCKER_SOCKET=/s.sock proxy_sid=sid1 DOCKER_EXIT=clean RUNTIME=docker
   stage="$BATS_TEST_TMPDIR/stage"
   mkdir -p "$stage"
   printf 'c1 app\n' >"$BATS_TEST_TMPDIR/containers"
@@ -2332,14 +2392,14 @@ engine_stub() {
   run ! grep -q "^docker" "$CALLS"
 }
 
-@test "docker_cleanup: removes what is new, in order, and skips other sessions' claude-* resources" {
+@test "docker_exit: removes what is new, in order, and skips other sessions' claude-* resources" {
   engine_stub
   docker_snapshot
   printf 'c1 app\nc2 stack-db-1\nc3 claude-auth-proxy-zz\n' >"$BATS_TEST_TMPDIR/containers"
   printf 'i1 postgres\ni2 stack-web\ni3 localhost/claude-docker-egress-proxy\n' >"$BATS_TEST_TMPDIR/images"
   printf 'v1 v1\nv2 v2\n' >"$BATS_TEST_TMPDIR/volumes"
   printf 'n1 bridge\nn2 stack_default\nn3 claude-egress-zz\n' >"$BATS_TEST_TMPDIR/networks"
-  run docker_cleanup
+  run docker_exit
   [ "$status" -eq 0 ]
   local out=$output
   grep -q "^docker -H unix:///s.sock rm -fv c2$" "$CALLS"
@@ -2355,17 +2415,17 @@ engine_stub() {
   [[ "$out" == *"1 containers (stack-db-1), 1 networks (stack_default), 1 volumes (v2), 1 images (stack-web) the session created could not be removed"* ]]
 }
 
-@test "docker_cleanup: an engine that does not answer at exit removes nothing and says so" {
+@test "docker_exit: an engine that does not answer at exit removes nothing and says so" {
   engine_stub
   docker_snapshot
   docker() { echo "docker $*" >>"$CALLS"; return 1; }
-  run docker_cleanup
+  run docker_exit
   [ "$status" -eq 0 ]
-  [[ "$output" == *"the engine behind /s.sock did not answer, so nothing the session created on it was removed"* ]]
+  [[ "$output" == *"the engine behind /s.sock did not answer, so what appeared on it during the session is unknown and nothing was removed"* ]]
   run ! grep -q " rm " "$CALLS"
 }
 
-@test "docker_cleanup: reports the removal once the engine agrees" {
+@test "docker_exit: reports the removal once the engine agrees" {
   engine_stub
   docker_snapshot
   printf 'c1 app\nc2 stack-db-1\n' >"$BATS_TEST_TMPDIR/containers"
@@ -2378,12 +2438,12 @@ engine_stub() {
     esac
     return 0
   }
-  run docker_cleanup
+  run docker_exit
   [ "$status" -eq 0 ]
   [ "$output" = "claude-docker: --docker: removed 1 containers (stack-db-1) that appeared on the host engine during the session" ]
 }
 
-@test "docker_cleanup: names every new resource, whoever created it" {
+@test "docker_exit: names every new resource, whoever created it" {
   engine_stub
   docker_snapshot
   printf 'c1 app\nc2 stack-db-1\nc3 hand-started\n' >"$BATS_TEST_TMPDIR/containers"
@@ -2396,32 +2456,69 @@ engine_stub() {
     esac
     return 0
   }
-  run docker_cleanup
+  run docker_exit
   [ "$status" -eq 0 ]
   grep -q "^docker -H unix:///s.sock rm -fv c2 c3$" "$CALLS"
   [ "$output" = "claude-docker: --docker: removed 2 containers (stack-db-1, hand-started) that appeared on the host engine during the session" ]
 }
 
-@test "docker_cleanup: another running --docker session keeps the diff in place" {
+@test "docker_exit: another running --docker session keeps the diff in place" {
   engine_stub
   docker_snapshot
   OTHERS=theirs
   printf 'c1 app\nc2 stack-db-1\n' >"$BATS_TEST_TMPDIR/containers"
   printf 'v1 v1\nv2 v2\n' >"$BATS_TEST_TMPDIR/volumes"
-  run docker_cleanup
+  run docker_exit
   [ "$status" -eq 0 ]
   [[ "$output" == *"another --docker session is still running, so 1 containers (stack-db-1), 1 volumes (v2) created since this session started are left"* ]]
   run ! grep -q " rm " "$CALLS"
 }
 
-@test "docker_cleanup: nothing new is silent, no snapshot is a no-op" {
+@test "docker_exit: keep lists what appeared, by name, with a command that removes it" {
+  engine_stub
+  DOCKER_EXIT=keep DOCKER_SOCKET=/var/run/docker.sock
+  docker_snapshot
+  printf 'c1 app\nc2 stack-db-1\nc3 hand-started\nc4 claude-auth-proxy-zz\n' >"$BATS_TEST_TMPDIR/containers"
+  printf 'i1 postgres\nsha256:0123456789abcdef0123 stack-web\n' >"$BATS_TEST_TMPDIR/images"
+  printf 'v1 v1\nv2 v2\n' >"$BATS_TEST_TMPDIR/volumes"
+  printf 'n1 bridge\nn2 stack_default\n' >"$BATS_TEST_TMPDIR/networks"
+  run docker_exit
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "claude-docker: --docker: left on the host engine, appeared during the session: 2 containers (stack-db-1, hand-started), 1 networks (stack_default), 1 volumes (v2), 1 images (stack-web)" ]
+  [[ "${lines[1]}" == *"to remove them (check the names first: anything started on this engine by hand meanwhile is in the list too)"* ]]
+  [ "${lines[2]}" = "  docker rm -fv stack-db-1 hand-started; docker network rm stack_default; docker volume rm v2; docker image rm -f 0123456789ab" ]
+  run ! grep -q " rm " "$CALLS"
+}
+
+@test "docker_exit: keep addresses a non-default socket in the command" {
+  engine_stub
+  DOCKER_EXIT=keep RUNTIME=podman XDG_RUNTIME_DIR=/run/user/7
+  podman() { docker "$@"; }
+  docker_snapshot
+  printf 'c1 app\nc2 stack-db-1\n' >"$BATS_TEST_TMPDIR/containers"
+  run docker_exit
+  [ "${lines[2]}" = "  podman --remote --url unix:///s.sock rm -fv stack-db-1" ]
+  DOCKER_SOCKET=/run/user/7/podman/podman.sock
+  run docker_exit
+  [ "${lines[2]}" = "  podman rm -fv stack-db-1" ]
+}
+
+@test "docker_exit: keep with nothing new is silent" {
+  engine_stub
+  DOCKER_EXIT=keep
+  docker_snapshot
+  run docker_exit
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "docker_exit: nothing new is silent, no snapshot is a no-op" {
   engine_stub
   docker_snapshot
-  run docker_cleanup
+  run docker_exit
   [ "$status" -eq 0 ] && [ -z "$output" ]
   rm "$stage"/engine-*
   : >"$CALLS"
-  run docker_cleanup
+  run docker_exit
   [ "$status" -eq 0 ] && [ -z "$output" ]
   run ! grep -q "^docker" "$CALLS"
 }
@@ -2729,6 +2826,19 @@ YML
   # The engine was listed before the agent started, and the diff checked after.
   [ "$(grep -n "^docker -H unix://.* ps -a --no-trunc" "$CALLS" | head -1 | cut -d: -f1)" -lt \
     "$(grep -n "^docker run --rm" "$CALLS" | cut -d: -f1)" ]
+  [ "$(grep -n "^docker -H unix://.* ps -a --no-trunc" "$CALLS" | sed -n 2p | cut -d: -f1)" -gt \
+    "$(grep -n "^docker run --rm" "$CALLS" | cut -d: -f1)" ]
+  # No terminal in the harness: kept, and the run says how to choose.
+  [[ "$output" == *"no terminal to ask on"* ]]
+  run ! grep -q "ps -q --filter label=claude-docker.docker" "$CALLS"
+}
+
+@test "main: --docker-clean asks nothing and removes at exit" {
+  mksock "$BATS_TEST_TMPDIR/eng.sock"
+  export CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/eng.sock"
+  run_script --ephemeral --docker-clean "$WS"
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"no terminal to ask on"* ]]
   [ "$(grep -n "^docker -H unix://.* ps -q --filter label=claude-docker.docker" "$CALLS" | head -1 | cut -d: -f1)" -gt \
     "$(grep -n "^docker run --rm" "$CALLS" | cut -d: -f1)" ]
 }

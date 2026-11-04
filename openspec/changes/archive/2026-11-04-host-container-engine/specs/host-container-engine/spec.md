@@ -81,20 +81,40 @@ Because Claude Code keys its project directory by working directory, a `--docker
 - **WHEN** the user runs `claude-docker --docker ~/repo -- --resume`
 - **THEN** the picker lists the regular session
 
-### Requirement: What the session creates on the engine is removed at exit
+### Requirement: What appears on the engine during the session is kept or removed, as chosen at start
 
-Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts, and at exit remove those that are new, in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove resources whose name starts with `claude-` (other claude-docker sessions' sidecars, networks and the egress image), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container). The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it. It SHALL print one line to stderr naming what it removed (as what appeared during the session, since a hand-started container is in it too), and one naming what it left and why when something is left: another session running, or the engine refused. A listing that fails at start SHALL be fatal, since an empty snapshot would make everything on the engine look new at exit; a listing that fails at exit SHALL remove nothing and say so.
+Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts and, at exit, act on those that are new. Which action is settled at start: `--docker-keep` keeps, `--docker-clean` removes, both together are refused, and with neither the wrapper SHALL ask on the terminal (`[y/N]`, default keep), saying that the diff also holds anything started on the engine by hand during the session; without a terminal it SHALL keep and say how to choose. The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it.
 
-#### Scenario: a compose stack does not outlive the session
+Keeping: at exit the wrapper SHALL list what is new, by name, on stderr, and print a command for the host shell that removes it (addressed at the socket the session used), with a warning to check the names first. Nothing is removed.
 
-- **GIVEN** `claude-docker --docker ~/repo` and the agent ran `docker compose up -d` and pulled an image
+Removing: at exit the wrapper SHALL remove what is new in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove resources whose name starts with `claude-` (other claude-docker sessions' sidecars, networks and the egress image), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container). It SHALL print one line to stderr naming what it removed, and one naming what it left and why when something is left: another session running, or the engine refused.
+
+A listing that fails at start SHALL be fatal, since an empty snapshot would make everything on the engine look new at exit; a listing that fails at exit SHALL do nothing and say so.
+
+#### Scenario: the question at start
+
+- **GIVEN** `claude-docker --docker ~/repo` on a terminal
+- **WHEN** the session starts
+- **THEN** it asks whether what appears on the host engine during the session is removed at exit, default no, and says that hand-started containers on the engine are in that list too
+- **AND** `--docker-keep` or `--docker-clean` skips the question, and without a terminal the session keeps and says so
+
+#### Scenario: kept resources are listed with a removal command
+
+- **GIVEN** a `--docker` session that chose keep, and the agent ran `docker compose up -d` and pulled an image
+- **WHEN** the session exits
+- **THEN** the stack's containers, network and volumes and the pulled image are still on the host engine
+- **AND** stderr names them and prints a `docker rm -fv ...; docker network rm ...; docker volume rm ...; docker image rm -f ...` line for the host shell, with the warning to check the names
+
+#### Scenario: a compose stack does not outlive a session that chose remove
+
+- **GIVEN** `claude-docker --docker-clean ~/repo` and the agent ran `docker compose up -d` and pulled an image
 - **WHEN** the session exits
 - **THEN** the stack's containers, network and volumes and the pulled image are gone from the host engine
-- **AND** stderr says what was removed
+- **AND** stderr names what was removed
 
 #### Scenario: another session's resources are left alone
 
-- **GIVEN** two `--docker` sessions, A started first
+- **GIVEN** two `--docker-clean` sessions, A started first
 - **WHEN** session A exits while B is still running
 - **THEN** nothing is removed, and stderr says what was left and that another `--docker` session is running
 - **AND** when B exits last, what both created since A started is removed
@@ -103,8 +123,7 @@ Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, imag
 
 - **GIVEN** a `--docker` session, and the user runs `docker run -d --name scratch ...` from another terminal against the same engine while it runs
 - **WHEN** the session exits
-- **THEN** `scratch` is removed with the session's own containers
-- **AND** stderr names it among what was removed
+- **THEN** `scratch` is in the list: named among what was kept, or removed with the session's own if remove was chosen
 
 #### Scenario: an engine the runtime cannot list
 
@@ -114,8 +133,8 @@ Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, imag
 
 #### Scenario: a concurrent regular session's sidecar is untouched
 
-- **GIVEN** a `--docker` session, and a `claude-docker --gh` session started after it
-- **WHEN** the `--docker` session exits
+- **GIVEN** a `--docker-clean` session, and a `claude-docker --gh` session started after it
+- **WHEN** the `--docker-clean` session exits
 - **THEN** the `--gh` session's `claude-auth-proxy-*` container and `claude-auth-*` network are still there
 
 ### Requirement: The stage directory is removed even with subordinate-UID files in it

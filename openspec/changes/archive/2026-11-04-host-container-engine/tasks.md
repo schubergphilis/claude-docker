@@ -12,7 +12,7 @@
 - [x] 2.2 `run.sh` `build_docker_socket`: socket discovery order, not-a-socket and no-socket errors, Git Bash refusal, `/run/docker.sock` mount and `DOCKER_HOST`, `--userns=keep-id --user 0:0 --passwd=false` under rootless podman, `CLAUDE_DOCKER_PROJECT_ALIAS`
 - [x] 2.3 `run.sh` `build_workspace_mounts` / `check_mirror_path` / `stage_git_overlays`: workspaces and their `.git/config` overlay at the host path; system directories refused
 - [x] 2.4 `run.sh` `stage_docker_tmp`: `$stage/tmp` mounted at its own path as `TMPDIR`; agent container labelled `claude-docker.docker=<sid>`
-- [x] 2.5 `run.sh` `docker_snapshot` / `docker_cleanup`: before/after diff, `claude-*` exclusions, the other-session guard, one-line notices; EXIT trap retries the stage removal with `podman unshare`
+- [x] 2.5 `run.sh` `ask_docker_exit` / `--docker-keep` / `--docker-clean`, `docker_snapshot` / `docker_exit`: before/after diff, the question at start, keep lists by name with a removal command, remove with `claude-*` exclusions and the other-session guard, one-line notices; EXIT trap retries the stage removal with `podman unshare`
 - [x] 2.6 `entrypoint.sh`: `alias_project` (host-path key linked to the `/workspaces` one, existing sessions merged), `join_socket_group` (socket GID as supplementary group), `trust_workspaces` accepts host paths when `CLAUDE_DOCKER_FLAGS` lists `docker`
 - [x] 2.7 Dockerfile: Docker CLI, compose and buildx plugins from Docker's apt repository
 
