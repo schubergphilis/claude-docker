@@ -45,7 +45,7 @@ The socket SHALL be, in order: `CLAUDE_DOCKER_SOCKET` when set; the host's `DOCK
 
 ### Requirement: The dropped-to user can open the socket
 
-Under rootless podman, decided by asking the engine behind the socket the session uses (not the default connection), `run.sh` SHALL start the agent container with `--userns=keep-id --user 0:0 --passwd=false`, so the entrypoint still starts as (namespaced) root and the `HOST_UID` it drops to is the host user, who owns the socket. Under a rootful engine, the entrypoint SHALL add the socket's group (by GID, creating a `docker-host` group when none has it) as a supplementary group of the `claude` user before the privilege drop, unless it is already the user's primary group, it is GID 0, or the image already has a group under that GID that is not `docker` or `docker-host`: the root group and the image's other groups reach far beyond the socket, so those are never joined and the entrypoint warns. The privilege drop and capability set SHALL be unchanged.
+Under rootless podman, decided by asking the engine behind the socket the session uses (not the default connection), `run.sh` SHALL start the agent container with `--userns=keep-id --user 0:0 --passwd=false`, so the entrypoint still starts as (namespaced) root and the `HOST_UID` it drops to is the host user, who owns the socket. The same mapping SHALL apply to every rootless-podman session, with or without `--docker` (decided by `podman info` on the default connection then): the persistent volumes are shared and chowned to `HOST_UID` at each start, so two mappings would flip ownership from under a running session. Under a rootful engine, the entrypoint SHALL add the socket's group (by GID, creating a `docker-host` group when none has it) as a supplementary group of the `claude` user before the privilege drop, unless it is already the user's primary group, it is GID 0, or the image already has a group under that GID that is not `docker` or `docker-host`: the root group and the image's other groups reach far beyond the socket, so those are never joined and the entrypoint warns. The privilege drop and capability set SHALL be unchanged.
 
 #### Scenario: rootless podman
 
@@ -59,6 +59,12 @@ Under rootless podman, decided by asking the engine behind the socket the sessio
 - **WHEN** the user runs `claude-docker --docker ~/repo`
 - **THEN** the `claude` user is not added to GID 0, and `docker` in the session fails on the socket's permissions rather than running with the root group
 - **AND** a socket whose GID is the image's `shadow` group is likewise not joined, with a warning
+
+#### Scenario: a regular session next to a --docker one
+
+- **GIVEN** a rootless podman host and a running `claude-docker --docker ~/a` session
+- **WHEN** the user starts a regular `claude-docker ~/b`
+- **THEN** both run with the same user mapping, the first session keeps writing its history and settings, and neither crashes
 
 #### Scenario: rootful docker
 

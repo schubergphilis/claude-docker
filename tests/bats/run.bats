@@ -930,24 +930,37 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
   [[ "$(lines_of "${ENV_ARGS[@]}")" == *"CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo"* ]]
 }
 
-@test "build_docker_socket: rootless podman finds its socket and adds keep-id" {
+@test "build_docker_socket: rootless podman finds its socket" {
   mkdir -p "$BATS_TEST_TMPDIR/xdg/podman"
   mksock "$BATS_TEST_TMPDIR/xdg/podman/podman.sock"
   podman() { echo "podman $*" >>"$CALLS"; echo true; }
   WITH_DOCKER=1 RUNTIME=podman XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/xdg"
   build_docker_socket
   [ "$DOCKER_SOCKET" = "$BATS_TEST_TMPDIR/xdg/podman/podman.sock" ]
-  [ "$(lines_of "${RUN_OPTS[@]}")" = "$(printf -- '--userns=keep-id\n--user\n0:0\n--passwd=false')" ]
 }
 
-@test "build_docker_socket: rootful podman adds no keep-id" {
-  mksock "$BATS_TEST_TMPDIR/eng.sock"
+@test "build_userns: rootless podman gets keep-id, --docker or not; the same mapping for every session" {
+  podman() { echo "podman $*" >>"$CALLS"; echo true; }
+  RUNTIME=podman WITH_DOCKER=0
+  build_userns
+  [ "$(lines_of "${RUN_OPTS[@]}")" = "$(printf -- '--userns=keep-id\n--user\n0:0\n--passwd=false')" ]
+  grep -q "^podman info --format {{.Host.Security.Rootless}}$" "$CALLS"
+  RUN_OPTS=() WITH_DOCKER=1 DOCKER_SOCKET=/s.sock
+  build_userns
+  [ "$(lines_of "${RUN_OPTS[@]}")" = "$(printf -- '--userns=keep-id\n--user\n0:0\n--passwd=false')" ]
+  # Under --docker, asked of the engine behind the chosen socket, not the default connection.
+  grep -q "^podman --remote --url unix:///s.sock info --format {{.Host.Security.Rootless}}$" "$CALLS"
+}
+
+@test "build_userns: rootful podman and docker add no keep-id" {
   podman() { echo "podman $*" >>"$CALLS"; echo false; }
-  WITH_DOCKER=1 RUNTIME=podman CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/eng.sock"
-  build_docker_socket
+  RUNTIME=podman WITH_DOCKER=0
+  build_userns
   [ "${#RUN_OPTS[@]}" -eq 0 ]
-  # Asked of the engine behind the chosen socket, not the default connection.
-  grep -q "^podman --remote --url unix://$BATS_TEST_TMPDIR/eng.sock info --format {{.Host.Security.Rootless}}$" "$CALLS"
+  RUNTIME=docker
+  build_userns
+  [ "${#RUN_OPTS[@]}" -eq 0 ]
+  run ! grep -q "^docker.*info" "$CALLS"
 }
 
 @test "build_docker_socket: on macOS docker's VM-side socket is mounted, the host-side one is dialled" {
@@ -967,7 +980,7 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
   uname() { echo Darwin; }
   podman() {
     echo "podman $*" >>"$CALLS"
-    case "$*" in *RemoteSocket*) echo /run/user/501/podman/podman.sock ;; *Rootless*) echo true ;; esac
+    case "$*" in *RemoteSocket*) echo /run/user/501/podman/podman.sock ;; esac
   }
   WITH_DOCKER=1 RUNTIME=podman CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/machine.sock"
   build_docker_socket

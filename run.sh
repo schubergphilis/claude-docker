@@ -3147,7 +3147,7 @@ engine_socket_candidates() {
 # and point DOCKER_HOST at it. No daemon runs in the container; the image's
 # docker CLI drives the host engine over this socket.
 build_docker_socket() {
-  local candidates cand rootless
+  local candidates cand
   [ "$WITH_DOCKER" = "1" ] || return 0
   # Docker Desktop on Windows exposes its engine as a named pipe, not a unix
   # socket on the Git Bash side; there is nothing here to bind-mount.
@@ -3196,20 +3196,34 @@ build_docker_socket() {
   # session to a different projects/ dir than a regular run. The entrypoint
   # links the two, so --resume and memory carry over between modes.
   [ -n "${SEEN_NAMES[0]:-}" ] && ENV_ARGS+=("-e" "CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/${SEEN_NAMES[0]}")
-  # Rootless podman maps container root to the host user and every other
-  # container UID to a subordinate one, so the HOST_UID the entrypoint drops
-  # to is a stranger to the host-user-owned 0660 socket. keep-id maps HOST_UID
-  # to the host user instead; --user 0:0 keeps the entrypoint starting as
-  # (namespaced) root, and --passwd=false stops podman adding its own passwd
-  # entry for HOST_UID, which would skip the entrypoint's `claude` user.
-  # Asked of the engine behind DOCKER_SOCKET, not the default connection:
-  # CLAUDE_DOCKER_SOCKET can point a rootless user at the rootful socket.
-  if [ "$RUNTIME" = podman ]; then
+  return 0
+}
+
+# Rootless podman maps container root to the host user and every other
+# container UID to a subordinate one, so the HOST_UID the entrypoint drops to
+# is host subordinate UID N on disk. keep-id maps HOST_UID to the host user
+# instead; --user 0:0 keeps the entrypoint starting as (namespaced) root, and
+# --passwd=false stops podman adding its own passwd entry for HOST_UID, which
+# would skip the entrypoint's `claude` user. --docker needs it to open the
+# host-user-owned 0660 socket, and every rootless podman session gets it,
+# not only --docker: the claude-code-root/home volumes are shared, and the
+# entrypoint chowns them to HOST_UID at each start, so two sessions with
+# different mappings flip the files' owner from under each other (a regular
+# session starting next to a --docker one, or the reverse, crashed the one
+# already running). One mapping for all sessions, and the host user owns what
+# a session writes to a workspace too. Under --docker the question goes to
+# the engine behind DOCKER_SOCKET, not the default connection:
+# CLAUDE_DOCKER_SOCKET can point a rootless user at the rootful socket.
+build_userns() {
+  local rootless
+  [ "$RUNTIME" = podman ] || return 0
+  if [ "$WITH_DOCKER" = "1" ]; then
     rootless=$(engine info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
-    if [ "$rootless" = "true" ]; then
-      RUN_OPTS+=("--userns=keep-id" "--user" "0:0" "--passwd=false")
-    fi
+  else
+    rootless=$("$RUNTIME" info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
   fi
+  [ "$rootless" = "true" ] || return 0
+  RUN_OPTS+=("--userns=keep-id" "--user" "0:0" "--passwd=false")
 }
 
 # The in-container glab reads job_token through the OS keyring whenever the
@@ -3363,6 +3377,7 @@ main() {
   build_git_trust
   build_cred_mounts
   build_docker_socket
+  build_userns
   ask_docker_exit
   build_env_args
   discover_tokens
