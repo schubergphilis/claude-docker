@@ -87,7 +87,7 @@ Because Claude Code keys its project directory by working directory, a `--docker
 
 ### Requirement: What appears on the engine during the session is kept or removed, as chosen at start
 
-Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts and, at exit, act on those that are new. Which action is settled at start: `--docker-keep` keeps, `--docker-clean` removes, both together are refused, and with neither the wrapper SHALL ask on the terminal (`[y/N]`, default keep), saying that the diff also holds anything started on the engine by hand during the session; without a terminal it SHALL keep and say how to choose. The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it.
+Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts and, at exit, act on those that are new. Which action is settled at start: `--docker-keep` keeps, `--docker-clean` removes, both together are refused, and with neither the wrapper SHALL ask on the terminal (`[Y/n]`, default remove), saying that the diff also holds anything started on the engine by hand during the session; without a terminal it SHALL keep and say how to choose. The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it.
 
 Keeping: at exit the wrapper SHALL list what is new, by name, on stderr, and print a command for the host shell that removes it (addressed at the socket the session used), with a warning to check the names first. Nothing is removed.
 
@@ -99,7 +99,7 @@ A listing that fails at start SHALL be fatal, since an empty snapshot would make
 
 - **GIVEN** `claude-docker --docker ~/repo` on a terminal
 - **WHEN** the session starts
-- **THEN** it asks whether what appears on the host engine during the session is removed at exit, default no, and says that hand-started containers on the engine are in that list too
+- **THEN** it asks whether what appears on the host engine during the session is removed at exit, default yes, and says that hand-started containers on the engine are in that list too
 - **AND** `--docker-keep` or `--docker-clean` skips the question, and without a terminal the session keeps and says so
 
 #### Scenario: kept resources are listed with a removal command

@@ -452,23 +452,26 @@ http_access allow all" ]
   [ "$DOCKER_EXIT" = clean ]
 }
 
-@test "ask_docker_exit: asks on a terminal; y removes, anything else keeps" {
+@test "ask_docker_exit: asks on a terminal; n keeps, anything else removes" {
   WITH_DOCKER=1 DOCKER_EXIT=""
   has_tty() { return 0; }
-  ask_docker_exit <<<"y" 2>"$BATS_TEST_TMPDIR/err"
-  [ "$DOCKER_EXIT" = clean ]
+  ask_docker_exit <<<"n" 2>"$BATS_TEST_TMPDIR/err"
+  [ "$DOCKER_EXIT" = keep ]
   grep -q "remove what appears on the host engine while the session runs" "$BATS_TEST_TMPDIR/err"
   grep -q "by hand meanwhile is in that list too" "$BATS_TEST_TMPDIR/err"
-  grep -q '\[y/N\]' "$BATS_TEST_TMPDIR/err"
+  grep -q '\[Y/n\]' "$BATS_TEST_TMPDIR/err"
   DOCKER_EXIT=""
-  ask_docker_exit <<<"" 
+  ask_docker_exit <<<"No" 2>/dev/null
   [ "$DOCKER_EXIT" = keep ]
   DOCKER_EXIT=""
-  ask_docker_exit <<<"n"
-  [ "$DOCKER_EXIT" = keep ]
+  ask_docker_exit <<<"" 2>/dev/null
+  [ "$DOCKER_EXIT" = clean ]
   DOCKER_EXIT=""
-  ask_docker_exit </dev/null
-  [ "$DOCKER_EXIT" = keep ]
+  ask_docker_exit <<<"y" 2>/dev/null
+  [ "$DOCKER_EXIT" = clean ]
+  DOCKER_EXIT=""
+  ask_docker_exit </dev/null 2>/dev/null
+  [ "$DOCKER_EXIT" = clean ]
 }
 
 @test "ask_docker_exit: no terminal keeps and says how to choose" {

@@ -156,8 +156,9 @@ Wrapper flags:
                       dir, so `docker run -v "$PWD:..."` sources resolve on
                       the host. At start it asks whether containers, images,
                       volumes and networks that appear on the engine during
-                      the session are removed at exit or kept; kept ones are
-                      listed at exit with a command that removes them.
+                      the session are removed at exit (the default) or kept;
+                      kept ones are listed at exit with a command that
+                      removes them.
                       Cannot be combined with --egress-lock.
   --docker-keep       --docker, keeping what appears on the engine (no
                       question asked). Without a terminal this is the default.
@@ -3003,9 +3004,9 @@ ask_docker_exit() {
     echo "claude-docker: --docker: no terminal to ask on, so what appears on the host engine during the session is kept at exit (pass --docker-clean or --docker-keep to choose)" >&2
     return 0
   fi
-  printf 'claude-docker: --docker: remove what appears on the host engine while the session runs (containers, networks, volumes, images) when it exits? Anything you start on this engine by hand meanwhile is in that list too; kept ones are listed at exit with a removal command. [y/N] ' >&2
+  printf 'claude-docker: --docker: remove what appears on the host engine while the session runs (containers, networks, volumes, images) when it exits? Anything you start on this engine by hand meanwhile is in that list too; kept ones are listed at exit with a removal command. [Y/n] ' >&2
   read -r answer || answer=""
-  case "$answer" in y|Y|yes|YES|Yes) DOCKER_EXIT=clean ;; *) DOCKER_EXIT=keep ;; esac
+  case "$answer" in n|N|no|NO|No) DOCKER_EXIT=keep ;; *) DOCKER_EXIT=clean ;; esac
 }
 engine_ls() {
   case "$1" in
