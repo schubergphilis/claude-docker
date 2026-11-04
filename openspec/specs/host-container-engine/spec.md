@@ -87,11 +87,11 @@ Because Claude Code keys its project directory by working directory, a `--docker
 
 ### Requirement: What appears on the engine during the session is kept or removed, as chosen at start
 
-Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts and, at exit, act on those that are new. Which action is settled at start: `--docker-keep` keeps, `--docker-clean` removes, both together are refused, and with neither the wrapper SHALL ask on the terminal (`[Y/n]`, default remove), saying that the diff also holds anything started on the engine by hand during the session; without a terminal it SHALL keep and say how to choose. The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it.
+Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts and, at exit, act on those that are new. Which action is settled at start: `--docker-keep` keeps, `--docker-clean` removes, both together are refused, and with neither the wrapper SHALL ask on the terminal (`[Y/n]`, default remove) once the socket is resolved, so no fatal start-up check follows the answer, saying that the diff also holds anything started on the engine by hand during the session; without a terminal it SHALL keep and say how to choose. The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it.
 
 Keeping: at exit the wrapper SHALL list what is new, by name, on stderr, and print a command for the host shell that removes it (addressed at the socket the session used), with a warning to check the names first. Nothing is removed.
 
-Removing: at exit the wrapper SHALL remove what is new in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove resources whose name starts with `claude-` (other claude-docker sessions' sidecars, networks and the egress image), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container). It SHALL print one line to stderr naming what it removed, and one naming what it left and why when something is left: another session running, or the engine refused.
+Removing: at exit the wrapper SHALL remove what is new in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove resources whose name starts with `claude-` (other claude-docker sessions' sidecars, networks and the egress image) or containers carrying the `claude-docker.session` label (`run.sh` puts it on every agent container, `--docker` or not), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container). It SHALL print one line to stderr naming what it removed, and one naming what it left and why when something is left: another session running, or the engine refused.
 
 A listing that fails at start SHALL be fatal, since an empty snapshot would make everything on the engine look new at exit; a listing that fails at exit SHALL do nothing and say so.
 
@@ -139,7 +139,7 @@ A listing that fails at start SHALL be fatal, since an empty snapshot would make
 
 - **GIVEN** a `--docker-clean` session, and a `claude-docker --gh` session started after it
 - **WHEN** the `--docker-clean` session exits
-- **THEN** the `--gh` session's `claude-auth-proxy-*` container and `claude-auth-*` network are still there
+- **THEN** the `--gh` session's agent container, its `claude-auth-proxy-*` container and `claude-auth-*` network are still there
 
 ### Requirement: The stage directory is removed even with subordinate-UID files in it
 

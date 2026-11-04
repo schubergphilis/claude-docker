@@ -2418,6 +2418,32 @@ engine_stub() {
   [[ "$out" == *"1 containers (stack-db-1), 1 networks (stack_default), 1 volumes (v2), 1 images (stack-web) the session created could not be removed"* ]]
 }
 
+@test "docker_exit: a regular session's labelled agent container started meanwhile is left alone" {
+  engine_stub
+  docker_snapshot
+  printf 'c1 app\nc2 stack-db-1\nc5 vigilant_moser map[claude-docker.session:zz io.buildah.version:1.33]\nc6 other claude-docker.session=yy,org.opencontainers.image.title=claude-docker\n' >"$BATS_TEST_TMPDIR/containers"
+  run docker_exit
+  [ "$status" -eq 0 ]
+  grep -q "^docker -H unix:///s.sock rm -fv c2$" "$CALLS"
+  run ! grep -q "c5\|c6" <(grep " rm " "$CALLS")
+}
+
+@test "engine_desc: count, kind and the names in parentheses when there are any" {
+  [ "$(engine_desc 2 containers "$(printf 'c1 app\nc2 db\n')")" = "2 containers (app, db)" ]
+  [ "$(engine_desc 0 images "")" = "0 images" ]
+}
+
+@test "engine_cmd: bare for the runtime's default socket, addressed otherwise" {
+  RUNTIME=docker DOCKER_SOCKET=/var/run/docker.sock
+  [ "$(engine_cmd)" = docker ]
+  DOCKER_SOCKET=/x.sock
+  [ "$(engine_cmd)" = "docker -H unix:///x.sock" ]
+  RUNTIME=podman XDG_RUNTIME_DIR=/run/user/7 DOCKER_SOCKET=/run/user/7/podman/podman.sock
+  [ "$(engine_cmd)" = podman ]
+  DOCKER_SOCKET=/x.sock
+  [ "$(engine_cmd)" = "podman --remote --url unix:///x.sock" ]
+}
+
 @test "docker_exit: an engine that does not answer at exit removes nothing and says so" {
   engine_stub
   docker_snapshot
@@ -2824,6 +2850,7 @@ YML
   [[ "$agent" == *" -e CLAUDE_DOCKER_FLAGS=docker,ephemeral "* ]]
   [[ "$agent" == *" -w $WS claude-code:local claude" ]]
   [[ "$agent" == *" --label claude-docker.docker="* ]]
+  [[ "$agent" == *" --label claude-docker.session="* ]]
   [[ "$agent" != *":/workspaces/repo"* ]]
   [[ "$agent" != *" -w /workspaces/repo "* ]]
   # The engine was listed before the agent started, and the diff checked after.

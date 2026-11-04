@@ -2986,7 +2986,8 @@ engine_cmd() {
 # which is why the question says so and the notice names everything. Two
 # guards keep a removal from reaching past the session: resources of other
 # claude-docker sessions (claude-* names: the auth-proxy and egress sidecars,
-# their networks, the egress image) are never touched, and while another
+# their networks, the egress image; the claude-docker.session label: every
+# agent container) are never touched, and while another
 # --docker session is still running (its agent carries the
 # claude-docker.docker label) nothing is removed at all, since what it
 # created since this session started is in the diff too. A resource the
@@ -3010,7 +3011,7 @@ ask_docker_exit() {
 }
 engine_ls() {
   case "$1" in
-    containers) engine ps -a --no-trunc --format '{{.ID}} {{.Names}}' ;;
+    containers) engine ps -a --no-trunc --format '{{.ID}} {{.Names}} {{.Labels}}' ;;
     images)     engine image ls -a --no-trunc --format '{{.ID}} {{.Repository}}' ;;
     volumes)    engine volume ls --format '{{.Name}} {{.Name}}' ;;
     networks)   engine network ls --no-trunc --format '{{.ID}} {{.Name}}' ;;
@@ -3028,14 +3029,17 @@ docker_snapshot() {
   done
 }
 # `id name` lines of $1 that are new since the snapshot and not another
-# session's.
+# session's: claude-* names are the sidecars, their networks and the egress
+# image; the claude-docker.session label (run_container puts it on every
+# agent container, --docker or not) is a session started since this one.
 engine_new() {
-  local line id name
+  local line id rest name
   [ -f "$stage/engine-$1" ] || return 0
   engine_ls "$1" | while IFS= read -r line; do
-    id=${line%% *}; name=${line#* }
+    id=${line%% *}; rest=${line#* }; name=${rest%% *}
     [ -n "$id" ] || continue
     case "$name" in claude-*|localhost/claude-*) continue ;; esac
+    case "$rest" in *claude-docker.session*) continue ;; esac
     grep -qxF -- "$id" "$stage/engine-$1" || printf '%s\n' "$id $name"
   done
 }
@@ -3295,10 +3299,13 @@ run_container() {
   # under no-new-privileges, so claude itself runs with no usable caps.
   # --init wraps the process tree under tini so claude's bash/MCP children
   # get reaped — runuser would otherwise be PID 1 and wouldn't reap zombies.
+  # The claude-docker.session label marks this as an agent container, so a
+  # --docker session's exit removal (engine_new) leaves it alone.
   "$RUNTIME" run --rm -it --init \
     --security-opt no-new-privileges \
     --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
     -e "HOST_UID=${HOST_UID:-$(id -u)}" -e "HOST_GID=${HOST_GID:-$(id -g)}" \
+    --label "claude-docker.session=$proxy_sid" \
     ${RUN_OPTS[@]+"${RUN_OPTS[@]}"} \
     "${MOUNT_ARGS[@]}" \
     "${ENV_ARGS[@]}" \
@@ -3312,7 +3319,6 @@ main() {
   init_shell
   parse_args "$@"
   validate_opts
-  ask_docker_exit
   select_runtime
   prune_stale_auth_proxy
   detect_msys
@@ -3320,6 +3326,7 @@ main() {
   build_git_trust
   build_cred_mounts
   build_docker_socket
+  ask_docker_exit
   build_env_args
   discover_tokens
   check_allowlist_session
