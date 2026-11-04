@@ -134,6 +134,21 @@ RUN install -d -m 0755 /etc/apt/keyrings \
  && apt-get install -y --no-install-recommends gh \
  && rm -rf /var/lib/apt/lists/*
 
+# Docker CLI + compose and buildx plugins, for run.sh --docker (which mounts
+# the host engine's socket — Docker or Podman — at /run/docker.sock). Client
+# only: no daemon runs in the image. Floats like `gh` above: Docker's apt repo
+# is signed, and a stale CLI pin would mostly accrue Go stdlib CVEs.
+RUN . /etc/os-release \
+ && install -d -m 0755 /etc/apt/keyrings \
+ && curl -fsSL https://download.docker.com/linux/ubuntu/gpg \
+      | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+ && chmod go+r /etc/apt/keyrings/docker.gpg \
+ && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" \
+      > /etc/apt/sources.list.d/docker.list \
+ && apt-get update \
+ && apt-get install -y --no-install-recommends docker-ce-cli docker-compose-plugin docker-buildx-plugin \
+ && rm -rf /var/lib/apt/lists/*
+
 # Task (go-task) — the upstream apt instructions are `curl … setup.deb.sh | bash`;
 # that script is inlined here instead (fetch key, write sources.list, install), so
 # nothing pipes a remote script into a shell at build time. Repo, key and layout

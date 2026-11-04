@@ -9,11 +9,14 @@ setup() {
   CA_DIR="$BATS_TEST_TMPDIR/ca"
   GIT_SYSTEM_CONFIG="$BATS_TEST_TMPDIR/gitconfig"
   mkdir -p "$ROOT_HOME" "$CA_DIR"
-  unset HOST_UID HOST_GID CLAUDE_DOCKER_TRUSTED_WORKSPACES
+  unset HOST_UID HOST_GID CLAUDE_DOCKER_TRUSTED_WORKSPACES CLAUDE_DOCKER_FLAGS CLAUDE_DOCKER_PROJECT_ALIAS
+  # Absent unless a --docker test creates it.
+  DOCKER_SOCK="$BATS_TEST_TMPDIR/docker.sock"
   # Each stub echoes its call so tests can assert on what ran.
   chown() { echo "chown $*"; }
   groupadd() { echo "groupadd $*"; }
   useradd() { echo "useradd $*"; }
+  usermod() { echo "usermod $*"; }
   # Its output is discarded by install_cas, so it logs to a file.
   update-ca-certificates() { echo ran >> "$BATS_TEST_TMPDIR/ca.log"; }
   find() { :; }
@@ -155,6 +158,22 @@ trusted() { command git config --file "$GIT_SYSTEM_CONFIG" --get-all safe.direct
   [ "$(grep -c 'entrypoint: WARN not trusting' <<<"$output")" -eq 6 ]
 }
 
+@test "trust_workspaces: under --docker a host path is trusted, widening values still refused" {
+  CLAUDE_DOCKER_FLAGS=docker,ephemeral \
+    CLAUDE_DOCKER_TRUSTED_WORKSPACES='/home/me/repo:/mnt/c/x:*:/:/a/../b:/a/b/:/workspaces/ok' \
+    run trust_workspaces
+  [ "$status" -eq 0 ]
+  [ "$(trusted)" = "/home/me/repo,/home/me/repo/*,/mnt/c/x,/mnt/c/x/*,/workspaces/ok,/workspaces/ok/*" ]
+  [ "$(grep -c 'entrypoint: WARN not trusting' <<<"$output")" -eq 4 ]
+}
+
+@test "trust_workspaces: without --docker a host path is still refused" {
+  CLAUDE_DOCKER_FLAGS=ephemeral CLAUDE_DOCKER_TRUSTED_WORKSPACES=/home/me/repo run trust_workspaces
+  [ "$status" -eq 0 ]
+  [ ! -e "$GIT_SYSTEM_CONFIG" ]
+  [[ "$output" == *"WARN not trusting /home/me/repo"* ]]
+}
+
 @test "trust_workspaces: also runs when the session stays root" {
   # Container root is not the host owner either, so git still needs the entry.
   CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo run main echo hello
@@ -232,6 +251,87 @@ trusted() { command git config --file "$GIT_SYSTEM_CONFIG" --get-all safe.direct
   HOST_UID=1000 HOST_GID=1000 run main claude
   [ "$status" -eq 9 ]
   [[ "$output" != *runuser* ]]
+}
+
+# --- alias_project / join_socket_group (--docker) --------------------------
+
+# A real unix socket file, for the [ -S ] check.
+mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+
+@test "alias_project: the host-path project key links to the /workspaces one" {
+  mkdir -p "$ROOT_HOME/.claude/projects/-workspaces-repo" "$BATS_TEST_TMPDIR/host/repo"
+  cd "$BATS_TEST_TMPDIR/host/repo"
+  CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo run alias_project
+  [ "$status" -eq 0 ]
+  local key
+  key=$(project_key "$PWD")
+  [ -L "$ROOT_HOME/.claude/projects/$key" ]
+  [ "$(readlink "$ROOT_HOME/.claude/projects/$key")" = "-workspaces-repo" ]
+  [[ "$output" == *"chown root $ROOT_HOME/.claude/projects"* ]]
+}
+
+@test "alias_project: sessions already keyed by host path are merged, then linked" {
+  mkdir -p "$ROOT_HOME/.claude/projects/-workspaces-repo" "$BATS_TEST_TMPDIR/host/repo"
+  cd "$BATS_TEST_TMPDIR/host/repo"
+  local key
+  key=$(project_key "$PWD")
+  mkdir -p "$ROOT_HOME/.claude/projects/$key"
+  echo new >"$ROOT_HOME/.claude/projects/$key/a.jsonl"
+  echo old >"$ROOT_HOME/.claude/projects/-workspaces-repo/b.jsonl"
+  echo keep >"$ROOT_HOME/.claude/projects/-workspaces-repo/a.jsonl"
+  CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo run alias_project
+  [ "$status" -eq 0 ]
+  [ -L "$ROOT_HOME/.claude/projects/$key" ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/a.jsonl")" = keep ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/b.jsonl")" = old ]
+}
+
+@test "alias_project: nothing to link touches nothing" {
+  mkdir -p "$BATS_TEST_TMPDIR/host/repo"
+  cd "$BATS_TEST_TMPDIR/host/repo"
+  CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo run alias_project
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ ! -e "$ROOT_HOME/.claude/projects" ]
+  run alias_project
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "join_socket_group: a socket owned by another group is joined by GID" {
+  mksock "$DOCKER_SOCK"
+  run join_socket_group 424242
+  [ "$status" -eq 0 ]
+  local gid
+  gid=$(stat -c %g "$DOCKER_SOCK")
+  [[ "$output" == *"groupadd -o -g $gid docker-host"* ]]
+  [[ "$output" == *"usermod -aG $gid claude"* ]]
+}
+
+@test "join_socket_group: an existing group is reused, no groupadd" {
+  mksock "$DOCKER_SOCK"
+  local gid
+  gid=$(stat -c %g "$DOCKER_SOCK")
+  KNOWN="group $gid"
+  run join_socket_group 424242
+  [ "$status" -eq 0 ]
+  [[ "$output" != *groupadd* ]]
+  [[ "$output" == *"usermod -aG $gid claude"* ]]
+}
+
+@test "join_socket_group: a socket already in the primary group, or no socket, does nothing" {
+  mksock "$DOCKER_SOCK"
+  run join_socket_group "$(stat -c %g "$DOCKER_SOCK")"
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  rm -f "$DOCKER_SOCK"
+  run join_socket_group 424242
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "join_socket_group: runs after the user exists and before the drop" {
+  mksock "$DOCKER_SOCK"
+  HOST_UID=1000 HOST_GID=424242 run main claude
+  [ "$status" -eq 0 ]
+  [ "$(grep -n '^useradd' <<<"$output" | cut -d: -f1)" -lt "$(grep -n '^usermod' <<<"$output" | cut -d: -f1)" ]
+  [ "$(grep -n '^usermod' <<<"$output" | cut -d: -f1)" -lt "$(grep -n '^runuser' <<<"$output" | cut -d: -f1)" ]
 }
 
 # --- approve_api_key (--egress-lock) ---------------------------------------

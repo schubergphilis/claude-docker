@@ -23,6 +23,7 @@ setup() {
   # Computed when run.sh was sourced, before HOME moved above.
   EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress"
   RUNTIME=docker
+  unset CLAUDE_DOCKER_SOCKET DOCKER_HOST
   # Knobs for the docker stub: STUB_FAIL names subcommands that fail ("run",
   # or "network:connect" for one sub-subcommand), STUB_PS is the
   # stopped-container list, STUB_ALIVE the running sidecar id, STUB_LOGS what
@@ -430,6 +431,13 @@ http_access allow all" ]
   [ "$status" -eq 1 ]
 }
 
+@test "validate_opts: --docker with --egress-lock is rejected" {
+  WITH_DOCKER=1 WITH_EGRESS_LOCK=1 WITH_API=1 ANTHROPIC_API_KEY=k
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--docker cannot be combined with --egress-lock"* ]]
+}
+
 # --- select_runtime ---
 
 @test "select_runtime: CLAUDE_DOCKER_RUNTIME outside the allowlist is rejected" {
@@ -641,6 +649,32 @@ http_access allow all" ]
   [[ "$output" == *"workspace basename collision"* ]]
 }
 
+@test "build_workspace_mounts: --docker mounts workspaces at their host path" {
+  mkdir -p "$BATS_TEST_TMPDIR/other"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/other") RO_WORKSPACES=1 WITH_DOCKER=1
+  build_workspace_mounts
+  [ "$CWD" = "$WS" ]
+  [ "${CONTAINER_PATHS[1]}" = "$BATS_TEST_TMPDIR/other" ]
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:%s:ro\n-v\n%s:%s:ro' "$WS" "$WS" "$BATS_TEST_TMPDIR/other" "$BATS_TEST_TMPDIR/other")" ]
+}
+
+@test "check_mirror_path: system directories are refused under --docker" {
+  run check_mirror_path /usr/local/src/repo
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"would shadow a container directory"* ]]
+  run check_mirror_path /root
+  [ "$status" -eq 1 ]
+  run check_mirror_path /workspaces/repo
+  [ "$status" -eq 1 ]
+  run check_mirror_path /mnt/c/repo/x:y
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"cannot contain ':'"* ]]
+  run check_mirror_path /mnt/c/repo/app
+  [ "$status" -eq 0 ]
+  run check_mirror_path /home/ada/usr
+  [ "$status" -eq 0 ]
+}
+
 # --- build_git_trust ---
 
 # Two workspaces, both repos; FOREIGN lists the host paths another user owns.
@@ -796,6 +830,82 @@ trusted_value() {
   run build_cred_mounts
   [ "$status" -eq 1 ]
   [[ "$output" == *"CLAUDE_DOCKER_API_CA '$BATS_TEST_TMPDIR/nope.pem' is not a file"* ]]
+}
+
+# --- build_docker_socket ---
+
+# A real unix socket file, for the [ -S ] checks.
+mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sys.argv[1])' "$1"; }
+
+@test "build_docker_socket: no-op without --docker" {
+  build_docker_socket
+  [ "${#MOUNT_ARGS[@]}" -eq 0 ]
+  [ "${#RUN_OPTS[@]}" -eq 0 ]
+}
+
+@test "build_docker_socket: a unix:// DOCKER_HOST is mounted at /run/docker.sock" {
+  mksock "$BATS_TEST_TMPDIR/eng.sock"
+  WITH_DOCKER=1 DOCKER_HOST="unix://$BATS_TEST_TMPDIR/eng.sock"
+  build_docker_socket
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/run/docker.sock' "$BATS_TEST_TMPDIR/eng.sock")" ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"DOCKER_HOST=unix:///run/docker.sock"* ]]
+  [ "${#RUN_OPTS[@]}" -eq 0 ]
+}
+
+@test "build_docker_socket: CLAUDE_DOCKER_SOCKET wins over DOCKER_HOST" {
+  mksock "$BATS_TEST_TMPDIR/a.sock"
+  mksock "$BATS_TEST_TMPDIR/b.sock"
+  WITH_DOCKER=1 DOCKER_HOST="unix://$BATS_TEST_TMPDIR/a.sock" CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/b.sock"
+  build_docker_socket
+  [ "$DOCKER_SOCKET" = "$BATS_TEST_TMPDIR/b.sock" ]
+}
+
+@test "build_docker_socket: the first workspace's /workspaces name is passed as the project alias" {
+  mksock "$BATS_TEST_TMPDIR/eng.sock"
+  WITH_DOCKER=1 CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/eng.sock" SEEN_NAMES=(repo)
+  build_docker_socket
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo"* ]]
+}
+
+@test "build_docker_socket: rootless podman finds its socket and adds keep-id" {
+  mkdir -p "$BATS_TEST_TMPDIR/xdg/podman"
+  mksock "$BATS_TEST_TMPDIR/xdg/podman/podman.sock"
+  podman() { echo "podman $*" >>"$CALLS"; echo true; }
+  WITH_DOCKER=1 RUNTIME=podman XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/xdg"
+  build_docker_socket
+  [ "$DOCKER_SOCKET" = "$BATS_TEST_TMPDIR/xdg/podman/podman.sock" ]
+  [ "$(lines_of "${RUN_OPTS[@]}")" = "$(printf -- '--userns=keep-id\n--user\n0:0\n--passwd=false')" ]
+}
+
+@test "build_docker_socket: rootful podman adds no keep-id" {
+  mksock "$BATS_TEST_TMPDIR/eng.sock"
+  podman() { echo "podman $*" >>"$CALLS"; echo false; }
+  WITH_DOCKER=1 RUNTIME=podman CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/eng.sock"
+  build_docker_socket
+  [ "${#RUN_OPTS[@]}" -eq 0 ]
+}
+
+@test "build_docker_socket: no socket anywhere is fatal and names the podman fix" {
+  WITH_DOCKER=1 RUNTIME=podman XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/xdg"
+  run build_docker_socket
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"found no engine socket"* ]]
+  [[ "$output" == *"systemctl --user enable --now podman.socket"* ]]
+}
+
+@test "build_docker_socket: a path that is not a socket is fatal" {
+  : >"$BATS_TEST_TMPDIR/file"
+  WITH_DOCKER=1 CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/file"
+  run build_docker_socket
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"'$BATS_TEST_TMPDIR/file' is not a socket"* ]]
+}
+
+@test "build_docker_socket: rejected under MSYS" {
+  WITH_DOCKER=1 IS_MSYS=1
+  run build_docker_socket
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"not supported from Git Bash"* ]]
 }
 
 # --- build_env_args ---
@@ -1191,6 +1301,34 @@ TABLE
   [ "$(grep -n "^docker network rm claude-egress-" "$CALLS" | cut -d: -f1)" -gt \
     "$(grep -n "^docker network rm claude-auth-" "$CALLS" | cut -d: -f1)" ]
   grep -q "egress proxy blocked: api.anthropic.com" "$BATS_TEST_TMPDIR/stderr"
+}
+
+@test "create_stage: EXIT trap retries an undeletable stage via podman unshare" {
+  # A nested container under --docker can leave files in $stage/tmp owned by a
+  # subordinate UID. Simulate "rm -rf cannot delete this" with a read-only
+  # directory; the trap must fall back to `podman unshare rm -rf`.
+  (
+    RUNTIME=podman
+    create_stage
+    echo "$stage" >"$BATS_TEST_TMPDIR/stage"
+    mkdir -p "$stage/tmp/locked"
+    : >"$stage/tmp/locked/file"
+    chmod 555 "$stage/tmp/locked"
+  ) 2>"$BATS_TEST_TMPDIR/stderr"
+  local s
+  s=$(cat "$BATS_TEST_TMPDIR/stage")
+  chmod 755 "$s/tmp/locked"
+  grep -q "^podman unshare rm -rf $s$" "$CALLS"
+  grep -q "could not remove $s" "$BATS_TEST_TMPDIR/stderr"
+}
+
+@test "create_stage: EXIT trap does not call unshare when rm succeeds" {
+  (
+    RUNTIME=podman
+    create_stage
+    mkdir -p "$stage/tmp"
+  )
+  run ! grep -q "unshare" "$CALLS"
 }
 
 # --- egress_save_log ---
@@ -2077,6 +2215,145 @@ run_statusline() {
   ! grep -q alias "$stage/git-config-repo"
 }
 
+@test "stage_git_overlays: --docker overlays at the host path" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage" "$WS/.git"
+  echo "[core]" >"$WS/.git/config"
+  SEEN_NAMES=(repo) SEEN_PATHS=("$WS") WITH_DOCKER=1
+  stage_git_overlays
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/git-config-repo:$WS/.git/config"* ]]
+}
+
+# --- stage_docker_tmp ---
+
+@test "stage_docker_tmp: no-op without --docker" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  stage_docker_tmp
+  [ "${#MOUNT_ARGS[@]}" -eq 0 ]
+  [ ! -e "$stage/tmp" ]
+}
+
+@test "stage_docker_tmp: --docker mounts a stage tmp dir at its path as TMPDIR" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage"
+  WITH_DOCKER=1 proxy_sid=abc123
+  stage_docker_tmp
+  [ -d "$stage/tmp" ]
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:%s' "$stage/tmp" "$stage/tmp")" ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"TMPDIR=$stage/tmp"* ]]
+  [ "$(lines_of "${RUN_OPTS[@]}")" = "$(printf -- '--label\nclaude-docker.docker=abc123')" ]
+}
+
+# --- docker_snapshot / docker_cleanup ---
+
+# An engine whose listings come from files the test edits between the
+# snapshot and the cleanup. OTHERS is the `ps -q --filter label=` answer.
+engine_stub() {
+  OTHERS=""
+  docker() {
+    echo "docker $*" >>"$CALLS"
+    case "$*" in
+      *" ps -a --no-trunc --format "*) cat "$BATS_TEST_TMPDIR/containers" ;;
+      *" image ls -a --no-trunc --format "*) cat "$BATS_TEST_TMPDIR/images" ;;
+      *" volume ls --format "*) cat "$BATS_TEST_TMPDIR/volumes" ;;
+      *" network ls --no-trunc --format "*) cat "$BATS_TEST_TMPDIR/networks" ;;
+      *" ps -q --filter label=claude-docker.docker=sid1") echo mine ;;
+      *" ps -q --filter label=claude-docker.docker") printf '%s\n' mine $OTHERS ;;
+    esac
+    return 0
+  }
+  WITH_DOCKER=1 DOCKER_SOCKET=/s.sock proxy_sid=sid1
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage"
+  printf 'c1 app\n' >"$BATS_TEST_TMPDIR/containers"
+  printf 'i1 postgres\n' >"$BATS_TEST_TMPDIR/images"
+  printf 'v1 v1\n' >"$BATS_TEST_TMPDIR/volumes"
+  printf 'n1 bridge\n' >"$BATS_TEST_TMPDIR/networks"
+}
+
+@test "docker_snapshot: records the engine's IDs in the stage dir" {
+  engine_stub
+  docker_snapshot
+  [ "$(cat "$stage/engine-containers")" = c1 ]
+  [ "$(cat "$stage/engine-images")" = i1 ]
+  [ "$(cat "$stage/engine-volumes")" = v1 ]
+  [ "$(cat "$stage/engine-networks")" = n1 ]
+  grep -q "^docker -H unix:///s.sock ps -a --no-trunc" "$CALLS"
+}
+
+@test "docker_snapshot: no-op without --docker" {
+  engine_stub
+  WITH_DOCKER=0
+  docker_snapshot
+  [ ! -e "$stage/engine-containers" ]
+  run ! grep -q "^docker" "$CALLS"
+}
+
+@test "docker_cleanup: removes what is new, in order, and skips other sessions' claude-* resources" {
+  engine_stub
+  docker_snapshot
+  printf 'c1 app\nc2 stack-db-1\nc3 claude-auth-proxy-zz\n' >"$BATS_TEST_TMPDIR/containers"
+  printf 'i1 postgres\ni2 stack-web\ni3 localhost/claude-docker-egress-proxy\n' >"$BATS_TEST_TMPDIR/images"
+  printf 'v1 v1\nv2 v2\n' >"$BATS_TEST_TMPDIR/volumes"
+  printf 'n1 bridge\nn2 stack_default\nn3 claude-egress-zz\n' >"$BATS_TEST_TMPDIR/networks"
+  run docker_cleanup
+  [ "$status" -eq 0 ]
+  local out=$output
+  grep -q "^docker -H unix:///s.sock rm -fv c2$" "$CALLS"
+  grep -q "^docker -H unix:///s.sock network rm n2$" "$CALLS"
+  grep -q "^docker -H unix:///s.sock volume rm -f v2$" "$CALLS"
+  grep -q "^docker -H unix:///s.sock image rm -f i2$" "$CALLS"
+  run ! grep -q "c3\|i3\|n3\|c1\|i1\|v1\|n1" <(grep -v " ls \| ps " "$CALLS")
+  [ "$(grep -n "rm -fv c2" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "network rm n2" "$CALLS" | cut -d: -f1)" ]
+  [ "$(grep -n "network rm n2" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "volume rm -f v2" "$CALLS" | cut -d: -f1)" ]
+  [ "$(grep -n "volume rm -f v2" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "image rm -f i2" "$CALLS" | cut -d: -f1)" ]
+  # The stub removes nothing, so everything counts as still there.
+  [[ "$out" == *"removed 0 containers, 0 networks, 0 volumes, 0 images"* ]]
+  [[ "$out" == *"1 containers, 1 networks, 1 volumes, 1 images the session created could not be removed"* ]]
+}
+
+@test "docker_cleanup: reports the removal once the engine agrees" {
+  engine_stub
+  docker_snapshot
+  printf 'c1 app\nc2 stack-db-1\n' >"$BATS_TEST_TMPDIR/containers"
+  docker() {
+    echo "docker $*" >>"$CALLS"
+    case "$*" in
+      *" rm -fv c2") printf 'c1 app\n' >"$BATS_TEST_TMPDIR/containers" ;;
+      *" ps -a --no-trunc --format "*) cat "$BATS_TEST_TMPDIR/containers" ;;
+      *" image ls "*|*" volume ls "*|*" network ls "*) : ;;
+    esac
+    return 0
+  }
+  run docker_cleanup
+  [ "$status" -eq 0 ]
+  [ "$output" = "claude-docker: --docker: removed 1 containers the session created on the host engine" ]
+}
+
+@test "docker_cleanup: another running --docker session keeps the diff in place" {
+  engine_stub
+  docker_snapshot
+  OTHERS=theirs
+  printf 'c1 app\nc2 stack-db-1\n' >"$BATS_TEST_TMPDIR/containers"
+  printf 'v1 v1\nv2 v2\n' >"$BATS_TEST_TMPDIR/volumes"
+  run docker_cleanup
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"another --docker session is still running, so 1 containers, 1 volumes created since this session started are left"* ]]
+  run ! grep -q " rm " "$CALLS"
+}
+
+@test "docker_cleanup: nothing new is silent, no snapshot is a no-op" {
+  engine_stub
+  docker_snapshot
+  run docker_cleanup
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  rm "$stage"/engine-*
+  : >"$CALLS"
+  run docker_cleanup
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  run ! grep -q "^docker" "$CALLS"
+}
+
 # --- cat_nofollow / link_stays_inside ---
 
 @test "cat_nofollow: reads a regular file below the root" {
@@ -2351,6 +2628,37 @@ YML
   MOUNT_ARGS=(-v a:b) ENV_ARGS=(-e TERM) CWD=/workspaces/repo CMD=(claude)
   run_container
   grep -q "^docker run --rm -it --init .* -v a:b -e TERM -w /workspaces/repo claude-code:local claude$" "$CALLS"
+}
+
+@test "run_container: RUN_OPTS go before the mounts" {
+  RUN_OPTS=(--userns=keep-id --user 0:0) MOUNT_ARGS=(-v a:b) ENV_ARGS=(-e TERM) CWD=/workspaces/repo CMD=(claude)
+  run_container
+  grep -q "^docker run --rm -it --init .* --userns=keep-id --user 0:0 -v a:b -e TERM -w /workspaces/repo claude-code:local claude$" "$CALLS"
+}
+
+@test "main: --docker mounts the socket, the workspace at its host path and a host-shared TMPDIR" {
+  mksock "$BATS_TEST_TMPDIR/eng.sock"
+  export CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/eng.sock"
+  run_script --ephemeral --docker "$WS"
+  [ "$status" -eq 0 ]
+  local agent
+  agent=$(grep "^docker run --rm" "$CALLS")
+  [[ "$agent" == *" -v $WS:$WS "* ]]
+  [[ "$agent" == *" -v $BATS_TEST_TMPDIR/eng.sock:/run/docker.sock "* ]]
+  [[ "$agent" == *" -e DOCKER_HOST=unix:///run/docker.sock "* ]]
+  [[ "$agent" == *" -e CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo "* ]]
+  [[ "$agent" == *" -e CLAUDE_DOCKER_TRUSTED_WORKSPACES=$WS "* ]]
+  [[ "$agent" == *" -e TMPDIR=$HOME/.cache/claude-docker/host."*"/tmp "* ]]
+  [[ "$agent" == *" -e CLAUDE_DOCKER_FLAGS=docker,ephemeral "* ]]
+  [[ "$agent" == *" -w $WS claude-code:local claude" ]]
+  [[ "$agent" == *" --label claude-docker.docker="* ]]
+  [[ "$agent" != *":/workspaces/repo"* ]]
+  [[ "$agent" != *" -w /workspaces/repo "* ]]
+  # The engine was listed before the agent started, and the diff checked after.
+  [ "$(grep -n "^docker -H unix://.* ps -a --no-trunc" "$CALLS" | head -1 | cut -d: -f1)" -lt \
+    "$(grep -n "^docker run --rm" "$CALLS" | cut -d: -f1)" ]
+  [ "$(grep -n "^docker -H unix://.* ps -q --filter label=claude-docker.docker" "$CALLS" | head -1 | cut -d: -f1)" -gt \
+    "$(grep -n "^docker run --rm" "$CALLS" | cut -d: -f1)" ]
 }
 
 @test "main: end to end with stubs" {

@@ -13,6 +13,7 @@ SEED_SETTINGS=/run/claude-docker/settings.json
 ROOT_HOME=/root
 CA_DIR=/usr/local/share/ca-certificates
 GIT_SYSTEM_CONFIG=/etc/gitconfig
+DOCKER_SOCK=/run/docker.sock
 
 # Seed /root/.claude/settings.json from the host settings.docker.json that
 # run.sh forwards at the seed path. A copy, not a bind mount at the real path:
@@ -92,6 +93,48 @@ approve_api_key() {
   exec 3<&-
 }
 
+# --docker mounts workspaces at their host path, so Claude Code keys the
+# session under projects/<host path> instead of projects/-workspaces-<name>,
+# and --resume / memory from regular runs would vanish. Point the new key at
+# the existing dir; sessions already started under the new key are moved
+# over first (no-clobber; session files are UUID-named). Claude Code's key is
+# the path with every non-alphanumeric replaced by '-'; it hashes keys over
+# 200 chars, which this doesn't reproduce, so those are left alone. Runs
+# before the chown walk: the dirs are HOST_UID-owned from a prior run and
+# container root has no CAP_DAC_OVERRIDE, so ownership is taken first and the
+# walk hands it back.
+project_key() { printf '%s' "$1" | sed 's/[^a-zA-Z0-9]/-/g'; }
+alias_project() {
+  local alias="${CLAUDE_DOCKER_PROJECT_ALIAS:-}" projects="$ROOT_HOME/.claude/projects" new old
+  [ -n "$alias" ] && [ "$PWD" != "$alias" ] || return 0
+  new="$(project_key "$PWD")"
+  old="$(project_key "$alias")"
+  { [ "${#new}" -le 200 ] && [ -d "$projects/$old" ] && [ ! -L "$projects/$old" ] && [ ! -L "$projects/$new" ]; } || return 0
+  chown root "$projects" || return
+  if [ -d "$projects/$new" ]; then
+    chown -R root "$projects/$old" "$projects/$new" || return
+    cp -an "$projects/$new/." "$projects/$old/" || return
+    rm -rf "${projects:?}/${new:?}" || return
+  fi
+  [ -e "$projects/$new" ] || ln -s -- "$old" "$projects/$new"
+}
+
+# --docker: a rootful engine's socket is root:docker 0660, and the dropped
+# user isn't in that group. Give it the socket's GID as a supplementary group
+# (runuser picks it up via initgroups; usermod takes the numeric GID). Skipped
+# when the primary group already matches: rootless podman under keep-id, or a
+# socket owned by the host user.
+join_socket_group() {
+  local gid=$1 sock_gid
+  [ -S "$DOCKER_SOCK" ] || return 0
+  sock_gid="$(stat -c %g "$DOCKER_SOCK")" || return
+  [ "$sock_gid" != "$gid" ] || return 0
+  getent group "$sock_gid" >/dev/null 2>&1 \
+    || groupadd -o -g "$sock_gid" docker-host \
+    || return
+  usermod -aG "$sock_gid" claude
+}
+
 # Synthesize a passwd entry so getpwuid / $HOME / shell expansions resolve
 # cleanly inside the container. Guarded on the `claude` name, not on
 # HOST_UID: a HOST_UID that collides with a baked-in Ubuntu system user
@@ -154,23 +197,33 @@ chown_volumes() {
 # the drop: the session can't edit it, and a GIT_CONFIG_* export or a cleaned
 # environment doesn't remove it. Only a /workspaces/<name> path is written;
 # anything else, a * included (git reads "*" as "trust every repository"), is
-# refused with a WARN.
+# refused with a WARN. Under --docker (CLAUDE_DOCKER_FLAGS lists it, set by
+# run.sh) workspaces sit at their host path, so that is the path run.sh
+# vouches for: any absolute path without glob characters or . / ..
+# components is then accepted, still never a bare * or a / .
+trust_path() {
+  git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$1" \
+    && git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$1/*"
+}
 trust_workspaces() {
-  local p list="${CLAUDE_DOCKER_TRUSTED_WORKSPACES:-}" paths=()
+  local p list="${CLAUDE_DOCKER_TRUSTED_WORKSPACES:-}" paths=() mirrored=0 ok
   [ -n "$list" ] || return 0
+  case ",${CLAUDE_DOCKER_FLAGS:-}," in *,docker,*) mirrored=1 ;; esac
   # read -a, not an unquoted $list: the shell would expand a * in an entry
   # against the filesystem before the check below could refuse it.
   IFS=: read -ra paths <<<"$list"
   for p in "${paths[@]}"; do
+    ok=0
     case "$p" in
       '') continue ;;
-      /workspaces/*/* | */. | */.. | *'*'* | *'?'* | *'['* ) ;;
-      /workspaces/?*)
-        git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p" \
-          && git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p/*" \
-          || { printf 'entrypoint: ERROR could not trust %s for git\n' "$p" >&2; return 1; }
-        continue ;;
+      /workspaces/*/* | */. | */.. | */./* | */../* | */ | *'*'* | *'?'* | *'['* ) ;;
+      /workspaces/?*) ok=1 ;;
+      /?*) [ "$mirrored" = 1 ] && ok=1 ;;
     esac
+    if [ "$ok" = 1 ]; then
+      trust_path "$p" || { printf 'entrypoint: ERROR could not trust %s for git\n' "$p" >&2; return 1; }
+      continue
+    fi
     printf 'entrypoint: WARN not trusting %s for git: not a /workspaces/<name> path\n' "$p" >&2
   done
 }
@@ -185,10 +238,12 @@ main() {
   install_cas || return
   trust_workspaces || return
   approve_api_key || return
+  alias_project || return
   if [ "$uid" = 0 ]; then
     exec "$@"
   fi
   ensure_user "$uid" "$gid" || return
+  join_socket_group "$gid" || return
   # Scoped to the walk: the session itself keeps the caller's locale.
   LC_ALL=C chown_volumes "$uid" "$gid" || return
   # runuser uses setresuid()/setresgid() — needs CAP_SETUID and CAP_SETGID

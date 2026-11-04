@@ -39,7 +39,8 @@ are parsed before `--`; anything after `--` is forwarded verbatim to the
 
 Workspaces:
   WORKSPACE...        One or more host directories to mount at
-                      /workspaces/<basename>. Defaults to $PWD when omitted.
+                      /workspaces/<basename> (at their host path under
+                      --docker). Defaults to $PWD when omitted.
                       First workspace becomes the container's working dir;
                       every additional workspace is passed to claude as
                       --add-dir so the agent can read/write across all of them.
@@ -144,6 +145,18 @@ Wrapper flags:
                       with :port. Nothing else is implied, not even the hosts
                       of --gh / --tfe / --az. FILE must lie outside every
                       workspace. Docker only. See docs/auth.md.
+  --docker            Opt in to the host container engine: mount its API
+                      socket at /run/docker.sock and set DOCKER_HOST, so the
+                      in-container docker / docker compose / docker buildx
+                      CLI drives the host's Docker or Podman. Equivalent to
+                      host access as your user (root, for rootful Docker).
+                      Socket: see CLAUDE_DOCKER_SOCKET. Workspaces are
+                      mounted at their host path instead of
+                      /workspaces/<name>, and TMPDIR points at a host-shared
+                      dir, so `docker run -v "$PWD:..."` sources resolve on
+                      the host. Containers, images, volumes and networks the
+                      session creates on the engine are removed at exit.
+                      Cannot be combined with --egress-lock.
   --iterm             Wrap claude in tmux -CC (iTerm2 control mode → native
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
@@ -190,6 +203,13 @@ Environment:
   CLAUDE_DOCKER_AZ_CA      Path to a PEM CA certificate for an on-prem Azure
                            DevOps Server; installed into the container's trust
                            store, so trusted for all TLS. Ignored without --az.
+  CLAUDE_DOCKER_SOCKET     Host path of the engine socket for --docker. Unset
+                           (default): a unix:// DOCKER_HOST, else the selected
+                           runtime's usual socket — rootless podman's
+                           $XDG_RUNTIME_DIR/podman/podman.sock, then
+                           /run/podman/podman.sock and /var/run/docker.sock
+                           (docker's first when the runtime is docker).
+                           Ignored without --docker.
   CLAUDE_DOCKER_ADD_HOSTS  Static host entries for networks without DNS, as
                            host:ip[,host:ip...], e.g.
                            gitlab.example.com:10.1.2.3. Added to the
@@ -240,6 +260,11 @@ GIT_CFG=()
 WITH_EGRESS_LOCK=0
 WITH_EGRESS_ALLOWLIST=0
 EGRESS_ALLOWLIST_ARG=""
+WITH_DOCKER=0
+DOCKER_SOCKET=""
+# Extra `<runtime> run` options, set only by --docker (rootless podman's
+# --userns=keep-id).
+RUN_OPTS=()
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 MOUNT_ARGS=()
 # COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
@@ -342,6 +367,7 @@ parse_args() {
       --egress-lock)  WITH_EGRESS_LOCK=1 ;;
       --egress-allowlist) WITH_EGRESS_ALLOWLIST=1 ;;
       --egress-allowlist=*) WITH_EGRESS_ALLOWLIST=1 EGRESS_ALLOWLIST_ARG="${arg#--egress-allowlist=}" ;;
+      --docker)       WITH_DOCKER=1 ;;
       --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
       --tmux)         CLAUDE_DOCKER_TMUX=1 ;;
       --claude-dir=*) CLAUDE_CONFIG_DIR="${arg#--claude-dir=}" ;;
@@ -609,6 +635,12 @@ validate_opts() {
   fi
   if [ "$WITH_API" = "1" ] && [ "$WITH_API_DIRECT" = "1" ]; then
     echo "claude-docker: --api and --api-direct are mutually exclusive — pick the auth-proxy sidecar (--api) or direct forwarding (--api-direct)" >&2
+    exit 1
+  fi
+  # The host engine's socket lets the session start containers on the host
+  # network, outside the egress proxy, so the lock would protect nothing.
+  if [ "$WITH_DOCKER" = "1" ] && [ "$WITH_EGRESS_LOCK" = "1" ]; then
+    echo "claude-docker: --docker cannot be combined with --egress-lock — a container started through the host engine's socket bypasses the egress proxy" >&2
     exit 1
   fi
 
@@ -1350,6 +1382,17 @@ wait_sidecar() {
   return 1
 }
 
+# --docker mirrors host paths into the container; refuse those that would
+# shadow the image's own directories or break docker -v parsing.
+check_mirror_path() {
+  case "$1" in
+    *:*) echo "claude-docker: workspace '$1' cannot contain ':' with --docker (breaks docker -v parsing)" >&2; exit 1 ;;
+    /bin|/bin/*|/boot|/boot/*|/dev|/dev/*|/etc|/etc/*|/lib|/lib/*|/lib32|/lib32/*|/lib64|/lib64/*|/opt|/opt/*|/proc|/proc/*|/root|/root/*|/run|/run/*|/sbin|/sbin/*|/sys|/sys/*|/usr|/usr/*|/var|/var/*|/workspaces|/workspaces/*)
+      echo "claude-docker: workspace '$1' would shadow a container directory at the same path; --docker mounts workspaces at their host path, so move it elsewhere (e.g. under \$HOME)" >&2
+      exit 1 ;;
+  esac
+}
+
 build_workspace_mounts() {
   local ws_suffix ws abs shown link name n i j k=0
 
@@ -1416,8 +1459,16 @@ build_workspace_mounts() {
     SEEN_PATHS+=("$abs")
     SEEN_SHOWN+=("$shown")
     SEEN_RO+=("${ws_suffix:+1}")
-    MOUNT_ARGS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
-    CONTAINER_PATHS+=("/workspaces/$name")
+    if [ "$WITH_DOCKER" = "1" ]; then
+      # The host engine resolves `docker run -v` sources on the host, so mount
+      # the workspace at its own host path: $PWD inside is then valid outside.
+      check_mirror_path "$abs"
+      MOUNT_ARGS+=("-v" "$abs:$abs$ws_suffix")
+      CONTAINER_PATHS+=("$abs")
+    else
+      MOUNT_ARGS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
+      CONTAINER_PATHS+=("/workspaces/$name")
+    fi
   done
 
   # A read-only workspace inside a writable one stays writable through the
@@ -1936,6 +1987,7 @@ build_flags_env() {
   [ "$WITH_API" = "1" ]      && DOCKER_FLAGS+=("api")
   [ "$WITH_API_DIRECT" = "1" ] && DOCKER_FLAGS+=("api-direct")
   [ "$WITH_EGRESS_LOCK" = "1" ] && DOCKER_FLAGS+=("egress-lock")
+  [ "$WITH_DOCKER" = "1" ]   && DOCKER_FLAGS+=("docker")
   [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
   while [ "$k" -lt "${#WORKSPACES[@]}" ]; do
     [ "${WORKSPACES_RO[$k]:-0}" = "1" ] && ro_count=$((ro_count + 1))
@@ -1996,8 +2048,20 @@ create_stage() {
   # egress_save_log only warns, but `|| true` keeps a failure in it from
   # skipping the removals under set -e. The --egress-allowlist DNS probes run
   # with --rm, so removing them is normally a no-op.
+  # Stage removal: under --docker, nested containers write into $stage/tmp
+  # through the host engine. On rootless podman a nested container that runs
+  # as a non-root UID lands on the host as a subordinate UID (100000+), which
+  # the host user cannot delete, so a plain rm -rf leaves the dir behind with
+  # a wall of "Permission denied". Retry inside the user namespace, where
+  # those subordinate UIDs are ours (`podman unshare`), and only warn if the
+  # dir still survives (rootful engine + nested root-owned files needs sudo).
   trap '
-  case "$stage" in "$HOME/.cache/claude-docker/host."*) rm -rf "$stage" ;; esac
+  docker_cleanup || true
+  case "$stage" in "$HOME/.cache/claude-docker/host."*)
+    rm -rf "$stage" 2>/dev/null || true
+    if [ -e "$stage" ] && [ "$RUNTIME" = podman ]; then "$RUNTIME" unshare rm -rf "$stage" 2>/dev/null || true; fi
+    if [ -e "$stage" ]; then echo "claude-docker: could not remove $stage (nested containers left files owned by another UID); remove it by hand, e.g. sudo rm -rf" >&2; fi ;;
+  esac
   egress_save_log || true
   if [ "$WITH_EGRESS_ALLOWLIST" = "1" ]; then
     "$RUNTIME" rm -f "$EGRESS_PROBE_CONTROL" "$EGRESS_PROBE_CHECK" >/dev/null 2>&1 || true
@@ -2793,7 +2857,7 @@ WRAP
 }
 
 stage_git_overlays() {
-  local n i ws_abs ws_name ws_autocrlf
+  local n i ws_abs ws_name ws_autocrlf ws_target
   # Container-only .git/config overlay: enable relative-path worktrees inside the
   # container without touching the host's on-disk repo config. The host file
   # stays unmodified, so host tools that bundle an old libgit2 (notably
@@ -2842,7 +2906,9 @@ EOF
          && case $ws_autocrlf in true | false | input) ;; *) false ;; esac; then
         printf '[core]\n\tautocrlf = %s\n' "$ws_autocrlf" >>"$stage/git-config-$ws_name" || exit 1
       fi
-      MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config")
+      ws_target="/workspaces/$ws_name"
+      [ "$WITH_DOCKER" = "1" ] && ws_target="$ws_abs"
+      MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):$ws_target/.git/config")
     else
       rm -f "$stage/git-config-$ws_name"
       # Quiet for a workspace with no repo, or a worktree/submodule pointer.
@@ -2853,6 +2919,161 @@ EOF
     fi
     i=$((i + 1))
   done
+}
+
+# --docker: a host directory mounted at its own path as TMPDIR, so mktemp
+# paths handed to `docker run -v` exist on the host too. Lives in the stage
+# dir, so the EXIT trap removes it with the rest of the session's files.
+stage_docker_tmp() {
+  [ "$WITH_DOCKER" = "1" ] || return 0
+  mkdir -p "$stage/tmp" || exit 1
+  MOUNT_ARGS+=("-v" "$stage/tmp:$stage/tmp")
+  ENV_ARGS+=("-e" "TMPDIR=$stage/tmp")
+  # Marks this agent container as a --docker session, so another session's
+  # exit cleanup (docker_cleanup) can tell it is still running.
+  RUN_OPTS+=("--label" "claude-docker.docker=$proxy_sid")
+}
+
+# The host engine behind --docker, addressed through the socket the session
+# got (the runtime's own socket as a rule; docker_snapshot/docker_cleanup
+# must see what the session saw). podman reads its own API only, so a
+# podman host whose only socket is docker's gets no cleanup.
+engine() {
+  if [ "$RUNTIME" = docker ]; then
+    docker -H "unix://$DOCKER_SOCKET" "$@"
+  else
+    podman --remote --url "unix://$DOCKER_SOCKET" "$@"
+  fi
+}
+
+# --docker: everything the session creates on the host engine is removed when
+# it ends, so a compose stack or a Testcontainers run doesn't outlive the
+# session and images it pulled don't pile up. The engine records no creator,
+# so this is a before/after diff of IDs: docker_snapshot lists what exists at
+# start (in the stage dir, so a crash leaves nothing behind), docker_cleanup
+# removes what is new at exit. Two guards keep the diff from reaching past
+# the session: resources of other claude-docker sessions (claude-* names:
+# the auth-proxy and egress sidecars, their networks, the egress image) are
+# never touched, and while another --docker session is still running (its
+# agent carries the claude-docker.docker label) nothing is removed at all,
+# since what it created since this session started is in the diff too. A
+# resource the engine refuses to remove (an image a container still uses) is
+# left and counted in the notice. Order: containers first (rm -f stops them
+# and -v drops their anonymous volumes), then networks, volumes, images.
+engine_ls() {
+  case "$1" in
+    containers) engine ps -a --no-trunc --format '{{.ID}} {{.Names}}' ;;
+    images)     engine image ls -a --no-trunc --format '{{.ID}} {{.Repository}}' ;;
+    volumes)    engine volume ls --format '{{.Name}} {{.Name}}' ;;
+    networks)   engine network ls --no-trunc --format '{{.ID}} {{.Name}}' ;;
+  esac 2>/dev/null
+}
+docker_snapshot() {
+  local kind
+  [ "$WITH_DOCKER" = "1" ] || return 0
+  for kind in containers images volumes networks; do
+    engine_ls "$kind" | cut -d' ' -f1 >"$stage/engine-$kind" || exit 1
+  done
+}
+# IDs of $1 that are new since the snapshot and not another session's.
+engine_new() {
+  local line id name
+  [ -f "$stage/engine-$1" ] || return 0
+  engine_ls "$1" | while IFS= read -r line; do
+    id=${line%% *}; name=${line#* }
+    [ -n "$id" ] || continue
+    case "$name" in claude-*|localhost/claude-*) continue ;; esac
+    grep -qxF -- "$id" "$stage/engine-$1" || printf '%s\n' "$id"
+  done
+}
+docker_cleanup() {
+  local mine others kind ids n left=0 removed="" kept=""
+  [ "$WITH_DOCKER" = "1" ] && [ -f "$stage/engine-containers" ] || return 0
+  mine=$(engine ps -q --filter "label=claude-docker.docker=$proxy_sid" 2>/dev/null) || true
+  others=$(engine ps -q --filter label=claude-docker.docker 2>/dev/null | grep -vxF -f <(printf '%s\n' "$mine") || true)
+  for kind in containers networks volumes images; do
+    ids=$(engine_new "$kind")
+    [ -n "$ids" ] || continue
+    n=$(printf '%s\n' "$ids" | wc -l | tr -d ' ')
+    if [ -n "$others" ]; then
+      kept="${kept:+$kept, }$n $kind"
+      continue
+    fi
+    # shellcheck disable=SC2086  # IDs, one per line, no spaces
+    case "$kind" in
+      containers) engine rm -fv $ids ;;
+      networks)   engine network rm $ids ;;
+      volumes)    engine volume rm -f $ids ;;
+      images)     engine image rm -f $ids ;;
+    esac >/dev/null 2>&1 || true
+    left=$(engine_new "$kind" | wc -l | tr -d ' ')
+    removed="${removed:+$removed, }$((n - left)) $kind"
+    [ "$left" -gt 0 ] && kept="${kept:+$kept, }$left $kind"
+  done
+  [ -n "$removed" ] && echo "claude-docker: --docker: removed $removed the session created on the host engine" >&2
+  if [ -n "$kept" ]; then
+    if [ -n "$others" ]; then
+      echo "claude-docker: --docker: another --docker session is still running, so $kept created since this session started are left on the host engine; remove them yourself when that session is done" >&2
+    else
+      echo "claude-docker: --docker: $kept the session created could not be removed (still in use?); remove them yourself" >&2
+    fi
+  fi
+  return 0
+}
+
+# --docker: find the host engine's API socket, mount it at /run/docker.sock
+# and point DOCKER_HOST at it. No daemon runs in the container; the image's
+# docker CLI drives the host engine over this socket.
+build_docker_socket() {
+  local candidates cand rootless
+  [ "$WITH_DOCKER" = "1" ] || return 0
+  # Docker Desktop on Windows exposes its engine as a named pipe, not a unix
+  # socket on the Git Bash side; there is nothing here to bind-mount.
+  if [ "$IS_MSYS" = "1" ]; then
+    echo "claude-docker: --docker is not supported from Git Bash / MSYS — run claude-docker from WSL instead" >&2
+    exit 1
+  fi
+  DOCKER_SOCKET="${CLAUDE_DOCKER_SOCKET:-}"
+  if [ -z "$DOCKER_SOCKET" ]; then
+    case "${DOCKER_HOST:-}" in unix://*) DOCKER_SOCKET="${DOCKER_HOST#unix://}" ;; esac
+  fi
+  if [ -z "$DOCKER_SOCKET" ]; then
+    # Prefer the engine that launches this container, so `docker ps` inside
+    # lists the session's own siblings; fall back to whichever socket exists.
+    if [ "$RUNTIME" = docker ]; then
+      candidates=(/var/run/docker.sock "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" /run/podman/podman.sock)
+    else
+      candidates=("${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" /run/podman/podman.sock /var/run/docker.sock)
+    fi
+    for cand in "${candidates[@]}"; do
+      if [ -S "$cand" ]; then DOCKER_SOCKET="$cand"; break; fi
+    done
+    if [ -z "$DOCKER_SOCKET" ]; then
+      echo "claude-docker: --docker found no engine socket (tried: ${candidates[*]}). For podman: systemctl --user enable --now podman.socket. Or set CLAUDE_DOCKER_SOCKET" >&2
+      exit 1
+    fi
+  elif [ ! -S "$DOCKER_SOCKET" ]; then
+    echo "claude-docker: --docker socket '$DOCKER_SOCKET' is not a socket. For podman: systemctl --user enable --now podman.socket" >&2
+    exit 1
+  fi
+  MOUNT_ARGS+=("-v" "$DOCKER_SOCKET:/run/docker.sock")
+  ENV_ARGS+=("-e" "DOCKER_HOST=unix:///run/docker.sock")
+  # Workspaces sit at their host path under --docker, so Claude Code keys the
+  # session to a different projects/ dir than a regular run. The entrypoint
+  # links the two, so --resume and memory carry over between modes.
+  [ -n "${SEEN_NAMES[0]:-}" ] && ENV_ARGS+=("-e" "CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/${SEEN_NAMES[0]}")
+  # Rootless podman maps container root to the host user and every other
+  # container UID to a subordinate one, so the HOST_UID the entrypoint drops
+  # to is a stranger to the host-user-owned 0660 socket. keep-id maps HOST_UID
+  # to the host user instead; --user 0:0 keeps the entrypoint starting as
+  # (namespaced) root, and --passwd=false stops podman adding its own passwd
+  # entry for HOST_UID, which would skip the entrypoint's `claude` user.
+  if [ "$RUNTIME" = podman ]; then
+    rootless=$("$RUNTIME" info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
+    if [ "$rootless" = "true" ]; then
+      RUN_OPTS+=("--userns=keep-id" "--user" "0:0" "--passwd=false")
+    fi
+  fi
 }
 
 # The in-container glab reads job_token through the OS keyring whenever the
@@ -2983,6 +3204,7 @@ run_container() {
     --security-opt no-new-privileges \
     --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
     -e "HOST_UID=${HOST_UID:-$(id -u)}" -e "HOST_GID=${HOST_GID:-$(id -g)}" \
+    ${RUN_OPTS[@]+"${RUN_OPTS[@]}"} \
     "${MOUNT_ARGS[@]}" \
     "${ENV_ARGS[@]}" \
     -w "$CWD" \
@@ -3001,6 +3223,7 @@ main() {
   build_workspace_mounts
   build_git_trust
   build_cred_mounts
+  build_docker_socket
   build_env_args
   discover_tokens
   check_allowlist_session
@@ -3015,6 +3238,8 @@ main() {
   start_egress_sidecar
   stage_host_config
   stage_git_overlays
+  stage_docker_tmp
+  docker_snapshot
   stage_glab_config
   build_cmd
   build_volume_mounts

@@ -22,6 +22,7 @@ Credentials are opt-in per run — the [Credential opt-in](#credential-opt-in) t
 | `--api-direct` | Same as `--api`, but forwards the base URL and credential into the agent container too — no sidecar. Mutually exclusive with `--api`. |
 | `--egress-lock` | With `--api` or `--api-direct`: **lock model traffic** to the `ANTHROPIC_BASE_URL` endpoint and log the connections that go through its proxy; see [API egress lock](#api-egress-lock). |
 | `--egress-allowlist[=FILE]` | With `--egress-lock`: **refuse every host** except the model endpoint and the hosts in one allowlist file; see [Egress allowlist](#egress-allowlist). |
+| `--docker` | Mount the host's Docker or Podman API socket at `/run/docker.sock` and set `DOCKER_HOST`, so the in-container `docker` / `docker compose` / `docker buildx` CLI drives the host engine. Not a credential, but **equivalent to host access as your user** (root, for rootful Docker), so it is listed here. Workspaces are mounted at their host path and `TMPDIR` is host-shared, so `docker run -v "$PWD:..."` works unchanged. Cannot be combined with `--egress-lock`. See [Host container engine](usage.md#host-container-engine---docker). |
 
 Combine as needed: `claude-docker --aws --gh ~/repo`. Each proxied flag and its `-direct` variant are mutually exclusive: pass `--gh` or `--gh-direct`, `--glab` or `--glab-direct`, `--api` or `--api-direct`, never both of a pair.
 
