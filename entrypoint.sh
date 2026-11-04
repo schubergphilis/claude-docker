@@ -97,7 +97,9 @@ approve_api_key() {
 # session under projects/<host path> instead of projects/-workspaces-<name>,
 # and --resume / memory from regular runs would vanish. Point the new key at
 # the existing dir; sessions already started under the new key are moved
-# over first (no-clobber; session files are UUID-named). Claude Code's key is
+# over first without overwriting. The dir also holds memory/ with fixed
+# names, so if a file exists on both sides with different content nothing
+# is deleted or linked and a WARN says so. Claude Code's key is
 # the path with every non-alphanumeric replaced by '-'; it hashes keys over
 # 200 chars, which this doesn't reproduce, so those are left alone. Runs
 # before the chown walk: the dirs are HOST_UID-owned from a prior run and
@@ -114,6 +116,11 @@ alias_project() {
   if [ -d "$projects/$new" ]; then
     chown -R root "$projects/$old" "$projects/$new" || return
     cp -an "$projects/$new/." "$projects/$old/" || return
+    while IFS= read -r f; do
+      cmp -s "$projects/$new/$f" "$projects/$old/$f" && continue
+      printf 'entrypoint: WARN %s and %s both hold %s with different content; neither is merged or linked, so this session'"'"'s history stays under its own key. Merge them by hand.\n' "$projects/$new" "$projects/$old" "${f#./}" >&2
+      return 0
+    done < <(cd "$projects/$new" && find . -type f)
     rm -rf "${projects:?}/${new:?}" || return
   fi
   [ -e "$projects/$new" ] || ln -s -- "$old" "$projects/$new"
@@ -128,7 +135,10 @@ join_socket_group() {
   local gid=$1 sock_gid
   [ -S "$DOCKER_SOCK" ] || return 0
   sock_gid="$(stat -c %g "$DOCKER_SOCK")" || return
-  [ "$sock_gid" != "$gid" ] || return 0
+  # A root:root socket (Docker Desktop, some rootful setups) is not joined:
+  # GID 0 would hand the agent every root-group permission in the image, far
+  # beyond the socket. docker then fails visibly instead.
+  [ "$sock_gid" != "$gid" ] && [ "$sock_gid" != 0 ] || return 0
   getent group "$sock_gid" >/dev/null 2>&1 \
     || groupadd -o -g "$sock_gid" docker-host \
     || return

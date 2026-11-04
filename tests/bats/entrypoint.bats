@@ -271,19 +271,43 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
 }
 
 @test "alias_project: sessions already keyed by host path are merged, then linked" {
-  mkdir -p "$ROOT_HOME/.claude/projects/-workspaces-repo" "$BATS_TEST_TMPDIR/host/repo"
+  find() { command find "$@"; }  # setup() stubs it out for the chown walk
+  mkdir -p "$ROOT_HOME/.claude/projects/-workspaces-repo/memory" "$BATS_TEST_TMPDIR/host/repo"
   cd "$BATS_TEST_TMPDIR/host/repo"
   local key
   key=$(project_key "$PWD")
-  mkdir -p "$ROOT_HOME/.claude/projects/$key"
+  mkdir -p "$ROOT_HOME/.claude/projects/$key/memory"
   echo new >"$ROOT_HOME/.claude/projects/$key/a.jsonl"
+  echo same >"$ROOT_HOME/.claude/projects/$key/memory/MEMORY.md"
   echo old >"$ROOT_HOME/.claude/projects/-workspaces-repo/b.jsonl"
-  echo keep >"$ROOT_HOME/.claude/projects/-workspaces-repo/a.jsonl"
+  echo same >"$ROOT_HOME/.claude/projects/-workspaces-repo/memory/MEMORY.md"
+  CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo run alias_project
+  [ "$status" -eq 0 ] && [[ "$output" != *WARN* ]]
+  [ -L "$ROOT_HOME/.claude/projects/$key" ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/a.jsonl")" = new ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/b.jsonl")" = old ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/memory/MEMORY.md")" = same ]
+}
+
+@test "alias_project: a file on both sides with different content stops the merge, nothing is lost" {
+  find() { command find "$@"; }  # setup() stubs it out for the chown walk
+  mkdir -p "$ROOT_HOME/.claude/projects/-workspaces-repo/memory" "$BATS_TEST_TMPDIR/host/repo"
+  cd "$BATS_TEST_TMPDIR/host/repo"
+  local key
+  key=$(project_key "$PWD")
+  mkdir -p "$ROOT_HOME/.claude/projects/$key/memory"
+  echo docker-notes >"$ROOT_HOME/.claude/projects/$key/memory/MEMORY.md"
+  echo new >"$ROOT_HOME/.claude/projects/$key/a.jsonl"
+  echo regular-notes >"$ROOT_HOME/.claude/projects/-workspaces-repo/memory/MEMORY.md"
   CLAUDE_DOCKER_PROJECT_ALIAS=/workspaces/repo run alias_project
   [ "$status" -eq 0 ]
-  [ -L "$ROOT_HOME/.claude/projects/$key" ]
-  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/a.jsonl")" = keep ]
-  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/b.jsonl")" = old ]
+  [[ "$output" == *"WARN"*"both hold memory/MEMORY.md with different content"* ]]
+  [ -d "$ROOT_HOME/.claude/projects/$key" ] && [ ! -L "$ROOT_HOME/.claude/projects/$key" ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/$key/memory/MEMORY.md")" = docker-notes ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/memory/MEMORY.md")" = regular-notes ]
+  # The non-colliding file was still copied over, never deleted.
+  [ "$(cat "$ROOT_HOME/.claude/projects/$key/a.jsonl")" = new ]
+  [ "$(cat "$ROOT_HOME/.claude/projects/-workspaces-repo/a.jsonl")" = new ]
 }
 
 @test "alias_project: nothing to link touches nothing" {
@@ -322,6 +346,13 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
   run join_socket_group "$(stat -c %g "$DOCKER_SOCK")"
   [ "$status" -eq 0 ] && [ -z "$output" ]
   rm -f "$DOCKER_SOCK"
+  run join_socket_group 424242
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "join_socket_group: a root-owned socket (GID 0) is never joined" {
+  mksock "$DOCKER_SOCK"
+  stat() { echo 0; }
   run join_socket_group 424242
   [ "$status" -eq 0 ] && [ -z "$output" ]
 }

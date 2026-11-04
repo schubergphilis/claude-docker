@@ -273,6 +273,7 @@ WITH_DOCKER=0
 DOCKER_KEEP=0
 DOCKER_CLEAN=0
 DOCKER_EXIT=""   # keep | clean: what happens to the engine's new resources at exit
+ENGINE_SOCKET="" # the socket path the engine itself sees (bind source); DOCKER_SOCKET is the host-side one
 DOCKER_SOCKET=""
 # Extra `<runtime> run` options, set only by --docker (rootless podman's
 # --userns=keep-id).
@@ -2985,9 +2986,9 @@ engine_cmd() {
 # another terminal on the same engine while the session runs is in it too,
 # which is why the question says so and the notice names everything. Two
 # guards keep a removal from reaching past the session: resources of other
-# claude-docker sessions (claude-* names: the auth-proxy and egress sidecars,
-# their networks, the egress image; the claude-docker.session label: every
-# agent container) are never touched, and while another
+# claude-docker sessions (the auth-proxy and egress sidecars, their networks
+# and the egress image by the names this script gives them; every agent
+# container by its claude-docker.session label) are never touched, and while another
 # --docker session is still running (its agent carries the
 # claude-docker.docker label) nothing is removed at all, since what it
 # created since this session started is in the diff too. A resource the
@@ -3029,8 +3030,10 @@ docker_snapshot() {
   done
 }
 # `id name` lines of $1 that are new since the snapshot and not another
-# session's: claude-* names are the sidecars, their networks and the egress
-# image; the claude-docker.session label (run_container puts it on every
+# session's: the names this script gives its sidecars, their networks and
+# the egress image (claude-auth-*, claude-egress-*, claude-docker-egress-proxy;
+# nothing else with a claude- prefix, so what the agent names so is not
+# exempt); the claude-docker.session label (run_container puts it on every
 # agent container, --docker or not) is a session started since this one.
 engine_new() {
   local line id rest name
@@ -3038,7 +3041,7 @@ engine_new() {
   engine_ls "$1" | while IFS= read -r line; do
     id=${line%% *}; rest=${line#* }; name=${rest%% *}
     [ -n "$id" ] || continue
-    case "$name" in claude-*|localhost/claude-*) continue ;; esac
+    case "$name" in claude-auth-*|claude-egress-*|claude-docker-egress-proxy|*/claude-docker-egress-proxy) continue ;; esac
     case "$rest" in *claude-docker.session*) continue ;; esac
     grep -qxF -- "$id" "$stage/engine-$1" || printf '%s\n' "$id $name"
   done
@@ -3050,7 +3053,7 @@ engine_desc() {
   printf '%s %s%s' "$1" "$2" "${names:+ ($names)}"
 }
 docker_exit() {
-  local mine others kind new ids gone n left removed="" kept="" found="" cmd="" eng
+  local mine all others kind new ids gone n left removed="" kept="" found="" cmd="" eng
   [ "$WITH_DOCKER" = "1" ] && [ -f "$stage/engine-containers" ] || return 0
   if ! engine_ls containers >/dev/null; then
     echo "claude-docker: --docker: the engine behind $DOCKER_SOCKET did not answer, so what appeared on it during the session is unknown and nothing was removed" >&2
@@ -3077,8 +3080,14 @@ docker_exit() {
     echo "  $cmd" >&2
     return 0
   fi
+  # If the engine cannot say whether another --docker session runs, assume
+  # one does: keeping is the recoverable mistake.
   mine=$(engine ps -q --filter "label=claude-docker.docker=$proxy_sid" 2>/dev/null) || true
-  others=$(engine ps -q --filter label=claude-docker.docker 2>/dev/null | grep -vxF -f <(printf '%s\n' "$mine") || true)
+  if all=$(engine ps -q --filter label=claude-docker.docker 2>/dev/null); then
+    others=$(printf '%s\n' "$all" | grep -vxF -f <(printf '%s\n' "$mine") || true)
+  else
+    others=unknown
+  fi
   for kind in containers networks volumes images; do
     new=$(engine_new "$kind")
     [ -n "$new" ] || continue
@@ -3103,7 +3112,9 @@ docker_exit() {
   done
   [ -n "$removed" ] && echo "claude-docker: --docker: removed $removed that appeared on the host engine during the session" >&2
   if [ -n "$kept" ]; then
-    if [ -n "$others" ]; then
+    if [ "$others" = unknown ]; then
+      echo "claude-docker: --docker: the engine could not say whether another --docker session is running, so $kept created since this session started are left on the host engine; remove them yourself" >&2
+    elif [ -n "$others" ]; then
       echo "claude-docker: --docker: another --docker session is still running, so $kept created since this session started are left on the host engine; remove them yourself when that session is done" >&2
     else
       echo "claude-docker: --docker: $kept the session created could not be removed (still in use?); remove them yourself" >&2
@@ -3155,7 +3166,24 @@ build_docker_socket() {
     echo "claude-docker: --docker socket '$DOCKER_SOCKET' is not a socket. For podman: systemctl --user enable --now podman.socket" >&2
     exit 1
   fi
-  MOUNT_ARGS+=("-v" "$DOCKER_SOCKET:/run/docker.sock")
+  # The engine resolves the bind source itself. On macOS it runs in a VM
+  # (Docker Desktop, Colima, podman machine), where the client-side path
+  # under $HOME does not exist: Docker Desktop and Colima special-case
+  # /var/run/docker.sock inside the VM, and podman reports its server-side
+  # socket in `info`. The host-side DOCKER_SOCKET stays what engine() dials.
+  ENGINE_SOCKET="$DOCKER_SOCKET"
+  if [ "$(uname -s 2>/dev/null)" = Darwin ]; then
+    if [ "$RUNTIME" = docker ]; then
+      ENGINE_SOCKET=/var/run/docker.sock
+    else
+      ENGINE_SOCKET=$(engine info --format '{{.Host.RemoteSocket.Path}}' 2>/dev/null || true)
+      if [ -z "$ENGINE_SOCKET" ]; then
+        echo "claude-docker: --docker: podman did not report its server-side socket (podman info host.remoteSocket.path) for $DOCKER_SOCKET, and on macOS the engine runs in a VM where $DOCKER_SOCKET does not exist" >&2
+        exit 1
+      fi
+    fi
+  fi
+  MOUNT_ARGS+=("-v" "$ENGINE_SOCKET:/run/docker.sock")
   ENV_ARGS+=("-e" "DOCKER_HOST=unix:///run/docker.sock")
   # Workspaces sit at their host path under --docker, so Claude Code keys the
   # session to a different projects/ dir than a regular run. The entrypoint
@@ -3167,8 +3195,10 @@ build_docker_socket() {
   # to the host user instead; --user 0:0 keeps the entrypoint starting as
   # (namespaced) root, and --passwd=false stops podman adding its own passwd
   # entry for HOST_UID, which would skip the entrypoint's `claude` user.
+  # Asked of the engine behind DOCKER_SOCKET, not the default connection:
+  # CLAUDE_DOCKER_SOCKET can point a rootless user at the rootful socket.
   if [ "$RUNTIME" = podman ]; then
-    rootless=$("$RUNTIME" info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
+    rootless=$(engine info --format '{{.Host.Security.Rootless}}' 2>/dev/null || true)
     if [ "$rootless" = "true" ]; then
       RUN_OPTS+=("--userns=keep-id" "--user" "0:0" "--passwd=false")
     fi

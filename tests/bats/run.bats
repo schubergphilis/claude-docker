@@ -946,6 +946,48 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
   WITH_DOCKER=1 RUNTIME=podman CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/eng.sock"
   build_docker_socket
   [ "${#RUN_OPTS[@]}" -eq 0 ]
+  # Asked of the engine behind the chosen socket, not the default connection.
+  grep -q "^podman --remote --url unix://$BATS_TEST_TMPDIR/eng.sock info --format {{.Host.Security.Rootless}}$" "$CALLS"
+}
+
+@test "build_docker_socket: on macOS docker's VM-side socket is mounted, the host-side one is dialled" {
+  mkdir -p "$BATS_TEST_TMPDIR/home/.colima/default"
+  mksock "$BATS_TEST_TMPDIR/home/.colima/default/docker.sock"
+  uname() { echo Darwin; }
+  WITH_DOCKER=1 RUNTIME=docker DOCKER_HOST="unix://$BATS_TEST_TMPDIR/home/.colima/default/docker.sock"
+  build_docker_socket
+  [ "$DOCKER_SOCKET" = "$BATS_TEST_TMPDIR/home/.colima/default/docker.sock" ]
+  [ "$ENGINE_SOCKET" = /var/run/docker.sock ]
+  [[ " ${MOUNT_ARGS[*]} " == *" -v /var/run/docker.sock:/run/docker.sock "* ]]
+  [[ " ${MOUNT_ARGS[*]} " != *".colima"* ]]
+}
+
+@test "build_docker_socket: on macOS podman machine's server-side socket is mounted" {
+  mksock "$BATS_TEST_TMPDIR/machine.sock"
+  uname() { echo Darwin; }
+  podman() {
+    echo "podman $*" >>"$CALLS"
+    case "$*" in *RemoteSocket*) echo /run/user/501/podman/podman.sock ;; *Rootless*) echo true ;; esac
+  }
+  WITH_DOCKER=1 RUNTIME=podman CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/machine.sock"
+  build_docker_socket
+  [ "$ENGINE_SOCKET" = /run/user/501/podman/podman.sock ]
+  [[ " ${MOUNT_ARGS[*]} " == *" -v /run/user/501/podman/podman.sock:/run/docker.sock "* ]]
+  grep -q "^podman --remote --url unix://$BATS_TEST_TMPDIR/machine.sock info --format {{.Host.RemoteSocket.Path}}$" "$CALLS"
+  podman() { echo "podman $*" >>"$CALLS"; :; }
+  MOUNT_ARGS=() ENGINE_SOCKET=""
+  run build_docker_socket
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"did not report its server-side socket"* ]]
+}
+
+@test "build_docker_socket: on Linux the socket is mounted at its own path" {
+  mksock "$BATS_TEST_TMPDIR/eng.sock"
+  uname() { echo Linux; }
+  WITH_DOCKER=1 RUNTIME=docker CLAUDE_DOCKER_SOCKET="$BATS_TEST_TMPDIR/eng.sock"
+  build_docker_socket
+  [ "$ENGINE_SOCKET" = "$BATS_TEST_TMPDIR/eng.sock" ]
+  [[ " ${MOUNT_ARGS[*]} " == *" -v $BATS_TEST_TMPDIR/eng.sock:/run/docker.sock "* ]]
 }
 
 @test "build_docker_socket: no socket anywhere is fatal and names the podman fix" {
@@ -2395,27 +2437,28 @@ engine_stub() {
   run ! grep -q "^docker" "$CALLS"
 }
 
-@test "docker_exit: removes what is new, in order, and skips other sessions' claude-* resources" {
+@test "docker_exit: removes what is new, in order, and skips only this script's own sidecar names" {
   engine_stub
   docker_snapshot
-  printf 'c1 app\nc2 stack-db-1\nc3 claude-auth-proxy-zz\n' >"$BATS_TEST_TMPDIR/containers"
+  printf 'c1 app\nc2 stack-db-1\nc3 claude-auth-proxy-zz\nc7 claude-mine\n' >"$BATS_TEST_TMPDIR/containers"
   printf 'i1 postgres\ni2 stack-web\ni3 localhost/claude-docker-egress-proxy\n' >"$BATS_TEST_TMPDIR/images"
   printf 'v1 v1\nv2 v2\n' >"$BATS_TEST_TMPDIR/volumes"
-  printf 'n1 bridge\nn2 stack_default\nn3 claude-egress-zz\n' >"$BATS_TEST_TMPDIR/networks"
+  printf 'n1 bridge\nn2 stack_default\nn3 claude-egress-zz\nn4 claude-egress-out-zz\n' >"$BATS_TEST_TMPDIR/networks"
   run docker_exit
   [ "$status" -eq 0 ]
   local out=$output
-  grep -q "^docker -H unix:///s.sock rm -fv c2$" "$CALLS"
+  # A claude- prefix the agent chose (claude-mine) is not exempt.
+  grep -q "^docker -H unix:///s.sock rm -fv c2 c7$" "$CALLS"
   grep -q "^docker -H unix:///s.sock network rm n2$" "$CALLS"
   grep -q "^docker -H unix:///s.sock volume rm -f v2$" "$CALLS"
   grep -q "^docker -H unix:///s.sock image rm -f i2$" "$CALLS"
-  run ! grep -q "c3\|i3\|n3\|c1\|i1\|v1\|n1" <(grep -v " ls \| ps " "$CALLS")
+  run ! grep -q "c3\|i3\|n3\|n4\|c1\|i1\|v1\|n1" <(grep -v " ls \| ps " "$CALLS")
   [ "$(grep -n "rm -fv c2" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "network rm n2" "$CALLS" | cut -d: -f1)" ]
   [ "$(grep -n "network rm n2" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "volume rm -f v2" "$CALLS" | cut -d: -f1)" ]
   [ "$(grep -n "volume rm -f v2" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "image rm -f i2" "$CALLS" | cut -d: -f1)" ]
   # The stub removes nothing, so everything counts as still there.
   [[ "$out" == *"removed 0 containers, 0 networks, 0 volumes, 0 images"* ]]
-  [[ "$out" == *"1 containers (stack-db-1), 1 networks (stack_default), 1 volumes (v2), 1 images (stack-web) the session created could not be removed"* ]]
+  [[ "$out" == *"2 containers (stack-db-1, claude-mine), 1 networks (stack_default), 1 volumes (v2), 1 images (stack-web) the session created could not be removed"* ]]
 }
 
 @test "docker_exit: a regular session's labelled agent container started meanwhile is left alone" {
@@ -2538,6 +2581,26 @@ engine_stub() {
   docker_snapshot
   run docker_exit
   [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "docker_exit: when the other-session query fails nothing is removed" {
+  engine_stub
+  docker_snapshot
+  printf 'c1 app\nc2 stack-db-1\n' >"$BATS_TEST_TMPDIR/containers"
+  docker() {
+    echo "docker $*" >>"$CALLS"
+    case "$*" in
+      *" ps -q --filter label=claude-docker.docker") return 1 ;;
+      *" ps -q --filter label=claude-docker.docker=sid1") echo mine ;;
+      *" ps -a --no-trunc --format "*) cat "$BATS_TEST_TMPDIR/containers" ;;
+      *" image ls "*|*" volume ls "*|*" network ls "*) : ;;
+    esac
+    return 0
+  }
+  run docker_exit
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"could not say whether another --docker session is running, so 1 containers (stack-db-1) created since this session started are left"* ]]
+  run ! grep -q " rm " "$CALLS"
 }
 
 @test "docker_exit: nothing new is silent, no snapshot is a no-op" {

@@ -8,7 +8,7 @@ Lets a session drive the host's container engine (Docker or Podman) over its API
 
 ### Requirement: The host engine's socket is an opt-in
 
-`run.sh` SHALL accept a `--docker` wrapper flag. With it, `run.sh` SHALL bind-mount the host container engine's API socket at `/run/docker.sock` in the agent container and set `DOCKER_HOST=unix:///run/docker.sock`, so the image's `docker` CLI (with the compose and buildx plugins) drives the host engine. No engine daemon SHALL run in the container. Without the flag, no socket SHALL be mounted and `DOCKER_HOST` SHALL NOT be set. `run.sh` SHALL list `docker` in `CLAUDE_DOCKER_FLAGS` when the flag is active.
+`run.sh` SHALL accept a `--docker` wrapper flag. With it, `run.sh` SHALL bind-mount the host container engine's API socket at `/run/docker.sock` in the agent container and set `DOCKER_HOST=unix:///run/docker.sock`, so the image's `docker` CLI (with the compose and buildx plugins) drives the host engine. No engine daemon SHALL run in the container. The bind source SHALL be a path the engine itself can see: on macOS, where the engine runs in a VM, `/var/run/docker.sock` for docker and the server-side path podman reports in `info` (`host.remoteSocket.path`) for podman, stopping with a message when podman reports none; the host-side socket stays what `run.sh` dials for its own listings. Without the flag, no socket SHALL be mounted and `DOCKER_HOST` SHALL NOT be set. `run.sh` SHALL list `docker` in `CLAUDE_DOCKER_FLAGS` when the flag is active.
 
 The socket SHALL be, in order: `CLAUDE_DOCKER_SOCKET` when set; the host's `DOCKER_HOST` when it is a `unix://` URL; else the first that exists of the selected runtime's usual sockets — for podman `$XDG_RUNTIME_DIR/podman/podman.sock`, `/run/podman/podman.sock`, `/var/run/docker.sock`; for docker `/var/run/docker.sock` first. A configured path that is not a socket, or no socket found, SHALL make `run.sh` exit 1 before starting any container, with an error that names `systemctl --user enable --now podman.socket` for podman hosts.
 
@@ -18,6 +18,12 @@ The socket SHALL be, in order: `CLAUDE_DOCKER_SOCKET` when set; the host's `DOCK
 - **WHEN** the user runs `claude-docker --docker ~/repo`
 - **THEN** `docker info` inside the session reports the host engine
 - **AND** `docker ps` inside the session lists the session's own agent container
+
+#### Scenario: a VM-backed engine on macOS
+
+- **GIVEN** macOS with `DOCKER_HOST=unix:///Users/me/.colima/default/docker.sock`
+- **WHEN** the user runs `claude-docker --docker ~/repo`
+- **THEN** the agent container mounts `/var/run/docker.sock`, not the path under `/Users`, and `run.sh` dials the `/Users` socket for its listings
 
 #### Scenario: no socket is a startup error
 
@@ -39,13 +45,19 @@ The socket SHALL be, in order: `CLAUDE_DOCKER_SOCKET` when set; the host's `DOCK
 
 ### Requirement: The dropped-to user can open the socket
 
-Under rootless podman, `run.sh` SHALL start the agent container with `--userns=keep-id --user 0:0 --passwd=false`, so the entrypoint still starts as (namespaced) root and the `HOST_UID` it drops to is the host user, who owns the socket. Under a rootful engine, the entrypoint SHALL add the socket's group (by GID, creating a `docker-host` group when none has it) as a supplementary group of the `claude` user before the privilege drop, unless it is already the user's primary group. The privilege drop and capability set SHALL be unchanged.
+Under rootless podman, decided by asking the engine behind the socket the session uses (not the default connection), `run.sh` SHALL start the agent container with `--userns=keep-id --user 0:0 --passwd=false`, so the entrypoint still starts as (namespaced) root and the `HOST_UID` it drops to is the host user, who owns the socket. Under a rootful engine, the entrypoint SHALL add the socket's group (by GID, creating a `docker-host` group when none has it) as a supplementary group of the `claude` user before the privilege drop, unless it is already the user's primary group or it is GID 0: the root group is never joined, since it reaches far beyond the socket. The privilege drop and capability set SHALL be unchanged.
 
 #### Scenario: rootless podman
 
 - **GIVEN** a rootless podman host
 - **WHEN** the user runs `claude-docker --docker ~/repo`
 - **THEN** the agent process runs as the host UID inside a `keep-id` user namespace and `docker ps` succeeds
+
+#### Scenario: a root-owned socket
+
+- **GIVEN** a Docker host whose socket is `root:root`
+- **WHEN** the user runs `claude-docker --docker ~/repo`
+- **THEN** the `claude` user is not added to GID 0, and `docker` in the session fails on the socket's permissions rather than running with the root group
 
 #### Scenario: rootful docker
 
@@ -77,7 +89,13 @@ Under `--docker`, `run.sh` SHALL mount each workspace at its own host path inste
 
 ### Requirement: Sessions share their history across modes
 
-Because Claude Code keys its project directory by working directory, a `--docker` session of a workspace would get a project separate from a regular session's. `run.sh` SHALL pass the first workspace's `/workspaces/<name>` path as `CLAUDE_DOCKER_PROJECT_ALIAS`, and the entrypoint SHALL link the host-path project key to the `/workspaces/<name>` key when the latter exists: sessions already stored under the host-path key are moved into it first without overwriting, and the host-path key becomes a symlink. Keys over 200 characters SHALL be left alone.
+Because Claude Code keys its project directory by working directory, a `--docker` session of a workspace would get a project separate from a regular session's. `run.sh` SHALL pass the first workspace's `/workspaces/<name>` path as `CLAUDE_DOCKER_PROJECT_ALIAS`, and the entrypoint SHALL link the host-path project key to the `/workspaces/<name>` key when the latter exists: sessions already stored under the host-path key are moved into it first without overwriting; when a file exists on both sides with different content (memory files have fixed names), nothing SHALL be deleted or linked and the entrypoint SHALL warn. Otherwise the host-path key becomes a symlink. Keys over 200 characters SHALL be left alone.
+
+#### Scenario: both keys hold a memory file
+
+- **GIVEN** a `--docker` session wrote `memory/MEMORY.md` under the host-path key before a regular session created the `/workspaces/<name>` key with its own `memory/MEMORY.md`
+- **WHEN** the next `--docker` session starts
+- **THEN** both files are still there, no link is made, and the entrypoint warns which file collided
 
 #### Scenario: --resume sees both modes
 
@@ -91,7 +109,7 @@ Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, imag
 
 Keeping: at exit the wrapper SHALL list what is new, by name, on stderr, and print a command for the host shell that removes it (addressed at the socket the session used), with a warning to check the names first. Nothing is removed.
 
-Removing: at exit the wrapper SHALL remove what is new in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove resources whose name starts with `claude-` (other claude-docker sessions' sidecars, networks and the egress image) or containers carrying the `claude-docker.session` label (`run.sh` puts it on every agent container, `--docker` or not), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container). It SHALL print one line to stderr naming what it removed, and one naming what it left and why when something is left: another session running, or the engine refused.
+Removing: at exit the wrapper SHALL remove what is new in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove the resources `run.sh` names for other sessions' sidecars (`claude-auth-*`, `claude-egress-*`, the `claude-docker-egress-proxy` image; no other `claude-` prefix is exempt) or containers carrying the `claude-docker.session` label (`run.sh` puts it on every agent container, `--docker` or not), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container) or when the engine cannot answer that query. It SHALL print one line to stderr naming what it removed, and one naming what it left and why when something is left: another session running, or the engine refused.
 
 A listing that fails at start SHALL be fatal, since an empty snapshot would make everything on the engine look new at exit; a listing that fails at exit SHALL do nothing and say so.
 
