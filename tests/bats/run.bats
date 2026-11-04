@@ -886,11 +886,37 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
 }
 
 @test "build_docker_socket: no socket anywhere is fatal and names the podman fix" {
-  WITH_DOCKER=1 RUNTIME=podman XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/xdg"
+  WITH_DOCKER=1 RUNTIME=podman
+  # The real list has /run/podman/podman.sock and /var/run/docker.sock in it,
+  # and a CI runner has docker's.
+  engine_socket_candidates() { printf '%s\n' "$BATS_TEST_TMPDIR/a.sock" "$BATS_TEST_TMPDIR/b.sock"; }
   run build_docker_socket
   [ "$status" -eq 1 ]
-  [[ "$output" == *"found no engine socket"* ]]
+  [[ "$output" == *"found no engine socket (tried: $BATS_TEST_TMPDIR/a.sock $BATS_TEST_TMPDIR/b.sock)"* ]]
   [[ "$output" == *"systemctl --user enable --now podman.socket"* ]]
+}
+
+@test "engine_socket_candidates: the launching runtime's socket comes first" {
+  XDG_RUNTIME_DIR="$BATS_TEST_TMPDIR/xdg"
+  RUNTIME=podman
+  run engine_socket_candidates
+  [ "${lines[0]}" = "$BATS_TEST_TMPDIR/xdg/podman/podman.sock" ]
+  [ "${lines[1]}" = /run/podman/podman.sock ]
+  [ "${lines[2]}" = /var/run/docker.sock ]
+  RUNTIME=docker
+  run engine_socket_candidates
+  [ "${lines[0]}" = /var/run/docker.sock ]
+  [ "${lines[1]}" = "$BATS_TEST_TMPDIR/xdg/podman/podman.sock" ]
+  [ "${lines[2]}" = /run/podman/podman.sock ]
+}
+
+@test "build_docker_socket: the second candidate is taken when the first is missing" {
+  WITH_DOCKER=1 RUNTIME=podman
+  mksock "$BATS_TEST_TMPDIR/b.sock"
+  engine_socket_candidates() { printf '%s\n' "$BATS_TEST_TMPDIR/a.sock" "$BATS_TEST_TMPDIR/b.sock"; }
+  build_docker_socket
+  [ "$DOCKER_SOCKET" = "$BATS_TEST_TMPDIR/b.sock" ]
+  [[ " ${MOUNT_ARGS[*]} " == *" -v $BATS_TEST_TMPDIR/b.sock:/run/docker.sock "* ]]
 }
 
 @test "build_docker_socket: a path that is not a socket is fatal" {
@@ -2281,6 +2307,23 @@ engine_stub() {
   grep -q "^docker -H unix:///s.sock ps -a --no-trunc" "$CALLS"
 }
 
+@test "docker_snapshot: an engine that cannot be listed is fatal, not an empty snapshot" {
+  engine_stub
+  docker() { echo "docker $*" >>"$CALLS"; return 1; }
+  run docker_snapshot
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"docker cannot list the containers on the engine behind /s.sock"* ]]
+  [[ "$output" == *"CLAUDE_DOCKER_SOCKET"* ]]
+  [ ! -e "$stage/engine-containers" ]
+}
+
+@test "docker_snapshot: an empty engine is an empty file, not a blank line" {
+  engine_stub
+  : >"$BATS_TEST_TMPDIR/containers"
+  docker_snapshot
+  [ -f "$stage/engine-containers" ] && [ ! -s "$stage/engine-containers" ]
+}
+
 @test "docker_snapshot: no-op without --docker" {
   engine_stub
   WITH_DOCKER=0
@@ -2309,7 +2352,17 @@ engine_stub() {
   [ "$(grep -n "volume rm -f v2" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "image rm -f i2" "$CALLS" | cut -d: -f1)" ]
   # The stub removes nothing, so everything counts as still there.
   [[ "$out" == *"removed 0 containers, 0 networks, 0 volumes, 0 images"* ]]
-  [[ "$out" == *"1 containers, 1 networks, 1 volumes, 1 images the session created could not be removed"* ]]
+  [[ "$out" == *"1 containers (stack-db-1), 1 networks (stack_default), 1 volumes (v2), 1 images (stack-web) the session created could not be removed"* ]]
+}
+
+@test "docker_cleanup: an engine that does not answer at exit removes nothing and says so" {
+  engine_stub
+  docker_snapshot
+  docker() { echo "docker $*" >>"$CALLS"; return 1; }
+  run docker_cleanup
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"the engine behind /s.sock did not answer, so nothing the session created on it was removed"* ]]
+  run ! grep -q " rm " "$CALLS"
 }
 
 @test "docker_cleanup: reports the removal once the engine agrees" {
@@ -2327,7 +2380,26 @@ engine_stub() {
   }
   run docker_cleanup
   [ "$status" -eq 0 ]
-  [ "$output" = "claude-docker: --docker: removed 1 containers the session created on the host engine" ]
+  [ "$output" = "claude-docker: --docker: removed 1 containers (stack-db-1) that appeared on the host engine during the session" ]
+}
+
+@test "docker_cleanup: names every new resource, whoever created it" {
+  engine_stub
+  docker_snapshot
+  printf 'c1 app\nc2 stack-db-1\nc3 hand-started\n' >"$BATS_TEST_TMPDIR/containers"
+  docker() {
+    echo "docker $*" >>"$CALLS"
+    case "$*" in
+      *" rm -fv "*) printf 'c1 app\n' >"$BATS_TEST_TMPDIR/containers" ;;
+      *" ps -a --no-trunc --format "*) cat "$BATS_TEST_TMPDIR/containers" ;;
+      *" image ls "*|*" volume ls "*|*" network ls "*) : ;;
+    esac
+    return 0
+  }
+  run docker_cleanup
+  [ "$status" -eq 0 ]
+  grep -q "^docker -H unix:///s.sock rm -fv c2 c3$" "$CALLS"
+  [ "$output" = "claude-docker: --docker: removed 2 containers (stack-db-1, hand-started) that appeared on the host engine during the session" ]
 }
 
 @test "docker_cleanup: another running --docker session keeps the diff in place" {
@@ -2338,7 +2410,7 @@ engine_stub() {
   printf 'v1 v1\nv2 v2\n' >"$BATS_TEST_TMPDIR/volumes"
   run docker_cleanup
   [ "$status" -eq 0 ]
-  [[ "$output" == *"another --docker session is still running, so 1 containers, 1 volumes created since this session started are left"* ]]
+  [[ "$output" == *"another --docker session is still running, so 1 containers (stack-db-1), 1 volumes (v2) created since this session started are left"* ]]
   run ! grep -q " rm " "$CALLS"
 }
 

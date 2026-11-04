@@ -2937,7 +2937,7 @@ stage_docker_tmp() {
 # The host engine behind --docker, addressed through the socket the session
 # got (the runtime's own socket as a rule; docker_snapshot/docker_cleanup
 # must see what the session saw). podman reads its own API only, so a
-# podman host whose only socket is docker's gets no cleanup.
+# podman host whose only socket is docker's is refused by docker_snapshot.
 engine() {
   if [ "$RUNTIME" = docker ]; then
     docker -H "unix://$DOCKER_SOCKET" "$@"
@@ -2951,15 +2951,20 @@ engine() {
 # session and images it pulled don't pile up. The engine records no creator,
 # so this is a before/after diff of IDs: docker_snapshot lists what exists at
 # start (in the stage dir, so a crash leaves nothing behind), docker_cleanup
-# removes what is new at exit. Two guards keep the diff from reaching past
-# the session: resources of other claude-docker sessions (claude-* names:
-# the auth-proxy and egress sidecars, their networks, the egress image) are
-# never touched, and while another --docker session is still running (its
-# agent carries the claude-docker.docker label) nothing is removed at all,
-# since what it created since this session started is in the diff too. A
-# resource the engine refuses to remove (an image a container still uses) is
-# left and counted in the notice. Order: containers first (rm -f stops them
-# and -v drops their anonymous volumes), then networks, volumes, images.
+# removes what is new at exit. The diff cannot tell who created something:
+# a container the user starts from another terminal on the same engine while
+# the session runs is in it too, which is why the notice names what went.
+# Two guards keep the diff from reaching past the session: resources of
+# other claude-docker sessions (claude-* names: the auth-proxy and egress
+# sidecars, their networks, the egress image) are never touched, and while
+# another --docker session is still running (its agent carries the
+# claude-docker.docker label) nothing is removed at all, since what it
+# created since this session started is in the diff too. A resource the
+# engine refuses to remove (an image a container still uses) is left and
+# named in the notice. A snapshot that fails is fatal at start: an empty
+# snapshot would make everything on the engine look new at exit. Order:
+# containers first (rm -f stops them and -v drops their anonymous volumes),
+# then networks, volumes, images.
 engine_ls() {
   case "$1" in
     containers) engine ps -a --no-trunc --format '{{.ID}} {{.Names}}' ;;
@@ -2969,13 +2974,18 @@ engine_ls() {
   esac 2>/dev/null
 }
 docker_snapshot() {
-  local kind
+  local kind listing
   [ "$WITH_DOCKER" = "1" ] || return 0
   for kind in containers images volumes networks; do
-    engine_ls "$kind" | cut -d' ' -f1 >"$stage/engine-$kind" || exit 1
+    if ! listing=$(engine_ls "$kind"); then
+      echo "claude-docker: --docker: $RUNTIME cannot list the $kind on the engine behind $DOCKER_SOCKET, so the exit cleanup could not tell the session's own from what was already there. Point CLAUDE_DOCKER_SOCKET at the $RUNTIME engine's socket, or CLAUDE_DOCKER_RUNTIME at the engine's runtime" >&2
+      exit 1
+    fi
+    { [ -z "$listing" ] || printf '%s\n' "$listing" | cut -d' ' -f1; } >"$stage/engine-$kind" || exit 1
   done
 }
-# IDs of $1 that are new since the snapshot and not another session's.
+# `id name` lines of $1 that are new since the snapshot and not another
+# session's.
 engine_new() {
   local line id name
   [ -f "$stage/engine-$1" ] || return 0
@@ -2983,20 +2993,31 @@ engine_new() {
     id=${line%% *}; name=${line#* }
     [ -n "$id" ] || continue
     case "$name" in claude-*|localhost/claude-*) continue ;; esac
-    grep -qxF -- "$id" "$stage/engine-$1" || printf '%s\n' "$id"
+    grep -qxF -- "$id" "$stage/engine-$1" || printf '%s\n' "$id $name"
   done
 }
+# "N kind (name, name)" for the notices; no parenthesis when nothing is named.
+engine_desc() {
+  local names
+  names=$(printf '%s\n' "$3" | cut -d' ' -f2- | grep -v '^$' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+  printf '%s %s%s' "$1" "$2" "${names:+ ($names)}"
+}
 docker_cleanup() {
-  local mine others kind ids n left=0 removed="" kept=""
+  local mine others kind new ids gone n left removed="" kept=""
   [ "$WITH_DOCKER" = "1" ] && [ -f "$stage/engine-containers" ] || return 0
+  if ! engine_ls containers >/dev/null; then
+    echo "claude-docker: --docker: the engine behind $DOCKER_SOCKET did not answer, so nothing the session created on it was removed" >&2
+    return 0
+  fi
   mine=$(engine ps -q --filter "label=claude-docker.docker=$proxy_sid" 2>/dev/null) || true
   others=$(engine ps -q --filter label=claude-docker.docker 2>/dev/null | grep -vxF -f <(printf '%s\n' "$mine") || true)
   for kind in containers networks volumes images; do
-    ids=$(engine_new "$kind")
-    [ -n "$ids" ] || continue
+    new=$(engine_new "$kind")
+    [ -n "$new" ] || continue
+    ids=$(printf '%s\n' "$new" | cut -d' ' -f1)
     n=$(printf '%s\n' "$ids" | wc -l | tr -d ' ')
     if [ -n "$others" ]; then
-      kept="${kept:+$kept, }$n $kind"
+      kept="${kept:+$kept, }$(engine_desc "$n" "$kind" "$new")"
       continue
     fi
     # shellcheck disable=SC2086  # IDs, one per line, no spaces
@@ -3006,11 +3027,13 @@ docker_cleanup() {
       volumes)    engine volume rm -f $ids ;;
       images)     engine image rm -f $ids ;;
     esac >/dev/null 2>&1 || true
-    left=$(engine_new "$kind" | wc -l | tr -d ' ')
-    removed="${removed:+$removed, }$((n - left)) $kind"
-    [ "$left" -gt 0 ] && kept="${kept:+$kept, }$left $kind"
+    left=$(engine_new "$kind")
+    gone=$(printf '%s\n' "$new" | grep -vxF -f <(printf '%s\n' "$left") || true)
+    n=0; [ -n "$left" ] && n=$(printf '%s\n' "$left" | wc -l | tr -d ' ')
+    removed="${removed:+$removed, }$(engine_desc "$(( $(printf '%s\n' "$ids" | wc -l) - n ))" "$kind" "$gone")"
+    [ "$n" -gt 0 ] && kept="${kept:+$kept, }$(engine_desc "$n" "$kind" "$left")"
   done
-  [ -n "$removed" ] && echo "claude-docker: --docker: removed $removed the session created on the host engine" >&2
+  [ -n "$removed" ] && echo "claude-docker: --docker: removed $removed that appeared on the host engine during the session" >&2
   if [ -n "$kept" ]; then
     if [ -n "$others" ]; then
       echo "claude-docker: --docker: another --docker session is still running, so $kept created since this session started are left on the host engine; remove them yourself when that session is done" >&2
@@ -3019,6 +3042,19 @@ docker_cleanup() {
     fi
   fi
   return 0
+}
+
+# The sockets --docker tries, in order, when neither CLAUDE_DOCKER_SOCKET nor
+# a unix:// DOCKER_HOST names one: the engine that launches the agent first,
+# so `docker ps` inside lists the session's own siblings, then the other
+# engine's. A function so the tests can swap in paths the runner lacks.
+engine_socket_candidates() {
+  local user_sock="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock"
+  if [ "$RUNTIME" = docker ]; then
+    printf '%s\n' /var/run/docker.sock "$user_sock" /run/podman/podman.sock
+  else
+    printf '%s\n' "$user_sock" /run/podman/podman.sock /var/run/docker.sock
+  fi
 }
 
 # --docker: find the host engine's API socket, mount it at /run/docker.sock
@@ -3038,14 +3074,9 @@ build_docker_socket() {
     case "${DOCKER_HOST:-}" in unix://*) DOCKER_SOCKET="${DOCKER_HOST#unix://}" ;; esac
   fi
   if [ -z "$DOCKER_SOCKET" ]; then
-    # Prefer the engine that launches this container, so `docker ps` inside
-    # lists the session's own siblings; fall back to whichever socket exists.
-    if [ "$RUNTIME" = docker ]; then
-      candidates=(/var/run/docker.sock "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" /run/podman/podman.sock)
-    else
-      candidates=("${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" /run/podman/podman.sock /var/run/docker.sock)
-    fi
-    for cand in "${candidates[@]}"; do
+    candidates=()
+    while IFS= read -r cand; do candidates+=("$cand"); done < <(engine_socket_candidates)
+    for cand in ${candidates[@]+"${candidates[@]}"}; do
       if [ -S "$cand" ]; then DOCKER_SOCKET="$cand"; break; fi
     done
     if [ -z "$DOCKER_SOCKET" ]; then

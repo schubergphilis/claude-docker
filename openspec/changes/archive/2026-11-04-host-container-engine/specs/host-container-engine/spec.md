@@ -83,7 +83,7 @@ Because Claude Code keys its project directory by working directory, a `--docker
 
 ### Requirement: What the session creates on the engine is removed at exit
 
-Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts, and at exit remove those that are new, in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove resources whose name starts with `claude-` (other claude-docker sessions' sidecars, networks and the egress image), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container). It SHALL print one line to stderr saying what it removed, and one saying what it left and why when something is left: another session running, or the engine refused.
+Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts, and at exit remove those that are new, in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove resources whose name starts with `claude-` (other claude-docker sessions' sidecars, networks and the egress image), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container). The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it. It SHALL print one line to stderr naming what it removed (as what appeared during the session, since a hand-started container is in it too), and one naming what it left and why when something is left: another session running, or the engine refused. A listing that fails at start SHALL be fatal, since an empty snapshot would make everything on the engine look new at exit; a listing that fails at exit SHALL remove nothing and say so.
 
 #### Scenario: a compose stack does not outlive the session
 
@@ -98,6 +98,19 @@ Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, imag
 - **WHEN** session A exits while B is still running
 - **THEN** nothing is removed, and stderr says what was left and that another `--docker` session is running
 - **AND** when B exits last, what both created since A started is removed
+
+#### Scenario: something started by hand on the same engine during the session
+
+- **GIVEN** a `--docker` session, and the user runs `docker run -d --name scratch ...` from another terminal against the same engine while it runs
+- **WHEN** the session exits
+- **THEN** `scratch` is removed with the session's own containers
+- **AND** stderr names it among what was removed
+
+#### Scenario: an engine the runtime cannot list
+
+- **GIVEN** `--docker` with `CLAUDE_DOCKER_RUNTIME=podman` and `CLAUDE_DOCKER_SOCKET` pointing at docker's socket
+- **WHEN** the session starts
+- **THEN** it exits 1 before the agent runs, saying the runtime cannot list the engine and naming `CLAUDE_DOCKER_SOCKET` and `CLAUDE_DOCKER_RUNTIME`
 
 #### Scenario: a concurrent regular session's sidecar is untouched
 

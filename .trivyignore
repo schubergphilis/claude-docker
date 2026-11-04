@@ -47,3 +47,19 @@ CVE-2026-109383 exp:2026-11-25
 # undici CVE-2026-87018 (DoS via TLS renegotiation with a mismatched
 # certificate). Same fix, copies, expiry and reason as CVE-2026-109383.
 CVE-2026-87018 exp:2026-11-25
+
+# docker-buildx-plugin (Dockerfile; the buildx CLI --docker sessions use) is
+# a Go binary vendoring github.com/moby/go-archive v0.2.0 and golang.org/x/net
+# v0.59.0. CVE-2026-17106 (go-archive: arbitrary file write via link following
+# in tar extraction, fixed in 0.3.0) and CVE-2026-78669 (x/net http2: DoS via
+# excessive SETTINGS frames, fixed in 0.60.0). buildx v0.38.2 (2026-11-03, the
+# latest tag) still pins both, so there is no fixed package to bump to. Both
+# sit in a client plugin that runs with the session user's privileges against
+# an engine the user handed the session with --docker. Expiry: buildx shipped
+# 10-07, 10-20 and 11-03, so the next release is due by ~11-17 and Docker's
+# apt repo follows within days; two weeks after that to land the rebuild. At
+# expiry check go.mod of the latest tag for go-archive >= 0.3.0 and x/net >=
+# 0.60.0 and drop both entries once the apt package carries it.
+CVE-2026-17106 exp:2026-12-02
+# Same binary, fix path and expiry as CVE-2026-17106.
+CVE-2026-78669 exp:2026-12-02
