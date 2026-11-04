@@ -2967,12 +2967,13 @@ engine() {
   fi
 }
 # The same engine from a host shell, for the removal command docker_exit
-# prints: bare when the socket is the runtime's default, addressed otherwise.
+# prints. Always addressed: a shell with another docker context, DOCKER_HOST
+# or podman connection would otherwise remove from a different engine.
 engine_cmd() {
   if [ "$RUNTIME" = docker ]; then
-    [ "$DOCKER_SOCKET" = /var/run/docker.sock ] && printf 'docker' || printf 'docker -H unix://%s' "$DOCKER_SOCKET"
+    printf 'docker -H unix://%s' "$DOCKER_SOCKET"
   else
-    [ "$DOCKER_SOCKET" = "${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/podman/podman.sock" ] && printf 'podman' || printf 'podman --remote --url unix://%s' "$DOCKER_SOCKET"
+    printf 'podman --remote --url unix://%s' "$DOCKER_SOCKET"
   fi
 }
 
@@ -3029,19 +3030,25 @@ docker_snapshot() {
     { [ -z "$listing" ] || printf '%s\n' "$listing" | cut -d' ' -f1; } >"$stage/engine-$kind" || exit 1
   done
 }
-# `id name` lines of $1 that are new since the snapshot and not another
-# session's: the names this script gives its sidecars, their networks and
-# the egress image (claude-auth-*, claude-egress-*, claude-docker-egress-proxy;
-# nothing else with a claude- prefix, so what the agent names so is not
-# exempt); the claude-docker.session label (run_container puts it on every
-# agent container, --docker or not) is a session started since this one.
+# `id name` lines of $1 that are new since the snapshot and not this
+# wrapper's own: the names this script gives its sidecars, their networks
+# and the egress image (claude-auth-*, claude-egress-*,
+# claude-docker-egress-proxy; nothing else with a claude- prefix, so what
+# the agent names so is not exempt); the claude-docker.session label
+# (run_container puts it on every agent container, --docker or not) is a
+# session started since this one; the persistent claude-code-root and
+# claude-code-home volumes and the agent image itself, which `run` creates
+# or pulls after the snapshot on a first session.
 engine_new() {
-  local line id rest name
+  local line id rest name repo
   [ -f "$stage/engine-$1" ] || return 0
+  repo=${IMAGE%%@*}
+  case "${repo##*/}" in *:*) repo=${repo%:*} ;; esac
   engine_ls "$1" | while IFS= read -r line; do
     id=${line%% *}; rest=${line#* }; name=${rest%% *}
     [ -n "$id" ] || continue
     case "$name" in claude-auth-*|claude-egress-*|claude-docker-egress-proxy|*/claude-docker-egress-proxy) continue ;; esac
+    case "$1:$name" in volumes:claude-code-root|volumes:claude-code-home|"images:$repo"|"images:"*"/$repo") continue ;; esac
     case "$rest" in *claude-docker.session*) continue ;; esac
     grep -qxF -- "$id" "$stage/engine-$1" || printf '%s\n' "$id $name"
   done

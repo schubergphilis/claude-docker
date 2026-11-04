@@ -41,7 +41,7 @@ The socket SHALL be, in order: `CLAUDE_DOCKER_SOCKET` when set; the host's `DOCK
 
 ### Requirement: The dropped-to user can open the socket
 
-Under rootless podman, decided by asking the engine behind the socket the session uses (not the default connection), `run.sh` SHALL start the agent container with `--userns=keep-id --user 0:0 --passwd=false`, so the entrypoint still starts as (namespaced) root and the `HOST_UID` it drops to is the host user, who owns the socket. Under a rootful engine, the entrypoint SHALL add the socket's group (by GID, creating a `docker-host` group when none has it) as a supplementary group of the `claude` user before the privilege drop, unless it is already the user's primary group or it is GID 0: the root group is never joined, since it reaches far beyond the socket. The privilege drop and capability set SHALL be unchanged.
+Under rootless podman, decided by asking the engine behind the socket the session uses (not the default connection), `run.sh` SHALL start the agent container with `--userns=keep-id --user 0:0 --passwd=false`, so the entrypoint still starts as (namespaced) root and the `HOST_UID` it drops to is the host user, who owns the socket. Under a rootful engine, the entrypoint SHALL add the socket's group (by GID, creating a `docker-host` group when none has it) as a supplementary group of the `claude` user before the privilege drop, unless it is already the user's primary group, it is GID 0, or the image already has a group under that GID that is not `docker` or `docker-host`: the root group and the image's other groups reach far beyond the socket, so those are never joined and the entrypoint warns. The privilege drop and capability set SHALL be unchanged.
 
 #### Scenario: rootless podman
 
@@ -54,6 +54,7 @@ Under rootless podman, decided by asking the engine behind the socket the sessio
 - **GIVEN** a Docker host whose socket is `root:root`
 - **WHEN** the user runs `claude-docker --docker ~/repo`
 - **THEN** the `claude` user is not added to GID 0, and `docker` in the session fails on the socket's permissions rather than running with the root group
+- **AND** a socket whose GID is the image's `shadow` group is likewise not joined, with a warning
 
 #### Scenario: rootful docker
 
@@ -103,9 +104,9 @@ Because Claude Code keys its project directory by working directory, a `--docker
 
 Under `--docker`, `run.sh` SHALL record the IDs of the engine's containers, images, volumes and networks before the agent starts and, at exit, act on those that are new. Which action is settled at start: `--docker-keep` keeps, `--docker-clean` removes, both together are refused, and with neither the wrapper SHALL ask on the terminal (`[Y/n]`, default remove) once the socket is resolved, so no fatal start-up check follows the answer, saying that the diff also holds anything started on the engine by hand during the session; without a terminal it SHALL keep and say how to choose. The diff records no creator, so anything that appears on the engine while the session runs is in it, whichever client made it.
 
-Keeping: at exit the wrapper SHALL list what is new, by name, on stderr, and print a command for the host shell that removes it (addressed at the socket the session used), with a warning to check the names first. Nothing is removed.
+Keeping: at exit the wrapper SHALL list what is new, by name, on stderr, and print a command for the host shell that removes it (always addressed at the socket the session used, so another docker context or podman connection in that shell cannot redirect it), with a warning to check the names first. Nothing is removed.
 
-Removing: at exit the wrapper SHALL remove what is new in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove the resources `run.sh` names for other sessions' sidecars (`claude-auth-*`, `claude-egress-*`, the `claude-docker-egress-proxy` image; no other `claude-` prefix is exempt) or containers carrying the `claude-docker.session` label (`run.sh` puts it on every agent container, `--docker` or not), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container) or when the engine cannot answer that query. It SHALL print one line to stderr naming what it removed, and one naming what it left and why when something is left: another session running, or the engine refused.
+Removing: at exit the wrapper SHALL remove what is new in this order: containers (forced, with their anonymous volumes), networks, volumes, images. It SHALL NOT remove the resources `run.sh` names for other sessions' sidecars (`claude-auth-*`, `claude-egress-*`, the `claude-docker-egress-proxy` image; no other `claude-` prefix is exempt) or containers carrying the `claude-docker.session` label (`run.sh` puts it on every agent container, `--docker` or not), or the wrapper's own `claude-code-root` and `claude-code-home` volumes and the agent image (a first session creates or pulls them after the snapshot), and SHALL remove nothing while another `--docker` session's agent container is running (recognised by the `claude-docker.docker` label `run.sh` puts on every `--docker` agent container) or when the engine cannot answer that query. It SHALL print one line to stderr naming what it removed, and one naming what it left and why when something is left: another session running, or the engine refused.
 
 A listing that fails at start SHALL be fatal, since an empty snapshot would make everything on the engine look new at exit; a listing that fails at exit SHALL do nothing and say so.
 
@@ -148,6 +149,12 @@ A listing that fails at start SHALL be fatal, since an empty snapshot would make
 - **GIVEN** `--docker` with `CLAUDE_DOCKER_RUNTIME=podman` and `CLAUDE_DOCKER_SOCKET` pointing at docker's socket
 - **WHEN** the session starts
 - **THEN** it exits 1 before the agent runs, saying the runtime cannot list the engine and naming `CLAUDE_DOCKER_SOCKET` and `CLAUDE_DOCKER_RUNTIME`
+
+#### Scenario: a first session's persistent volumes survive
+
+- **GIVEN** no `claude-code-root` or `claude-code-home` volume exists yet, and the user runs `claude-docker --docker-clean ~/repo`
+- **WHEN** the session exits
+- **THEN** both volumes, created by the agent's `run`, and the agent image are still there; only what the agent created is removed
 
 #### Scenario: a concurrent regular session's sidecar is untouched
 

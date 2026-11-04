@@ -132,16 +132,23 @@ alias_project() {
 # when the primary group already matches: rootless podman under keep-id, or a
 # socket owned by the host user.
 join_socket_group() {
-  local gid=$1 sock_gid
+  local gid=$1 sock_gid group
   [ -S "$DOCKER_SOCK" ] || return 0
   sock_gid="$(stat -c %g "$DOCKER_SOCK")" || return
   # A root:root socket (Docker Desktop, some rootful setups) is not joined:
   # GID 0 would hand the agent every root-group permission in the image, far
-  # beyond the socket. docker then fails visibly instead.
+  # beyond the socket. The same goes for any other group the image already
+  # has under that GID (shadow, disk, ...): only an unknown GID, or one that
+  # is docker/docker-host, is joined. docker then fails visibly instead.
   [ "$sock_gid" != "$gid" ] && [ "$sock_gid" != 0 ] || return 0
-  getent group "$sock_gid" >/dev/null 2>&1 \
-    || groupadd -o -g "$sock_gid" docker-host \
-    || return
+  if group=$(getent group "$sock_gid" 2>/dev/null); then
+    case "${group%%:*}" in
+      docker|docker-host) ;;
+      *) printf 'entrypoint: WARN the engine socket is owned by GID %s, which is the image'"'"'s %s group; not joining it, so docker may fail on the socket'"'"'s permissions\n' "$sock_gid" "${group%%:*}" >&2; return 0 ;;
+    esac
+  else
+    groupadd -o -g "$sock_gid" docker-host || return
+  fi
   usermod -aG "$sock_gid" claude
 }
 

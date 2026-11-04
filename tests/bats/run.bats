@@ -2476,15 +2476,11 @@ engine_stub() {
   [ "$(engine_desc 0 images "")" = "0 images" ]
 }
 
-@test "engine_cmd: bare for the runtime's default socket, addressed otherwise" {
+@test "engine_cmd: always addresses the socket the session used" {
   RUNTIME=docker DOCKER_SOCKET=/var/run/docker.sock
-  [ "$(engine_cmd)" = docker ]
-  DOCKER_SOCKET=/x.sock
-  [ "$(engine_cmd)" = "docker -H unix:///x.sock" ]
-  RUNTIME=podman XDG_RUNTIME_DIR=/run/user/7 DOCKER_SOCKET=/run/user/7/podman/podman.sock
-  [ "$(engine_cmd)" = podman ]
-  DOCKER_SOCKET=/x.sock
-  [ "$(engine_cmd)" = "podman --remote --url unix:///x.sock" ]
+  [ "$(engine_cmd)" = "docker -H unix:///var/run/docker.sock" ]
+  RUNTIME=podman DOCKER_SOCKET=/run/user/7/podman/podman.sock
+  [ "$(engine_cmd)" = "podman --remote --url unix:///run/user/7/podman/podman.sock" ]
 }
 
 @test "docker_exit: an engine that does not answer at exit removes nothing and says so" {
@@ -2558,21 +2554,42 @@ engine_stub() {
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "claude-docker: --docker: left on the host engine, appeared during the session: 2 containers (stack-db-1, hand-started), 1 networks (stack_default), 1 volumes (v2), 1 images (stack-web)" ]
   [[ "${lines[1]}" == *"to remove them (check the names first: anything started on this engine by hand meanwhile is in the list too)"* ]]
-  [ "${lines[2]}" = "  docker rm -fv stack-db-1 hand-started; docker network rm stack_default; docker volume rm v2; docker image rm -f 0123456789ab" ]
+  [ "${lines[2]}" = "  docker -H unix:///var/run/docker.sock rm -fv stack-db-1 hand-started; docker -H unix:///var/run/docker.sock network rm stack_default; docker -H unix:///var/run/docker.sock volume rm v2; docker -H unix:///var/run/docker.sock image rm -f 0123456789ab" ]
   run ! grep -q " rm " "$CALLS"
 }
 
-@test "docker_exit: keep addresses a non-default socket in the command" {
+@test "docker_exit: keep addresses podman's socket in the command" {
   engine_stub
-  DOCKER_EXIT=keep RUNTIME=podman XDG_RUNTIME_DIR=/run/user/7
+  DOCKER_EXIT=keep RUNTIME=podman
   podman() { docker "$@"; }
   docker_snapshot
   printf 'c1 app\nc2 stack-db-1\n' >"$BATS_TEST_TMPDIR/containers"
   run docker_exit
   [ "${lines[2]}" = "  podman --remote --url unix:///s.sock rm -fv stack-db-1" ]
-  DOCKER_SOCKET=/run/user/7/podman/podman.sock
+}
+
+@test "docker_exit: the persistent volumes and the agent image a first session creates are exempt" {
+  engine_stub
+  IMAGE=ghcr.io/schubergphilis/claude-docker:v1.2.3
+  docker_snapshot
+  printf 'v1 v1\nv2 v2\nv8 claude-code-root\nv9 claude-code-home\n' >"$BATS_TEST_TMPDIR/volumes"
+  printf 'i1 postgres\ni2 stack-web\ni8 ghcr.io/schubergphilis/claude-docker\n' >"$BATS_TEST_TMPDIR/images"
   run docker_exit
-  [ "${lines[2]}" = "  podman rm -fv stack-db-1" ]
+  [ "$status" -eq 0 ]
+  grep -q "^docker -H unix:///s.sock volume rm -f v2$" "$CALLS"
+  grep -q "^docker -H unix:///s.sock image rm -f i2$" "$CALLS"
+  run ! grep -q "v8\|v9\|i8" <(grep " rm " "$CALLS")
+  # A local tag under podman's localhost/ prefix, and a digest-pinned image.
+  : >"$CALLS"
+  IMAGE=claude-code:local
+  printf 'i1 postgres\ni7 localhost/claude-code\n' >"$BATS_TEST_TMPDIR/images"
+  run docker_exit
+  run ! grep -q "i7" <(grep " rm " "$CALLS")
+  : >"$CALLS"
+  IMAGE=registry:5000/team/claude-code@sha256:0000
+  printf 'i1 postgres\ni6 registry:5000/team/claude-code\n' >"$BATS_TEST_TMPDIR/images"
+  run docker_exit
+  run ! grep -q "i6" <(grep " rm " "$CALLS")
 }
 
 @test "docker_exit: keep with nothing new is silent" {

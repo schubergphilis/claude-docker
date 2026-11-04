@@ -23,7 +23,8 @@ setup() {
   xargs() { :; }
   # Entries getent knows about, e.g. "passwd claude" or "group 1000".
   KNOWN=""
-  getent() { [[ " $KNOWN " == *" $1 $2 "* ]]; }
+  KNOWN_NAME=docker
+  getent() { [[ " $KNOWN " == *" $1 $2 "* ]] && echo "$KNOWN_NAME:x:$2:"; }
   # UID `id -u claude` reports for a pre-existing claude user.
   CLAUDE_UID=1000
   id() { echo "$CLAUDE_UID"; }
@@ -348,6 +349,20 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
   rm -f "$DOCKER_SOCK"
   run join_socket_group 424242
   [ "$status" -eq 0 ] && [ -z "$output" ]
+}
+
+@test "join_socket_group: a GID the image already uses for another group is not joined" {
+  mksock "$DOCKER_SOCK"
+  local gid
+  gid=$(stat -c %g "$DOCKER_SOCK")
+  KNOWN="group $gid" KNOWN_NAME=shadow
+  run join_socket_group 424242
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARN"*"GID $gid, which is the image's shadow group; not joining it"* ]]
+  [[ "$output" != *usermod* ]] && [[ "$output" != *groupadd* ]]
+  KNOWN_NAME=docker-host
+  run join_socket_group 424242
+  [[ "$output" == *"usermod -aG $gid claude"* ]]
 }
 
 @test "join_socket_group: a root-owned socket (GID 0) is never joined" {
