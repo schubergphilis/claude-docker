@@ -28,3 +28,4 @@
 - [x] 4.2 BATS `entrypoint.bats`: `alias_project`, `join_socket_group`, `trust_workspaces` under `--docker`
 - [x] 4.3 Verified by hand on a WSL2 rootless-podman host: `docker build` / `docker run -v "$PWD:..."` from a `--docker` session, two concurrent sessions, cleanup of a stage dir holding subordinate-UID files
 - [ ] 4.4 Verified by hand on a rootful Docker host (socket group join) and on macOS Docker Desktop
+- [x] 5.1 `run.sh` `--docker-in-docker`: `start_docker_in_docker` sidecar (rootless daemon, privileged, session volume and network, egress wiring, readiness), `WS_MOUNTS`, stage tmp at a fixed path, prune and trap; entrypoint joins the sidecar socket's group; docs, spec, bats

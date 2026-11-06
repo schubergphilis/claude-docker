@@ -167,6 +167,20 @@ systemctl --user enable --now podman.socket
 
 Not supported from Git Bash on Windows (Docker Desktop exposes a named pipe there). Run `claude-docker` from WSL instead.
 
+### A daemon of the session's own (`--docker-in-docker`)
+
+`--docker-in-docker` gives the session a Docker daemon of its own instead of the host's: the official rootless Docker daemon image (`docker:<version>-dind-rootless`, pinned by digest; `CLAUDE_DOCKER_IN_DOCKER_IMAGE` overrides it) runs in a sidecar named `claude-docker-in-docker-<sid>`, and the agent's `docker` CLI reaches it over a socket in a session volume (`DOCKER_HOST=unix:///run/docker-in-docker/docker.sock`). Not with `--docker`; pick one.
+
+What differs from `--docker`:
+
+- **Everything stays inside the session.** Containers, images, volumes and networks the agent creates live in the sidecar's own storage and are gone when the session ends, with the sidecar, its volume and its network. The host engine is never touched, so there is no exit diff, no question at start and no risk to anything else running on the host. The price is a cold cache: images are pulled and built again next session, and storage is slower than the host's (overlay inside a container; under rootless Podman it is the daemon's own rootless overlay, without cgroups on a cgroup v1 kernel such as WSL2's default).
+- **Workspaces keep their normal paths.** The sidecar mounts every workspace at the same `/workspaces/<name>` path and mode as the agent, and shares `TMPDIR`, so `docker run -v "$PWD:..."`, compose `./` volumes and `mktemp` bind mounts resolve without the host-path mirroring `--docker` needs. The project key is the normal one too, so `--resume` and memory need no alias.
+- **The egress lock covers nested containers.** With `--egress-lock` or `--egress-allowlist` the sidecar joins the session's internal network only, with the proxy set for the daemon's own pulls, and a staged docker CLI config (`DOCKER_CONFIG=/run/claude-docker/docker-config`) puts the same proxy into every container the agent starts. A pull from a registry that is not allowlisted fails, and so does a nested container's request to a host off the list, exactly as the agent's own would. `--docker` cannot do that, which is the main reason this mode exists.
+- **The sidecar is privileged; the agent is not.** A daemon needs mount, network and cgroup rights the agent container must not have, so they live in the sidecar: `--privileged`, which under a rootless host engine is still bounded by your user's namespace (under rootful Docker it is root on the host, as any privileged container is). The daemon itself runs rootless inside it, with a sub-UID range narrowed to fit the outer container. The agent keeps its dropped capabilities, `no-new-privileges` and non-root user; it holds a socket to a daemon that can only touch the sidecar and the workspaces mounted into it.
+- **Identity.** Under rootless Podman the sidecar gets the same keep-id mapping as the agent, so uid 1000 in both is your host user and socket, workspaces and `TMPDIR` agree on ownership. The socket's group is the daemon's own, which is the agent user's primary group or one the entrypoint creates for it. Works from Git Bash too, since no host socket is involved.
+
+Verified on a WSL2 rootless-Podman host: info, a nested container with network, a workspace and a `mktemp` bind mount, a build, teardown, and under `--egress-lock` a blocked pull and a blocked nested request. Not yet verified under Docker or on macOS.
+
 ## Git worktrees
 
 Git worktrees embed the path between the worktree and its repo's `.git/` in two link files. By default those paths are absolute, so a worktree created on the host breaks inside the container (and vice versa) because the same files sit at different absolute paths in each environment.

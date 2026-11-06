@@ -178,6 +178,27 @@ At exit, when the stage directory cannot be removed as the host user and the run
 - **WHEN** the session exits
 - **THEN** the stage directory under `~/.cache/claude-docker/` is gone and no `Permission denied` lines are printed
 
+### Requirement: A daemon of the session's own is the alternative to the host engine
+
+`run.sh` SHALL accept a `--docker-in-docker` wrapper flag, exclusive with `--docker` (both SHALL be refused). With it, `run.sh` SHALL start a sidecar `claude-docker-in-docker-<sid>` from the pinned rootless Docker daemon image (`CLAUDE_DOCKER_IN_DOCKER_IMAGE` overrides it), `--privileged`, with the daemon listening on a unix socket in a session volume `claude-docker-in-docker-<sid>` mounted at the daemon's home and at `/run/docker-in-docker` in the agent, `DOCKER_HOST` pointing there, and no TCP listener. Every workspace SHALL be mounted into the sidecar at the same `/workspaces/<name>` path and mode as in the agent, and the stage `tmp` dir at `/run/claude-docker/tmp` in both, as `TMPDIR`. The daemon's sub-UID range SHALL be one that fits the outer container's mapping. Without an egress flag the two SHALL share a session network `claude-docker-in-docker-net-<sid>`; under `--egress-lock` the sidecar SHALL join the internal egress network only, with the proxy in its environment and in a staged docker CLI config the agent uses (`DOCKER_CONFIG`), so the daemon's pulls and every nested container go through the proxy. Under rootless podman the sidecar SHALL get `--userns=keep-id` like the agent. `run.sh` SHALL wait for the daemon to answer before starting the agent and abort with the daemon's log otherwise; the EXIT trap SHALL remove sidecar, volume and network, and the stale prune SHALL sweep stopped sidecars, their volumes and networks. `run.sh` SHALL list `docker-in-docker` in `CLAUDE_DOCKER_FLAGS`. The entrypoint SHALL join the socket's group for this socket as for the host one.
+
+#### Scenario: nested containers inside the session
+
+- **GIVEN** `claude-docker --docker-in-docker ~/repo`
+- **WHEN** the agent runs `docker run -v "$PWD:/src" ...`, `docker build` and `mktemp`-based bind mounts
+- **THEN** they work against the session's daemon, nothing appears on the host engine, and at exit the sidecar, its volume and its network are gone with everything the agent created
+
+#### Scenario: the egress lock covers the daemon and nested containers
+
+- **GIVEN** `claude-docker --docker-in-docker --api --egress-lock ~/repo`
+- **WHEN** the agent pulls an image from a registry that is not allowlisted, or a nested container requests a host off the list
+- **THEN** both are refused by the proxy, as the agent's own request would be
+
+#### Scenario: the two engine modes do not combine
+
+- **WHEN** the user runs `claude-docker --docker --docker-in-docker ~/repo`
+- **THEN** `run.sh` exits 1 saying to pass one of them
+
 ### Requirement: The host engine with the egress lock is a warned breakout
 
 When `--docker` is given together with `--egress-lock`, `run.sh` SHALL print a warning before starting any container and continue: the lock bounds the agent process, while a container started through the host engine's socket, and the engine's own image pulls, run on the host's network outside the proxy and its allowlist. The warning SHALL say so and that the host engine's audit is not the wrapper's.

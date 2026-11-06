@@ -431,6 +431,18 @@ http_access allow all" ]
   [ "$status" -eq 1 ]
 }
 
+@test "parse_args: --docker-in-docker is its own opt-in" {
+  parse_args --docker-in-docker
+  [ "$WITH_DOCKER_IN_DOCKER" = 1 ] && [ "$WITH_DOCKER" = 0 ]
+}
+
+@test "validate_opts: --docker with --docker-in-docker is rejected" {
+  WITH_DOCKER=1 WITH_DOCKER_IN_DOCKER=1 WITH_API=1 ANTHROPIC_API_KEY=k
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"--docker and --docker-in-docker are two ways to give the session an engine; pass one"* ]]
+}
+
 @test "parse_args: --docker-keep and --docker-clean imply --docker" {
   parse_args --docker-keep
   [ "$WITH_DOCKER" = 1 ] && [ "$DOCKER_KEEP" = 1 ] && [ "$DOCKER_CLEAN" = 0 ]
@@ -566,6 +578,13 @@ http_access allow all" ]
   grep -qx "docker network ls -q --filter name=^claude-egress-" "$CALLS"
   # Running proxies belong to live sessions: only stopped states are listed.
   run ! grep -q "^docker ps -aq --filter name=^claude-egress-proxy-$" "$CALLS"
+}
+
+@test "prune_stale_auth_proxy: sweeps stopped --docker-in-docker sidecars, their volumes and networks" {
+  prune_stale_auth_proxy
+  grep -q "^docker ps -aq --filter name=^claude-docker-in-docker- --filter status=exited" "$CALLS"
+  grep -qx "docker volume ls -q --filter name=^claude-docker-in-docker-" "$CALLS"
+  grep -qx "docker network ls -q --filter name=^claude-docker-in-docker-net-" "$CALLS"
 }
 
 @test "prune_stale_auth_proxy: failures never abort the run" {
@@ -723,6 +742,16 @@ http_access allow all" ]
   [ "$CWD" = "$WS" ]
   [ "${CONTAINER_PATHS[1]}" = "$BATS_TEST_TMPDIR/other" ]
   [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:%s:ro\n-v\n%s:%s:ro' "$WS" "$WS" "$BATS_TEST_TMPDIR/other" "$BATS_TEST_TMPDIR/other")" ]
+}
+
+@test "build_workspace_mounts: records the /workspaces mounts for the --docker-in-docker sidecar" {
+  mkdir -p "$BATS_TEST_TMPDIR/other"
+  WORKSPACES=("$WS" "$BATS_TEST_TMPDIR/other") WORKSPACES_RO=(0 1)
+  build_workspace_mounts
+  [ "$(lines_of "${WS_MOUNTS[@]}")" = "$(printf -- '-v\n%s:/workspaces/repo\n-v\n%s:/workspaces/other:ro' "$WS" "$BATS_TEST_TMPDIR/other")" ]
+  WS_MOUNTS=() MOUNT_ARGS=() CONTAINER_PATHS=() WITH_DOCKER=1
+  build_workspace_mounts
+  [ "${#WS_MOUNTS[@]}" -eq 0 ]
 }
 
 @test "check_mirror_path: system directories are refused under --docker" {
@@ -2392,6 +2421,94 @@ run_statusline() {
   [ "$(lines_of "${RUN_OPTS[@]}")" = "$(printf -- '--label\nclaude-docker.docker=abc123')" ]
 }
 
+@test "stage_docker_tmp: --docker-in-docker mounts the stage tmp dir at a fixed path, no label" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage"
+  WITH_DOCKER_IN_DOCKER=1 proxy_sid=abc123
+  stage_docker_tmp
+  [ -d "$stage/tmp" ]
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '-v\n%s:/run/claude-docker/tmp' "$stage/tmp")" ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"TMPDIR=/run/claude-docker/tmp"* ]]
+  [ "${#RUN_OPTS[@]}" -eq 0 ]
+}
+
+# --- start_docker_in_docker ---
+
+did_setup() {
+  WITH_DOCKER_IN_DOCKER=1 proxy_sid=x
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage"
+  DOCKER_IN_DOCKER_SIDECAR=claude-docker-in-docker-x DOCKER_IN_DOCKER_NETWORK=claude-docker-in-docker-net-x DOCKER_IN_DOCKER_VOLUME=claude-docker-in-docker-x
+  WS_MOUNTS=(-v "$WS:/workspaces/repo" -v /x/lib:/workspaces/lib:ro)
+}
+
+@test "start_docker_in_docker: no-op without the flag" {
+  start_docker_in_docker
+  [ ! -s "$CALLS" ]
+}
+
+@test "start_docker_in_docker: a rootless daemon in a privileged sidecar on a session network, wired to the agent" {
+  did_setup
+  start_docker_in_docker 2>"$BATS_TEST_TMPDIR/err"
+  grep -qx "docker network create claude-docker-in-docker-net-x" "$CALLS"
+  grep -qx "docker volume create claude-docker-in-docker-x" "$CALLS"
+  local run
+  run=$(grep "^docker run -d --name claude-docker-in-docker-x " "$CALLS")
+  [[ "$run" == *" --network claude-docker-in-docker-net-x --privileged --label claude-docker.session=x -e DOCKER_TLS_CERTDIR= -v $WS:/workspaces/repo -v /x/lib:/workspaces/lib:ro -v claude-docker-in-docker-x:/home/rootless -v $stage/tmp:/run/claude-docker/tmp -v $stage/docker-in-docker-subid:/etc/subuid:ro -v $stage/docker-in-docker-subid:/etc/subgid:ro "* ]]
+  [[ "$run" == *" dockerd --host=unix:///home/rootless/docker.sock --group 0" ]]
+  [[ "$run" != *"--user 0:0"* ]] && [[ "$run" != *"keep-id"* ]]
+  [ "$(cat "$stage/docker-in-docker-subid")" = "rootless:10000:50000" ]
+  grep -q "^docker exec claude-docker-in-docker-x docker -H unix:///home/rootless/docker.sock version$" "$CALLS"
+  [ "$(lines_of "${MOUNT_ARGS[@]}")" = "$(printf -- '--network\nclaude-docker-in-docker-net-x\n-v\nclaude-docker-in-docker-x:/run/docker-in-docker')" ]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *$'-e\nDOCKER_HOST=unix:///run/docker-in-docker/docker.sock' ]]
+  grep -q "daemon 'claude-docker-in-docker-x' is up" "$BATS_TEST_TMPDIR/err"
+  run ! grep -q "proxies" "$CALLS"
+}
+
+@test "start_docker_in_docker: under --egress-lock the daemon joins the internal network behind the proxy, nested containers included" {
+  did_setup
+  WITH_EGRESS_LOCK=1 EGRESS_NETWORK=claude-egress-x EGRESS_URL=http://10.0.0.9:3128
+  start_docker_in_docker 2>/dev/null
+  run ! grep -q "network create" "$CALLS"
+  grep -q "^docker run -d --name claude-docker-in-docker-x --network claude-egress-x --privileged .* -e http_proxy=http://10.0.0.9:3128 -e https_proxy=http://10.0.0.9:3128 -e HTTP_PROXY=http://10.0.0.9:3128 -e HTTPS_PROXY=http://10.0.0.9:3128 -e no_proxy=localhost,127.0.0.1,::1 -e NO_PROXY=localhost,127.0.0.1,::1 " "$CALLS"
+  grep -q '"httpProxy": "http://10.0.0.9:3128"' "$stage/docker-in-docker-config/config.json"
+  grep -q '"noProxy": "localhost,127.0.0.1,::1"' "$stage/docker-in-docker-config/config.json"
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/docker-in-docker-config:/run/claude-docker/docker-config"* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" != *"--network"* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"DOCKER_CONFIG=/run/claude-docker/docker-config"* ]]
+}
+
+@test "start_docker_in_docker: keep-id follows the agent under rootless podman, --user 0:0 does not" {
+  did_setup
+  RUN_OPTS=(--userns=keep-id --user 0:0 --passwd=false)
+  start_docker_in_docker 2>/dev/null
+  grep -q "^docker run -d --name claude-docker-in-docker-x --network claude-docker-in-docker-net-x --privileged --userns=keep-id --label " "$CALLS"
+  run ! grep -q "claude-docker-in-docker-x .*--user 0:0" "$CALLS"
+}
+
+@test "start_docker_in_docker: a daemon that never answers aborts with its log, before the agent" {
+  did_setup
+  STUB_FAIL="exec" STUB_LOGS="rootlesskit: failed"
+  run start_docker_in_docker
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"daemon was not answering within 60s"* ]]
+  [[ "$output" == *"| rootlesskit: failed"* ]]
+  run ! grep -q "^docker run --rm" "$CALLS"
+}
+
+@test "start_docker_in_docker: a failed network, volume or run aborts" {
+  did_setup
+  STUB_FAIL="network"
+  run start_docker_in_docker
+  [ "$status" -eq 1 ] && [[ "$output" == *"failed to create network 'claude-docker-in-docker-net-x'"* ]]
+  : >"$CALLS"; STUB_FAIL="volume"
+  run start_docker_in_docker
+  [ "$status" -eq 1 ] && [[ "$output" == *"failed to create volume 'claude-docker-in-docker-x'"* ]]
+  : >"$CALLS"; STUB_FAIL="run"
+  run start_docker_in_docker
+  [ "$status" -eq 1 ] && [[ "$output" == *"failed to start the --docker-in-docker daemon"* ]]
+}
+
 # --- docker_snapshot / docker_exit ---
 
 # An engine whose listings come from files the test edits between the
@@ -2958,6 +3075,28 @@ YML
   # No terminal in the harness: kept, and the run says how to choose.
   [[ "$output" == *"no terminal to ask on"* ]]
   run ! grep -q "ps -q --filter label=claude-docker.docker" "$CALLS"
+}
+
+@test "main: --docker-in-docker wires the agent to its own daemon and tears it down" {
+  run_script --ephemeral --docker-in-docker "$WS"
+  [ "$status" -eq 0 ]
+  local agent sidecar
+  sidecar=$(grep "^docker run -d --name claude-docker-in-docker-" "$CALLS")
+  [[ "$sidecar" == *" --privileged "* ]] && [[ "$sidecar" == *" -v $WS:/workspaces/repo "* ]]
+  agent=$(grep "^docker run --rm" "$CALLS")
+  [[ "$agent" == *" --network claude-docker-in-docker-net-"* ]]
+  [[ "$agent" == *":/run/docker-in-docker "* ]]
+  [[ "$agent" == *" -e DOCKER_HOST=unix:///run/docker-in-docker/docker.sock "* ]]
+  [[ "$agent" == *" -e TMPDIR=/run/claude-docker/tmp "* ]]
+  [[ "$agent" == *" -e CLAUDE_DOCKER_FLAGS=docker-in-docker,ephemeral "* ]]
+  [[ "$agent" == *" -w /workspaces/repo claude-code:local claude" ]]
+  [[ "$agent" != *"/run/docker.sock"* ]]
+  # The sidecar starts before the agent; the trap removes sidecar, volume and network.
+  [ "$(grep -n "^docker run -d --name claude-docker-in-docker-" "$CALLS" | cut -d: -f1)" -lt "$(grep -n "^docker run --rm" "$CALLS" | cut -d: -f1)" ]
+  grep -q "^docker rm -f claude-docker-in-docker-" "$CALLS"
+  grep -q "^docker volume rm -f claude-docker-in-docker-" "$CALLS"
+  grep -q "^docker network rm claude-docker-in-docker-net-" "$CALLS"
+  run ! grep -q "ps -a --no-trunc" "$CALLS"
 }
 
 @test "main: --docker-clean asks nothing and removes at exit" {

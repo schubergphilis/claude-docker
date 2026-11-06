@@ -14,6 +14,7 @@ ROOT_HOME=/root
 CA_DIR=/usr/local/share/ca-certificates
 GIT_SYSTEM_CONFIG=/etc/gitconfig
 DOCKER_SOCK=/run/docker.sock
+DOCKER_IN_DOCKER_SOCK=/run/docker-in-docker/docker.sock
 
 # Seed /root/.claude/settings.json from the host settings.docker.json that
 # run.sh forwards at the seed path. A copy, not a bind mount at the real path:
@@ -132,9 +133,11 @@ alias_project() {
 # when the primary group already matches: rootless podman under keep-id, or a
 # socket owned by the host user.
 join_socket_group() {
-  local gid=$1 sock_gid group
-  [ -S "$DOCKER_SOCK" ] || return 0
-  sock_gid="$(stat -c %g "$DOCKER_SOCK")" || return
+  local gid=$1 sock_gid group sock
+  if [ -S "$DOCKER_SOCK" ]; then sock="$DOCKER_SOCK"
+  elif [ -S "$DOCKER_IN_DOCKER_SOCK" ]; then sock="$DOCKER_IN_DOCKER_SOCK"
+  else return 0; fi
+  sock_gid="$(stat -c %g "$sock")" || return
   # A root:root socket (Docker Desktop, some rootful setups) is not joined:
   # GID 0 would hand the agent every root-group permission in the image, far
   # beyond the socket. The same goes for any other group the image already

@@ -12,6 +12,7 @@ setup() {
   unset HOST_UID HOST_GID CLAUDE_DOCKER_TRUSTED_WORKSPACES CLAUDE_DOCKER_FLAGS CLAUDE_DOCKER_PROJECT_ALIAS
   # Absent unless a --docker test creates it.
   DOCKER_SOCK="$BATS_TEST_TMPDIR/docker.sock"
+  DOCKER_IN_DOCKER_SOCK="$BATS_TEST_TMPDIR/docker-in-docker.sock"
   # Each stub echoes its call so tests can assert on what ran.
   chown() { echo "chown $*"; }
   groupadd() { echo "groupadd $*"; }
@@ -362,6 +363,15 @@ mksock() { python3 -c 'import socket, sys; socket.socket(socket.AF_UNIX).bind(sy
   [[ "$output" != *usermod* ]] && [[ "$output" != *groupadd* ]]
   KNOWN_NAME=docker-host
   run join_socket_group 424242
+  [[ "$output" == *"usermod -aG $gid claude"* ]]
+}
+
+@test "join_socket_group: the --docker-in-docker socket is joined when there is no host socket" {
+  mksock "$DOCKER_IN_DOCKER_SOCK"
+  run join_socket_group 424242
+  [ "$status" -eq 0 ]
+  local gid
+  gid=$(stat -c %g "$DOCKER_IN_DOCKER_SOCK")
   [[ "$output" == *"usermod -aG $gid claude"* ]]
 }
 

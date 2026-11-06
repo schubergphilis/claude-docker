@@ -15,6 +15,8 @@ IMAGE="${CLAUDE_DOCKER_IMAGE:-claude-code:local}"
 # config-compatibility check), not a routine automated bump. run.sh cannot
 # read pins/, so the pin lives here.
 PROXY_IMAGE="${CLAUDE_DOCKER_PROXY_IMAGE:-caddy:2.11.4@sha256:844f60b64e4724a5aa8245e019dace0d3f199f7433ce6c57676cb30a920dbad9}"
+# --docker-in-docker sidecar: the official rootless Docker daemon image.
+DOCKER_IN_DOCKER_IMAGE="${CLAUDE_DOCKER_IN_DOCKER_IMAGE:-docker.io/library/docker:29.9.3-dind-rootless@sha256:e3d0fa70055956693134873845b743bbe35b5199c68a52347032ae3e5dbac9a0}"
 
 # --egress-lock proxy image: squid on Alpine, built on the host the first time
 # --egress-lock runs (ensure_egress_image), so the agent image carries no
@@ -162,6 +164,16 @@ Wrapper flags:
                       With --egress-lock the lock bounds the agent process
                       only: containers started through the host engine
                       run outside the proxy, and the wrapper warns so.
+  --docker-in-docker  Give the session a container engine of its own: a
+                      rootless Docker daemon in a privileged sidecar on the
+                      session's networks, reached over a shared socket. The
+                      workspaces are mounted into it at the same
+                      /workspaces/<name> paths, so `docker run -v "$PWD:..."`
+                      works. Everything the agent starts lives and dies with
+                      the session; nothing touches the host engine. With
+                      --egress-lock the daemon and every nested container
+                      sit behind the proxy. Slower storage and a cold image
+                      cache per session are the price. Not with --docker.
   --docker-keep       --docker, keeping what appears on the engine (no
                       question asked). Without a terminal this is the default.
   --docker-clean      --docker, removing what appears on the engine at exit
@@ -272,6 +284,12 @@ WITH_EGRESS_LOCK=0
 WITH_EGRESS_ALLOWLIST=0
 EGRESS_ALLOWLIST_ARG=""
 WITH_DOCKER=0
+WITH_DOCKER_IN_DOCKER=0
+DOCKER_IN_DOCKER_SIDECAR=""
+DOCKER_IN_DOCKER_NETWORK=""
+DOCKER_IN_DOCKER_VOLUME=""
+WS_MOUNTS=()      # the /workspaces/<name> mounts, for the --docker-in-docker sidecar
+EGRESS_URL=""     # the --egress-lock proxy URL once its sidecar is up
 DOCKER_KEEP=0
 DOCKER_CLEAN=0
 DOCKER_EXIT=""   # keep | clean: what happens to the engine's new resources at exit
@@ -383,6 +401,7 @@ parse_args() {
       --egress-allowlist) WITH_EGRESS_ALLOWLIST=1 ;;
       --egress-allowlist=*) WITH_EGRESS_ALLOWLIST=1 EGRESS_ALLOWLIST_ARG="${arg#--egress-allowlist=}" ;;
       --docker)       WITH_DOCKER=1 ;;
+      --docker-in-docker) WITH_DOCKER_IN_DOCKER=1 ;;
       --docker-keep)  WITH_DOCKER=1 DOCKER_KEEP=1 ;;
       --docker-clean) WITH_DOCKER=1 DOCKER_CLEAN=1 ;;
       --iterm)        CLAUDE_DOCKER_TMUX=cc ;;
@@ -661,6 +680,10 @@ validate_opts() {
   if [ "$WITH_DOCKER" = "1" ] && [ "$WITH_EGRESS_LOCK" = "1" ]; then
     echo "claude-docker: WARNING: --docker with --egress-lock: the egress lock bounds the agent process only. Anything the agent starts through the host engine's socket (docker run, compose, build, and the engine's own image pulls) runs on the host's network, outside the proxy and its allowlist, so the session can reach any host that way. Use it only when you accept that breakout; the host engine's audit is yours, not this wrapper's." >&2
   fi
+  if [ "$WITH_DOCKER" = "1" ] && [ "$WITH_DOCKER_IN_DOCKER" = "1" ]; then
+    echo "claude-docker: --docker and --docker-in-docker are two ways to give the session an engine; pass one (--docker: the host's engine over its socket; --docker-in-docker: a daemon of its own, inside the session)" >&2
+    exit 1
+  fi
   if [ "$DOCKER_KEEP" = "1" ] && [ "$DOCKER_CLEAN" = "1" ]; then
     echo "claude-docker: --docker-keep and --docker-clean contradict each other; pass one" >&2
     exit 1
@@ -837,6 +860,22 @@ prune_stale_auth_proxy() {
   # swept too so strays from an older version still get cleaned up. The
   # --egress-lock proxy (claude-egress-proxy-*, claude-egress-* networks)
   # follows the same rules.
+  # --docker-in-docker strays, same policy: stopped sidecars only, and the
+  # volume and network removals fail harmlessly while a live session holds them.
+  "$RUNTIME" ps -aq --filter "name=^claude-docker-in-docker-" \
+      --filter "status=exited" --filter "status=created" --filter "status=dead" \
+      2>/dev/null | while IFS= read -r stale_cid; do
+    [ -z "$stale_cid" ] && continue
+    "$RUNTIME" rm -f "$stale_cid" >/dev/null 2>&1 || true
+  done || true
+  "$RUNTIME" volume ls -q --filter "name=^claude-docker-in-docker-" 2>/dev/null | while IFS= read -r stale_nid; do
+    [ -z "$stale_nid" ] && continue
+    "$RUNTIME" volume rm "$stale_nid" >/dev/null 2>&1 || true
+  done || true
+  "$RUNTIME" network ls -q --filter "name=^claude-docker-in-docker-net-" 2>/dev/null | while IFS= read -r stale_nid; do
+    [ -z "$stale_nid" ] && continue
+    "$RUNTIME" network rm "$stale_nid" >/dev/null 2>&1 || true
+  done || true
   for stale_prefix in claude-auth claude-gh claude-egress; do
     "$RUNTIME" ps -aq --filter "name=^$stale_prefix-proxy-" \
         --filter "status=exited" --filter "status=created" --filter "status=dead" \
@@ -1423,6 +1462,7 @@ build_workspace_mounts() {
   # Parallel arrays (not associative) so macOS system bash 3.2 works.
   # Counter-based iteration avoids ${!arr[@]} which trips set -u on empty arrays.
   SEEN_NAMES=()
+  WS_MOUNTS=()
   SEEN_PATHS=()
   SEEN_RO=()
   SEEN_SHOWN=()
@@ -1491,6 +1531,7 @@ build_workspace_mounts() {
       CONTAINER_PATHS+=("$abs")
     else
       MOUNT_ARGS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
+      WS_MOUNTS+=("-v" "$(hostpath "$abs"):/workspaces/$name$ws_suffix")
       CONTAINER_PATHS+=("/workspaces/$name")
     fi
   done
@@ -2012,6 +2053,7 @@ build_flags_env() {
   [ "$WITH_API_DIRECT" = "1" ] && DOCKER_FLAGS+=("api-direct")
   [ "$WITH_EGRESS_LOCK" = "1" ] && DOCKER_FLAGS+=("egress-lock")
   [ "$WITH_DOCKER" = "1" ]   && DOCKER_FLAGS+=("docker")
+  [ "$WITH_DOCKER_IN_DOCKER" = "1" ] && DOCKER_FLAGS+=("docker-in-docker")
   [ "$EPHEMERAL" = "1" ]     && DOCKER_FLAGS+=("ephemeral")
   while [ "$k" -lt "${#WORKSPACES[@]}" ]; do
     [ "${WORKSPACES_RO[$k]:-0}" = "1" ] && ro_count=$((ro_count + 1))
@@ -2056,6 +2098,10 @@ create_stage() {
   EGRESS_NETWORK="claude-egress-$proxy_sid"
   EGRESS_OUT_NETWORK="claude-egress-out-$proxy_sid"
   EGRESS_SIDECAR="claude-egress-proxy-$proxy_sid"
+  # --docker-in-docker resources, likewise.
+  DOCKER_IN_DOCKER_SIDECAR="claude-docker-in-docker-$proxy_sid"
+  DOCKER_IN_DOCKER_NETWORK="claude-docker-in-docker-net-$proxy_sid"
+  DOCKER_IN_DOCKER_VOLUME="claude-docker-in-docker-$proxy_sid"
   # Under the stopped-only prune's claude-egress-proxy- prefix.
   EGRESS_PROBE_CONTROL="$EGRESS_SIDECAR-probe-control"
   EGRESS_PROBE_CHECK="$EGRESS_SIDECAR-probe-check"
@@ -2090,6 +2136,9 @@ create_stage() {
   if [ "$WITH_EGRESS_ALLOWLIST" = "1" ]; then
     "$RUNTIME" rm -f "$EGRESS_PROBE_CONTROL" "$EGRESS_PROBE_CHECK" >/dev/null 2>&1 || true
   fi
+  "$RUNTIME" rm -f "$DOCKER_IN_DOCKER_SIDECAR" >/dev/null 2>&1 || true
+  "$RUNTIME" volume rm -f "$DOCKER_IN_DOCKER_VOLUME" >/dev/null 2>&1 || true
+  "$RUNTIME" network rm "$DOCKER_IN_DOCKER_NETWORK" >/dev/null 2>&1 || true
   "$RUNTIME" rm -f "$EGRESS_SIDECAR" >/dev/null 2>&1 || true
   "$RUNTIME" rm -f "$AUTH_PROXY_SIDECAR" >/dev/null 2>&1 || true
   "$RUNTIME" network rm "$AUTH_PROXY_NETWORK" >/dev/null 2>&1 || true
@@ -2782,6 +2831,7 @@ start_egress_sidecar() {
     # proxy. GitHub deliberately does NOT bypass it under --gh: no_proxy=github.com
     # would also match codeload.github.com, which has no direct route.
     egress_url="http://$egress_ip:3128"
+    EGRESS_URL="$egress_url"
     gen_egress_managed_settings "$egress_url" >"$stage/egress-managed-settings.json" || exit 1
     MOUNT_ARGS+=("--network" "$EGRESS_NETWORK"
       "-v" "$(hostpath "$stage/egress-managed-settings.json"):/etc/claude-code/managed-settings.json:ro")
@@ -2803,6 +2853,106 @@ start_egress_sidecar() {
     [ "$API_SIDECAR_ACTIVE" = "1" ] && via=" (via the auth-proxy sidecar)"
     echo "claude-docker: egress proxy '$EGRESS_SIDECAR' is active; model traffic goes only to $egress_api_host$via, connections through it are logged to $EGRESS_LOG_DIR" >&2
   fi
+}
+
+# --docker-in-docker: a Docker daemon of the session's own, in a sidecar
+# (claude-docker-in-docker-<sid>), the agent container unchanged. The daemon
+# runs rootless (the official docker:*-dind-rootless image: rootlesskit, the
+# daemon as uid 1000 inside) in a --privileged container: a daemon needs
+# mount, network and cgroup rights the agent must not have, and privileged
+# under a rootless host engine is still the host user's namespace. Its sub-UID
+# range is narrowed to one that fits inside the outer container's mapping
+# (the image's 100000+65536 does not, and rootlesskit then fails to map).
+# The socket lives in a session volume mounted at the daemon's home and at
+# /run/docker-in-docker in the agent; the daemon's storage is in that volume
+# too, so everything the agent builds, pulls or starts goes with the session.
+# Workspaces are mounted at the same /workspaces/<name> paths as in the agent
+# and TMPDIR is shared, so `docker run -v "$PWD:..."`, compose `./` volumes
+# and mktemp bind mounts resolve. Networks: the session-private
+# claude-docker-in-docker-net-<sid>, or under --egress-lock the internal
+# egress network only, with the proxy set for the daemon's own pulls and, via
+# a staged docker CLI config, as the default for every nested container; the
+# lock then covers them all, which --docker cannot do. Under a rootless host
+# engine the sidecar gets keep-id like the agent, so uid 1000 in both is the
+# host user and socket, workspaces and TMPDIR agree on ownership. Not --rm,
+# like the other sidecars, so a crashed daemon leaves its log; the EXIT trap
+# removes sidecar, volume and network.
+start_docker_in_docker() {
+  local sidecar_net sidecar_env userns i ready
+  [ "$WITH_DOCKER_IN_DOCKER" = "1" ] || return 0
+  printf 'rootless:10000:50000\n' >"$stage/docker-in-docker-subid" || exit 1
+  mkdir -p "$stage/tmp" "$stage/docker-in-docker-config" || exit 1
+  sidecar_env=()
+  if [ "$WITH_EGRESS_LOCK" = "1" ]; then
+    sidecar_net="$EGRESS_NETWORK"
+    sidecar_env=(
+      -e "http_proxy=$EGRESS_URL" -e "https_proxy=$EGRESS_URL"
+      -e "HTTP_PROXY=$EGRESS_URL" -e "HTTPS_PROXY=$EGRESS_URL"
+      -e "no_proxy=$EGRESS_NO_PROXY" -e "NO_PROXY=$EGRESS_NO_PROXY"
+    )
+    # docker's CLI puts these into every container it creates.
+    printf '{\n  "proxies": {\n    "default": {\n      "httpProxy": "%s",\n      "httpsProxy": "%s",\n      "noProxy": "%s"\n    }\n  }\n}\n' \
+      "$EGRESS_URL" "$EGRESS_URL" "$EGRESS_NO_PROXY" >"$stage/docker-in-docker-config/config.json" || exit 1
+    MOUNT_ARGS+=("-v" "$(hostpath "$stage/docker-in-docker-config"):/run/claude-docker/docker-config")
+    ENV_ARGS+=("-e" "DOCKER_CONFIG=/run/claude-docker/docker-config")
+  else
+    if ! "$RUNTIME" network create "$DOCKER_IN_DOCKER_NETWORK" >/dev/null; then
+      echo "claude-docker: failed to create network '$DOCKER_IN_DOCKER_NETWORK' for --docker-in-docker — aborting (no container was started)" >&2
+      exit 1
+    fi
+    sidecar_net="$DOCKER_IN_DOCKER_NETWORK"
+    MOUNT_ARGS+=("--network" "$DOCKER_IN_DOCKER_NETWORK")
+  fi
+  if ! "$RUNTIME" volume create "$DOCKER_IN_DOCKER_VOLUME" >/dev/null; then
+    echo "claude-docker: failed to create volume '$DOCKER_IN_DOCKER_VOLUME' for --docker-in-docker — aborting (no container was started)" >&2
+    exit 1
+  fi
+  userns=()
+  case " ${RUN_OPTS[*]+"${RUN_OPTS[*]}"} " in *" --userns=keep-id "*) userns=(--userns=keep-id) ;; esac
+  # `dockerd` first, so the image's entrypoint adds no tcp://0.0.0.0 listener
+  # of its own; the socket is the only way in. --group 0: the daemon runs in
+  # rootlesskit's namespace, where 0 is the rootless user's own gid outside
+  # (the image's docker group would land on a sub-GID), so the socket's group
+  # is one the agent user has (HOST_GID under keep-id) or can join (unknown
+  # to the agent image, so the entrypoint creates docker-host for it).
+  if ! "$RUNTIME" run -d \
+      --name "$DOCKER_IN_DOCKER_SIDECAR" \
+      --network "$sidecar_net" \
+      --privileged \
+      ${userns[@]+"${userns[@]}"} \
+      --label "claude-docker.session=$proxy_sid" \
+      -e DOCKER_TLS_CERTDIR= \
+      ${sidecar_env[@]+"${sidecar_env[@]}"} \
+      ${WS_MOUNTS[@]+"${WS_MOUNTS[@]}"} \
+      -v "$DOCKER_IN_DOCKER_VOLUME:/home/rootless" \
+      -v "$(hostpath "$stage/tmp"):/run/claude-docker/tmp" \
+      -v "$(hostpath "$stage/docker-in-docker-subid"):/etc/subuid:ro" \
+      -v "$(hostpath "$stage/docker-in-docker-subid"):/etc/subgid:ro" \
+      "$DOCKER_IN_DOCKER_IMAGE" dockerd --host=unix:///home/rootless/docker.sock --group 0 >/dev/null; then
+    echo "claude-docker: failed to start the --docker-in-docker daemon ($DOCKER_IN_DOCKER_IMAGE) — aborting (the agent container was never started). Try '$RUNTIME pull $DOCKER_IN_DOCKER_IMAGE'." >&2
+    exit 1
+  fi
+  ready=0
+  i=0
+  while [ "$i" -lt 60 ]; do
+    if "$RUNTIME" exec "$DOCKER_IN_DOCKER_SIDECAR" docker -H unix:///home/rootless/docker.sock version >/dev/null 2>&1; then
+      ready=1
+      break
+    fi
+    if [ "$("$RUNTIME" inspect --format '{{.State.Running}}' "$DOCKER_IN_DOCKER_SIDECAR" 2>/dev/null)" = "false" ]; then
+      break
+    fi
+    sleep 1
+    i=$((i + 1))
+  done
+  if [ "$ready" != "1" ]; then
+    echo "claude-docker: the --docker-in-docker daemon was not answering within 60s — aborting (the agent container was never started). Its log follows:" >&2
+    "$RUNTIME" logs "$DOCKER_IN_DOCKER_SIDECAR" 2>&1 | tail -15 | sed 's/^/  | /' >&2
+    exit 1
+  fi
+  MOUNT_ARGS+=("-v" "$DOCKER_IN_DOCKER_VOLUME:/run/docker-in-docker")
+  ENV_ARGS+=("-e" "DOCKER_HOST=unix:///run/docker-in-docker/docker.sock")
+  echo "claude-docker: --docker-in-docker: daemon '$DOCKER_IN_DOCKER_SIDECAR' is up; what the session builds, pulls or starts goes with it at exit" >&2
 }
 
 stage_host_config() {
@@ -2949,6 +3099,13 @@ EOF
 # paths handed to `docker run -v` exist on the host too. Lives in the stage
 # dir, so the EXIT trap removes it with the rest of the session's files.
 stage_docker_tmp() {
+  if [ "$WITH_DOCKER_IN_DOCKER" = "1" ]; then
+    # The sidecar mounts the same dir at the same path (start_docker_in_docker).
+    mkdir -p "$stage/tmp" || exit 1
+    MOUNT_ARGS+=("-v" "$(hostpath "$stage/tmp"):/run/claude-docker/tmp")
+    ENV_ARGS+=("-e" "TMPDIR=/run/claude-docker/tmp")
+    return 0
+  fi
   [ "$WITH_DOCKER" = "1" ] || return 0
   mkdir -p "$stage/tmp" || exit 1
   MOUNT_ARGS+=("-v" "$stage/tmp:$stage/tmp")
@@ -3394,6 +3551,7 @@ main() {
   start_auth_sidecar
   build_host_args
   start_egress_sidecar
+  start_docker_in_docker
   stage_host_config
   stage_git_overlays
   stage_docker_tmp
