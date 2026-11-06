@@ -88,29 +88,12 @@ jobs:
           formula=Formula/claude-docker.rb
           version="${TAG#v}"
 
-          # A dispatch for an older tag must not move the formula backwards.
-          current="$(sed -nE 's|^  url ".*/refs/tags/v([0-9.]+)\.tar\.gz"$|\1|p' "${formula}")"
+          # Prints the version the formula named, or nothing when the
+          # formula is already at this tag or a newer one.
+          current="$(scripts/bump-homebrew-formula.sh "${TAG}")"
           if [[ -z "${current}" ]]; then
-            echo "::error title=Formula not recognised::No release url found in ${formula}."
-            exit 1
-          fi
-          if [[ "$(printf '%s\n' "${current}" "${version}" | sort -V | tail -n1)" != "${version}" ]]; then
-            echo "The formula is at ${current}, newer than ${version}; leaving it." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          if [[ "${current}" == "${version}" ]]; then
-            echo "The formula is already at ${version}." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-
-          url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/archive/refs/tags/${TAG}.tar.gz"
-          sha="$(curl -fsSL "${url}" | sha256sum | cut -d' ' -f1)"
-          sed -i -E \
-            -e "s|^  url \".*\"$|  url \"${url}\"|" \
-            -e "s|^  sha256 \"[0-9a-f]{64}\"$|  sha256 \"${sha}\"|" \
-            "${formula}"
-          grep -qxF "  url \"${url}\"" "${formula}"
-          grep -qxF "  sha256 \"${sha}\"" "${formula}"
 
           # chore: auto-release cuts a version only for feat, fix and perf,
           # so merging the bump does not release again.
@@ -120,9 +103,15 @@ jobs:
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git checkout -B "${branch}"
           git commit -m "${title}" -m "Automated by .github/workflows/homebrew.yml after ${TAG}'s image was published." -- "${formula}"
-          git push --force \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "HEAD:refs/heads/${branch}"
+          # The token goes in a header passed through git's environment, the
+          # way actions/checkout does it, so it is in neither the remote URL
+          # nor the command line.
+          auth="$(printf 'x-access-token:%s' "${GH_TOKEN}" | base64 -w0)"
+          echo "::add-mask::${auth}"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0="http.${GITHUB_SERVER_URL}/.extraheader" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${auth}" \
+            git push --force "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
 
           body="Moves the Homebrew formula to ${TAG}, whose image \`ghcr.io/${GITHUB_REPOSITORY,,}:${TAG}\` is published. Until this merges, \`brew upgrade claude-docker\` stays on ${current}."
           number="$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')"
@@ -131,3 +120,18 @@ jobs:
           else
             gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"
           fi
+
+          # Every bump rewrites the same two lines, so a bump for an older tag
+          # still open would conflict with this one once it merges, and
+          # resolving that the wrong way would move Homebrew users back.
+          # Close them. Same-repository branches only: a fork's PR is not ours
+          # to close.
+          open="$(gh pr list --state open --limit 100 --json number,headRefName,isCrossRepository \
+            --jq '.[] | select((.isCrossRepository | not) and (.headRefName | startswith("homebrew/v"))) | "\(.number) \(.headRefName)"')"
+          while read -r other head; do
+            [[ -n "${other}" && "${head}" != "${branch}" ]] || continue
+            theirs="${head#homebrew/v}"
+            if [[ "$(printf '%s\n' "${theirs}" "${version}" | sort -V | tail -n1)" == "${version}" ]]; then
+              gh pr close "${other}" --delete-branch --comment "Superseded by the bump to ${TAG}."
+            fi
+          done <<< "${open}"
