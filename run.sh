@@ -159,7 +159,9 @@ Wrapper flags:
                       the session are removed at exit (the default) or kept;
                       kept ones are listed at exit with a command that
                       removes them.
-                      Cannot be combined with --egress-lock.
+                      With --egress-lock the lock bounds the agent process
+                      only: containers started through the host engine
+                      run outside the proxy, and the wrapper warns so.
   --docker-keep       --docker, keeping what appears on the engine (no
                       question asked). Without a terminal this is the default.
   --docker-clean      --docker, removing what appears on the engine at exit
@@ -653,10 +655,11 @@ validate_opts() {
     exit 1
   fi
   # The host engine's socket lets the session start containers on the host
-  # network, outside the egress proxy, so the lock would protect nothing.
+  # network, outside the egress proxy, so the lock covers the agent process
+  # only. Allowed, loudly: the lock still bounds the agent itself and still
+  # writes its log, and the user chose both flags.
   if [ "$WITH_DOCKER" = "1" ] && [ "$WITH_EGRESS_LOCK" = "1" ]; then
-    echo "claude-docker: --docker cannot be combined with --egress-lock — a container started through the host engine's socket bypasses the egress proxy" >&2
-    exit 1
+    echo "claude-docker: WARNING: --docker with --egress-lock: the egress lock bounds the agent process only. Anything the agent starts through the host engine's socket (docker run, compose, build, and the engine's own image pulls) runs on the host's network, outside the proxy and its allowlist, so the session can reach any host that way. Use it only when you accept that breakout; the host engine's audit is yours, not this wrapper's." >&2
   fi
   if [ "$DOCKER_KEEP" = "1" ] && [ "$DOCKER_CLEAN" = "1" ]; then
     echo "claude-docker: --docker-keep and --docker-clean contradict each other; pass one" >&2

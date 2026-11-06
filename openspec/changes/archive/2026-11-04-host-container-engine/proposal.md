@@ -15,7 +15,7 @@ Handing the session the host engine's API socket is the standard answer (Docker-
 - **History and memory carry over.** Claude Code keys its project by directory; the entrypoint links the host-path key to the `/workspaces/<name>` one, so `--resume` and memory are shared between a `--docker` session and a regular one.
 - **One user mapping for every rootless-podman session.** `--userns=keep-id` is added to regular sessions as well as `--docker` ones, because the shared volumes are chowned to the session user at each start and two mappings flip ownership from under a running session.
 - **What appears on the engine during the session is kept or removed, as chosen at start.** `--docker` asks (default remove), `--docker-keep` / `--docker-clean` answer on the command line, no terminal means keep. Both act on a before/after diff of IDs, which also holds anything started on the engine by hand meanwhile: keeping lists it by name with a removal command for the host shell; removing never touches another claude-docker session's `claude-*` resources, and nothing at all while another `--docker` session is still running. Under rootless podman the stage directory is removed through `podman unshare`, since nested containers leave files owned by subordinate UIDs in the shared `TMPDIR`.
-- Not supported from Git Bash (Docker Desktop on Windows exposes a named pipe). Refused with `--egress-lock`.
+- Not supported from Git Bash (Docker Desktop on Windows exposes a named pipe). With `--egress-lock` it warns about the breakout and continues.
 
 ## Capabilities
 
@@ -38,7 +38,7 @@ Handing the session the host engine's API socket is the standard answer (Docker-
 
 ## Impact
 
-- `run.sh`: flag parsing and help, the `--egress-lock` conflict, `check_mirror_path` and the host-path mounts, `build_docker_socket` (socket discovery, keep-id), `stage_docker_tmp`, `docker_snapshot` / `docker_cleanup` and the EXIT trap's `podman unshare` fallback.
+- `run.sh`: flag parsing and help, the `--egress-lock` warning, `check_mirror_path` and the host-path mounts, `build_docker_socket` (socket discovery, keep-id), `stage_docker_tmp`, `docker_snapshot` / `docker_cleanup` and the EXIT trap's `podman unshare` fallback.
 - `entrypoint.sh`: `alias_project`, `join_socket_group`, `trust_workspaces` accepts host paths under `--docker`.
 - `Dockerfile`: `docker-ce-cli`, `docker-compose-plugin`, `docker-buildx-plugin` from Docker's signed apt repository, floating like `gh`.
 - Docs: `docs/usage.md` (new section), `docs/security.md` (threat-model bullet), `docs/auth.md` (flag table), `docs/vision-and-scope.md` (options row), help text.

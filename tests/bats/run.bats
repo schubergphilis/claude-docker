@@ -494,11 +494,15 @@ http_access allow all" ]
   [ -z "$DOCKER_EXIT" ]
 }
 
-@test "validate_opts: --docker with --egress-lock is rejected" {
-  WITH_DOCKER=1 WITH_EGRESS_LOCK=1 WITH_API=1 ANTHROPIC_API_KEY=k
+@test "validate_opts: --docker with --egress-lock warns about the breakout and continues" {
+  WITH_DOCKER=1 WITH_EGRESS_LOCK=1 WITH_API=1 ANTHROPIC_API_KEY=k ANTHROPIC_BASE_URL=https://gw.example
   run validate_opts
-  [ "$status" -eq 1 ]
-  [[ "$output" == *"--docker cannot be combined with --egress-lock"* ]]
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: --docker with --egress-lock: the egress lock bounds the agent process only"* ]]
+  [[ "$output" == *"outside the proxy and its allowlist"* ]]
+  WITH_EGRESS_LOCK=0
+  run validate_opts
+  [ "$status" -eq 0 ] && [[ "$output" != *WARNING* ]]
 }
 
 # --- select_runtime ---

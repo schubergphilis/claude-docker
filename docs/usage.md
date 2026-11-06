@@ -143,7 +143,7 @@ Git's ownership check never refuses a workspace you own. `claude-docker` checks 
 
 ## Host container engine (`--docker`)
 
-`--docker` lets the agent use your host's Docker or Podman, for example to build images, run `docker compose` stacks, or run tests that use Testcontainers. The image ships the Docker CLI with the compose and buildx plugins. No daemon runs in the container: the wrapper bind-mounts the host engine's API socket at `/run/docker.sock` and sets `DOCKER_HOST=unix:///run/docker.sock`. Read the [threat model](security.md#threat-model) first. This flag gives the session the same access to the host as your user has, so it cannot be combined with `--egress-lock`.
+`--docker` lets the agent use your host's Docker or Podman, for example to build images, run `docker compose` stacks, or run tests that use Testcontainers. The image ships the Docker CLI with the compose and buildx plugins. No daemon runs in the container: the wrapper bind-mounts the host engine's API socket at `/run/docker.sock` and sets `DOCKER_HOST=unix:///run/docker.sock`. Read the [threat model](security.md#threat-model) first. This flag gives the session the same access to the host as your user has. Combined with `--egress-lock` or `--egress-allowlist` the wrapper warns and continues: the lock bounds the agent process, but anything the agent starts through the host engine's socket (`docker run`, compose, builds, and the engine's own image pulls) runs on the host's network, outside the proxy and its allowlist. That is a breakout of the egress policy by design; the host engine's own logs are the only record of it.
 
 The wrapper uses the first socket it finds:
 

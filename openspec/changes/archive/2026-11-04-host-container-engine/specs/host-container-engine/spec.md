@@ -178,12 +178,11 @@ At exit, when the stage directory cannot be removed as the host user and the run
 - **WHEN** the session exits
 - **THEN** the stage directory under `~/.cache/claude-docker/` is gone and no `Permission denied` lines are printed
 
-### Requirement: The host engine does not combine with the egress lock
+### Requirement: The host engine with the egress lock is a warned breakout
 
-`run.sh` SHALL exit 1 before starting any container when `--docker` is given together with `--egress-lock`, since a container started through the host engine's socket is outside the egress proxy.
+When `--docker` is given together with `--egress-lock`, `run.sh` SHALL print a warning before starting any container and continue: the lock bounds the agent process, while a container started through the host engine's socket, and the engine's own image pulls, run on the host's network outside the proxy and its allowlist. The warning SHALL say so and that the host engine's audit is not the wrapper's.
 
-#### Scenario: refused together
+#### Scenario: warned together
 
 - **WHEN** the user runs `claude-docker --docker --api --egress-lock ~/repo`
-- **THEN** `run.sh` exits 1 saying the two cannot be combined
-- **AND** no container is started
+- **THEN** `run.sh` prints a WARNING naming the breakout and starts the session with the lock in place for the agent process
