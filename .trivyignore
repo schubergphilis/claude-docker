@@ -32,13 +32,14 @@
 # Dockerfile rebuilds the layer and clears it; don't add an entry here for it.
 
 # undici CVE-2026-109869 (DoS on an unhandled stream error); the fix needs
-# 6.29.1, released upstream 2026-10-15. npm 12.2.1 (pins/npm.env), still the
-# latest npm on 2026-11-02, vendors 6.29.0. pnpm 12.15.0 (pins/pnpm.env)
-# carries 6.29.1, so npm's copy is the only one left.
-# Expiry: npm's longest gap between releases since July is 28 days (08-26 to
-# 09-22), so the next one is due by ~11-12; the 7-day soak ends ~11-19 and the
-# Monday refresh picks it up 11-23, plus two days to merge. At expiry, check
-# the undici npm bundles and drop this if it is fixed.
+# 6.29.1, released upstream 2026-10-15. npm 12.2.1 (pins/npm.env) vendors
+# 6.29.0; pnpm 12.17.0 (pins/pnpm.env) carries 6.29.1, so npm's copy is the
+# only one left. npm 12.2.2 (published 2026-11-04) bundles 6.29.1 — verified in
+# the published tarball — so the fix is out; 12.2.2 sits inside the 7-day soak
+# until ~11-11 (which is why the 11-09 refresh held it) and the Monday 11-16
+# refresh picks it up. Drop these entries once pins/npm.env >= 12.2.2 lands;
+# the 11-25 expiry bounds that wait. If the pin has not moved by then,
+# re-check the undici bundles before extending.
 CVE-2026-109869 exp:2026-11-25
 # undici CVE-2026-109383 (certificate validation bypass via TLS options dropped
 # in Agent), flagged from 2026-10-28. Fixed in 6.29.1, and it hits the
