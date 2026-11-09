@@ -32,7 +32,8 @@ runs move together instead of being pinned by hand.
   `claude-code:local`.
 - **Releases update the formula.** After a stable `vX.Y.Z` tag's image is
   published, `docker.yml` calls a new workflow that opens a `chore` pull
-  request here, moving the formula to that tag. Merging it cuts no release.
+  request here, moving the formula to that tag. Merging it publishes no
+  release, and it closes open bumps for older tags.
   Release candidates and tags with no published image never reach the formula.
 - **Docs.**
   - The README Quickstart offers Homebrew first; building from a clone stays a

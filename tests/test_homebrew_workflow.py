@@ -78,8 +78,14 @@ class HomebrewWorkflowTests(unittest.TestCase):
     def test_the_bump_is_a_pull_request_that_does_not_release(self):
         self.assertIn("gh pr create --base main", self.homebrew)
         self.assertNotRegex(self.homebrew, r"HEAD:refs/heads/main\b", "never push to main")
-        # auto-release cuts a version for feat, fix and perf; a bump must not.
+        # release.yml only drafts; a draft holding just the bump is not published.
         self.assertIn('title="chore(homebrew): claude-docker ${version}"', self.homebrew)
+
+    def test_the_bump_reuses_only_its_own_pull_request(self):
+        # --head matches a fork's branch of the same name too.
+        lookup = next(l for l in self.homebrew.splitlines() if 'number="$(gh pr list' in l)
+        self.assertIn("--base main", lookup)
+        self.assertIn("select(.isCrossRepository | not)", lookup)
 
     def test_the_bump_runs_the_tested_script(self):
         self.assertIn('scripts/bump-homebrew-formula.sh "${TAG}"', self.homebrew)

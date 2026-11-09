@@ -116,8 +116,15 @@ as a `homebrew` job that `needs` the publishing job, on tag refs only.
 - **The bump itself.** It checks out `main` and rewrites `url` and `sha256`
   to the tag's archive. It pushes `homebrew/<tag>` and opens a
   `chore(homebrew): claude-docker <version>` pull request with `GITHUB_TOKEN`,
-  as `pins-updater.yml` does. `chore` cuts no release, so merging the bump
-  does not loop.
+  as `pins-updater.yml` does. Merging it adds a patch to `release.yml`'s
+  draft, as any merge does, but publishes nothing; releases stay manual. A
+  maintainer does not publish a draft that holds only the bump, so it does
+  not loop. Leaving formula-only merges out of the draft would change the
+  release tooling for one case, and the manual publish already covers it.
+- **Superseded bumps are closed.** Every bump rewrites the same two lines, so
+  after opening its own pull request the bump closes any open same-repository
+  `homebrew/v*` pull request for an older tag and deletes its branch. A
+  fork's pull request is never reused or closed.
 - **Never backwards.** A tag older than the one the formula names is a no-op,
   so a dispatch for an old tag cannot downgrade users.
 - **Manual fallback.** It is also `workflow_dispatch`able with a tag input,

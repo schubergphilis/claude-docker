@@ -95,8 +95,9 @@ jobs:
             exit 0
           fi
 
-          # chore: auto-release cuts a version only for feat, fix and perf,
-          # so merging the bump does not release again.
+          # chore: merging the bump adds a patch to release.yml's draft, as
+          # any non-feat merge does, but publishes nothing. A maintainer
+          # publishes the draft only when there is more in it than the bump.
           title="chore(homebrew): claude-docker ${version}"
           branch="homebrew/${TAG}"
           git config user.name 'github-actions[bot]'
@@ -114,7 +115,9 @@ jobs:
             git push --force "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}.git" "HEAD:refs/heads/${branch}"
 
           body="Moves the Homebrew formula to ${TAG}, whose image \`ghcr.io/${GITHUB_REPOSITORY,,}:${TAG}\` is published. Until this merges, \`brew upgrade claude-docker\` stays on ${current}."
-          number="$(gh pr list --head "${branch}" --state open --json number --jq '.[0].number // empty')"
+          # --head matches the branch name only, so a fork's PR from a
+          # homebrew/<tag> branch would match too. Reuse ours only.
+          number="$(gh pr list --base main --head "${branch}" --state open --json number,isCrossRepository --jq 'map(select(.isCrossRepository | not))[0].number // empty')"
           if [[ -n "${number}" ]]; then
             gh pr edit "${number}" --title "${title}" --body "${body}"
           else
