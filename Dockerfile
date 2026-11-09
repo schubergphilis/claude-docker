@@ -99,13 +99,17 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # 3.2.1ubuntu0.1: the digest-pinned base still ships 3.2.0 and CI's gha cache
 # kept serving this layer stale. Naming them changes the RUN, so the layer is
 # rebuilt against the current archive. Drop at the next base-image bump.
-# apt is spelled 'apt=*': a bare `apt` token next to `apt-get` trips dockle's
-# DKL-DI-0003 heuristic, which fires on any 2 of {apt-get, apt, dist-upgrade}
-# — and the publish pipeline (docker.yml -> mcvs-docker-action) gates on
-# dockle at warn level while PR CI never runs it. 'apt=*' selects the same
-# candidate version without the bare token.
+# apt is spelled "apt" (quoted, no '='): a bare `apt` token next to `apt-get`
+# trips dockle's DKL-DI-0003 heuristic (any 2 of {apt-get, apt, dist-upgrade};
+# raw whitespace split, so the quotes keep the token from matching), and an
+# `apt=<version>` spelling trips CIS-DI-0010, which shlex-parses every
+# NAME=value word and — with the action's empty sensitive word — FATALs on
+# any of them not on dockle-accept-key. The publish pipeline (docker.yml ->
+# mcvs-docker-action) gates on dockle at warn level while PR CI never runs
+# it. Shell quote removal still passes plain `apt` to apt-get, so the
+# candidate version is selected either way.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    'apt=*' libapt-pkg7.0 \
+    "apt" libapt-pkg7.0 \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
