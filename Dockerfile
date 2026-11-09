@@ -99,15 +99,11 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # 3.2.1ubuntu0.1: the digest-pinned base still ships 3.2.0 and CI's gha cache
 # kept serving this layer stale. Naming them changes the RUN, so the layer is
 # rebuilt against the current archive. Drop at the next base-image bump.
-# apt is spelled "apt" (quoted, no '='): a bare `apt` token next to `apt-get`
-# trips dockle's DKL-DI-0003 heuristic (any 2 of {apt-get, apt, dist-upgrade};
-# raw whitespace split, so the quotes keep the token from matching), and an
-# `apt=<version>` spelling trips CIS-DI-0010, which shlex-parses every
-# NAME=value word and — with the action's empty sensitive word — FATALs on
-# any of them not on dockle-accept-key. The publish pipeline (docker.yml ->
-# mcvs-docker-action) gates on dockle at warn level while PR CI never runs
-# it. Shell quote removal still passes plain `apt` to apt-get, so the
-# candidate version is selected either way.
+# apt is spelled "apt" (quoted, no '='): bare `apt` next to `apt-get` trips
+# dockle DKL-DI-0003 (space-split tokens, quotes kept, any 2 of {apt-get, apt,
+# dist-upgrade}); `apt=<ver>` trips CIS-DI-0010 (every NAME=value word is
+# FATAL unless on dockle-accept-key, see docker.yml). Only the post-merge
+# publish run executes dockle. The shell strips the quotes, so apt-get sees apt.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     "apt" libapt-pkg7.0 \
     ca-certificates curl gnupg \
