@@ -47,3 +47,20 @@ CVE-2026-109383 exp:2026-11-25
 # undici CVE-2026-87018 (DoS via TLS renegotiation with a mismatched
 # certificate). Same fix, copies, expiry and reason as CVE-2026-109383.
 CVE-2026-87018 exp:2026-11-25
+# golang.org/x/net CVE-2026-78661 (DoS via crafted HTML input in x/net/html),
+# fixed in x/net 0.62.0. In the image it is carried only by the prebuilt gh
+# binary at /usr/bin/gh — the scan's sole target for this ID — so per-ID
+# suppression hides nothing fixable elsewhere. gh floats from the
+# cli.github.com apt repo (see the Dockerfile) rather than a pins/ entry, so
+# the 7-day pin soak does not gate it; but the latest release, v2.103.3
+# (2026-10-26), still vendors x/net 0.60.0 and cli/cli's trunk is at 0.61.0,
+# so no gh release carries the fix yet and a bump cannot clear this today.
+# grype already accepts the finding via .grype.yaml's /usr/bin/** go-module
+# rule. Expiry: gh ships several releases a week (v2.103.0–v2.103.3 within
+# five days of October), so one bundling >= 0.62.0 is due within days and the
+# 11-16 and 11-23 Monday scans give two weekly windows to land it. The scan
+# builds with cache-from gha, so the apt layer can keep serving the old gh
+# deb after a fixed release exists: at expiry, check the latest gh release's
+# go.mod for x/net >= 0.62.0 and, if fixed, touch the gh RUN in the Dockerfile
+# to rebuild that layer, then drop this entry.
+CVE-2026-78661 exp:2026-11-25
