@@ -95,7 +95,12 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # libbrotli1 (curl's brotli) is named for CVE-2026-111497, fixed in
 # 1.2.0-3ubuntu0.1. Same stale-cache pattern: a fresh build gets the fix, CI's
 # gha cache served 1.2.0-3build1. Drop at the next base-image bump.
+# apt and libapt-pkg7.0 are named for CVE-2026-109518, fixed in
+# 3.2.1ubuntu0.1: the digest-pinned base still ships 3.2.0 and CI's gha cache
+# kept serving this layer stale. Naming them changes the RUN, so the layer is
+# rebuilt against the current archive. Drop at the next base-image bump.
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    apt libapt-pkg7.0 \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
