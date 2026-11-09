@@ -141,6 +141,7 @@ setup_workspace() {
 #   - the named volumes, so a cell never touches the user's real
 #     claude-code-root / claude-code-home and every cell starts cold
 #   - `-it`, since CI has no TTY
+#   - for a uid=0 cell, the `--cap-add`s, as run.sh leaves them out for root
 # Only the agent run (the one carrying $IMAGE) is rewritten; sidecar runs such
 # as --gh's proxy pass through untouched. It fails closed if the agent run no
 # longer carries those args, so a rename in run.sh cannot silently point a cell
@@ -157,9 +158,14 @@ for a in "$@"; do [ "$a" = "$SMOKE_IMAGE" ] && agent=1; done
 args=()
 ids=0
 vols=0
+skip=0
 for a in "$@"; do
+  # run.sh adds no capabilities for a root host user, but it decides that from
+  # the runner's own UID; a uid=0 cell drops them here to match.
+  if [ "$skip" = 1 ]; then skip=0; continue; fi
   case "$a" in
     -it) continue ;;
+    --cap-add) [ "$HOST_UID_ARG" = 0 ] && { skip=1; continue; } ;;
     HOST_UID=*) a="HOST_UID=$HOST_UID_ARG"; ids=$((ids + 1)) ;;
     HOST_GID=*) a="HOST_GID=$HOST_GID_ARG"; ids=$((ids + 1)) ;;
     claude-code-root:/root) a="$VOL_NAME-root:/root"; vols=$((vols + 1)) ;;

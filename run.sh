@@ -2977,12 +2977,21 @@ run_container() {
   # cleared from the effective/permitted/ambient sets when runuser
   # transitions UID 0 → host UID; the bounding set keeps them but is inert
   # under no-new-privileges, so claude itself runs with no usable caps.
+  # A host user of root (HOST_UID=0) gets none of them: the entrypoint then
+  # execs claude as root without a drop, so an added cap would stay effective
+  # for the whole session (DAC_READ_SEARCH is what open_by_handle_at needs to
+  # read host files outside the workspace), and root has nothing to chown or
+  # switch to.
   # --init wraps the process tree under tini so claude's bash/MCP children
   # get reaped — runuser would otherwise be PID 1 and wouldn't reap zombies.
+  local uid="${HOST_UID:-$(id -u)}" caps=(--cap-drop ALL)
+  if [ "$uid" != 0 ]; then
+    caps+=(--cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH)
+  fi
   "$RUNTIME" run --rm -it --init \
     --security-opt no-new-privileges \
-    --cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH \
-    -e "HOST_UID=${HOST_UID:-$(id -u)}" -e "HOST_GID=${HOST_GID:-$(id -g)}" \
+    "${caps[@]}" \
+    -e "HOST_UID=${uid}" -e "HOST_GID=${HOST_GID:-$(id -g)}" \
     "${MOUNT_ARGS[@]}" \
     "${ENV_ARGS[@]}" \
     -w "$CWD" \

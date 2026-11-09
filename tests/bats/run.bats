@@ -2353,6 +2353,19 @@ YML
   grep -q "^docker run --rm -it --init .* -v a:b -e TERM -w /workspaces/repo claude-code:local claude$" "$CALLS"
 }
 
+@test "run_container: a non-root host user gets the four setup caps" {
+  MOUNT_ARGS=() ENV_ARGS=() CWD=/workspaces/repo CMD=(claude) HOST_UID=1000 HOST_GID=1000
+  run_container
+  grep -q -- "--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH -e HOST_UID=1000 " "$CALLS"
+}
+
+@test "run_container: a root host user gets no capabilities (#210)" {
+  MOUNT_ARGS=() ENV_ARGS=() CWD=/workspaces/repo CMD=(claude) HOST_UID=0 HOST_GID=0
+  run_container
+  grep -q -- "--security-opt no-new-privileges --cap-drop ALL -e HOST_UID=0 " "$CALLS"
+  run ! grep -q -- "--cap-add" "$CALLS"
+}
+
 @test "main: end to end with stubs" {
   run_script --ephemeral --aws "$WS" -- --resume
   [ "$status" -eq 0 ]

@@ -152,6 +152,20 @@ shim() {
   [[ "$output" != *claude-code-root* ]]
 }
 
+@test "shim drops the setup caps for a uid=0 cell, as run.sh does for root" {
+  setup_cell --uid=0 --gid=0 --ephemeral=1 --image=img:1
+  run shim run --cap-drop ALL --cap-add CHOWN --cap-add SETUID -e HOST_UID=1000 -e HOST_GID=1000 img:1 claude
+  [ "$status" -eq 0 ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/docker.argv")" = "$(printf '%s\n' run --cap-drop ALL -e HOST_UID=0 -e HOST_GID=0 img:1 claude)" ]
+}
+
+@test "shim keeps the setup caps for a non-root cell" {
+  setup_cell --uid=501 --gid=20 --ephemeral=1 --image=img:1
+  run shim run --cap-drop ALL --cap-add CHOWN -e HOST_UID=1000 -e HOST_GID=1000 img:1 claude
+  [ "$status" -eq 0 ]
+  [ "$(cat "${BATS_TEST_TMPDIR}/docker.argv")" = "$(printf '%s\n' run --cap-drop ALL --cap-add CHOWN -e HOST_UID=501 -e HOST_GID=20 img:1 claude)" ]
+}
+
 @test "shim passes a sidecar run through untouched" {
   setup_cell --image=img:1
   shim run -it -e HOST_UID=1000 caddy:2
