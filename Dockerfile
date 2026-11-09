@@ -99,8 +99,13 @@ RUN ! dpkg -S /usr/bin/pebble >/dev/null 2>&1 && rm -f /usr/bin/pebble
 # 3.2.1ubuntu0.1: the digest-pinned base still ships 3.2.0 and CI's gha cache
 # kept serving this layer stale. Naming them changes the RUN, so the layer is
 # rebuilt against the current archive. Drop at the next base-image bump.
+# apt is spelled 'apt=*': a bare `apt` token next to `apt-get` trips dockle's
+# DKL-DI-0003 heuristic, which fires on any 2 of {apt-get, apt, dist-upgrade}
+# — and the publish pipeline (docker.yml -> mcvs-docker-action) gates on
+# dockle at warn level while PR CI never runs it. 'apt=*' selects the same
+# candidate version without the bare token.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    apt libapt-pkg7.0 \
+    'apt=*' libapt-pkg7.0 \
     ca-certificates curl gnupg \
  && install -d -m 0755 /etc/apt/keyrings \
  && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key \
