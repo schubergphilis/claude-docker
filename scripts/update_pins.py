@@ -529,7 +529,12 @@ def write_fragment(stage: Path, name: str, version: str):
 
 # The Dockerfile installs az with --require-hashes from this lock, so every
 # transitive dep is pinned too. --universal keeps markers for both arches.
-AZ_LOCK_INPUT = ["python-dateutil", "msrest", "azure-common"]
+# six is listed explicitly: the azure-devops extension imports it without
+# declaring it, and it only reached the lock transitively via
+# python-dateutil<3 — a dateutil major bump prunes it and the extension then
+# fails to load (the Dockerfile's `az devops -h` check catches that).
+# python-dateutil stays <3, the line the image has been running on.
+AZ_LOCK_INPUT = ["python-dateutil<3", "msrest", "azure-common", "six"]
 
 
 def write_az_lock(out: Path, version: str):
