@@ -87,6 +87,26 @@ jobs:
           set -euo pipefail
           formula=Formula/claude-docker.rb
           version="${TAG#v}"
+          # True when version $1 is newer than version $2.
+          newer() { [[ "$1" != "$2" && "$(printf '%s\n' "$1" "$2" | sort -V | tail -n1)" == "$1" ]]; }
+
+          # Every bump rewrites the same two lines, so only one bump pull
+          # request should be open at a time. Same-repository branches only:
+          # a fork's PR is not ours to close, nor one to give way to.
+          open="$(gh pr list --base main --state open --limit 100 --json number,headRefName,isCrossRepository \
+            --jq '.[] | select((.isCrossRepository | not) and (.headRefName | test("^homebrew/v[0-9]+[.][0-9]+[.][0-9]+$"))) | "\(.number) \(.headRefName)"')"
+
+          # A bump for an older tag can run again after a newer one opened its
+          # pull request: started by hand, or a publish that finished late.
+          # main still names the release before both, so the formula alone
+          # would not stop it; the newer bump still open does.
+          while read -r other head; do
+            [[ -n "${other}" ]] || continue
+            if newer "${head#homebrew/v}" "${version}"; then
+              echo "#${other} already moves the formula to ${head#homebrew/}, newer than ${TAG}; leaving it." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+          done <<< "${open}"
 
           # Prints the version the formula named, or nothing when the
           # formula is already at this tag or a newer one.
@@ -124,17 +144,12 @@ jobs:
             gh pr create --base main --head "${branch}" --title "${title}" --body "${body}"
           fi
 
-          # Every bump rewrites the same two lines, so a bump for an older tag
-          # still open would conflict with this one once it merges, and
-          # resolving that the wrong way would move Homebrew users back.
-          # Close them. Same-repository branches only: a fork's PR is not ours
-          # to close.
-          open="$(gh pr list --state open --limit 100 --json number,headRefName,isCrossRepository \
-            --jq '.[] | select((.isCrossRepository | not) and (.headRefName | startswith("homebrew/v"))) | "\(.number) \(.headRefName)"')"
+          # A bump for an older tag still open would conflict with this one
+          # once it merges, and resolving that the wrong way would move
+          # Homebrew users back. Close them.
           while read -r other head; do
             [[ -n "${other}" && "${head}" != "${branch}" ]] || continue
-            theirs="${head#homebrew/v}"
-            if [[ "$(printf '%s\n' "${theirs}" "${version}" | sort -V | tail -n1)" == "${version}" ]]; then
+            if newer "${version}" "${head#homebrew/v}"; then
               gh pr close "${other}" --delete-branch --comment "Superseded by the bump to ${TAG}."
             fi
           done <<< "${open}"
