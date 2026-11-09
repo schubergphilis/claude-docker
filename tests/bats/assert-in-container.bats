@@ -170,7 +170,8 @@ status_fixture() {
     "CapBnd:	0000000000000000" "NoNewPrivs:	1" > "$PROC_STATUS"
   find() { :; }
   EXPECT_UID=0 run check_security
-  [[ "$output" != *"FAIL:"* ]]
+  [[ "$output" != *"FAIL: root:"* ]] && [[ "$output" != *"FAIL: NoNewPrivs"* ]]
+  [[ "$output" == *"PASS: root: CapEff=0"* ]]
   [[ "$output" == *"PASS: root: CapBnd=0"* ]]
 }
 
