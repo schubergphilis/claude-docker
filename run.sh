@@ -23,7 +23,7 @@ PROXY_IMAGE="${CLAUDE_DOCKER_PROXY_IMAGE:-caddy:2.11.4@sha256:844f60b64e4724a5aa
 # digest-pinned and, like PROXY_IMAGE, bumped by hand: squid's config
 # semantics are the policy. SQUID_MIN is a floor, not a pin, because Alpine
 # keeps only the newest build of a package in a branch.
-EGRESS_PROXY_BASE="alpine:3.24.2@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6"
+EGRESS_PROXY_BASE="alpine:3.24.4@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf"
 EGRESS_PROXY_SQUID_MIN="7.6"
 
 # Keep this in sync with the flag-parsing case statement below — adding or
