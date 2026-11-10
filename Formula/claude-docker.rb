@@ -8,8 +8,8 @@
 class ClaudeDocker < Formula
   desc "Hardened Docker wrapper for Claude Code"
   homepage "https://github.com/schubergphilis/claude-docker"
-  url "https://github.com/schubergphilis/claude-docker/archive/refs/tags/v1.1.0.tar.gz"
-  sha256 "d86a9441cd1e486e0f5faeb6db971eaac89f5b3b139ffef75c99dd3d34767be7"
+  url "https://github.com/schubergphilis/claude-docker/archive/refs/tags/v1.4.0.tar.gz"
+  sha256 "23dfd0609048f425715ac5be556d5002285a362393189ccc13d14c06666fb8ee"
   license "Apache-2.0"
 
   livecheck do
