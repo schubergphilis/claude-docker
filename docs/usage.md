@@ -37,11 +37,12 @@ Credential flags (`--aws`, `--gh`, …) are covered in [Credential opt-in](auth.
 
 ### Session flags
 
-| Flag          | Effect                                                                                                                      |
-| ------------- | --------------------------------------------------------------------------------------------------------------------------- |
-| `--ephemeral` | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs. |
-| `--ro`        | Mount every workspace read-only. Prevents the agent from modifying your code.                                               |
-| `--ro=PATH`   | Add PATH as a workspace mounted read-only; the others stay writable. Repeatable. Not isolation for untrusted repos.         |
+| Flag           | Effect                                                                                                                                               |
+| -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--ephemeral`  | Skip the persistent named volumes. No in-container auth state, shell history, or conversation history persists across runs.                          |
+| `--ro`         | Mount every workspace read-only. Prevents the agent from modifying your code.                                                                        |
+| `--ro=PATH`    | Add PATH as a workspace mounted read-only; the others stay writable. Repeatable. Not isolation for untrusted repos.                                  |
+| `--host-paths` | Tell claude which host directory each workspace is mounted from, so it gives host paths when it points you to a file. See [Host paths](#host-paths). |
 
 `--ro` does **not** block credential flags or restrict network egress (only `--egress-lock` and `--egress-allowlist` do, see [API egress lock](auth.md#api-egress-lock) and [Egress allowlist](auth.md#egress-allowlist)) — for an isolated review session, combine `--ephemeral` and `--ro` and pass no credential flags:
 
@@ -60,6 +61,15 @@ claude-docker --ro=. --ro=../shared       # both read-only; $PWD is the working 
 A `--ro=PATH` directory inside a writable workspace (`~/repo --ro=~/repo/vendor`), also through a symlink, is still writable through the outer mount; `claude-docker` warns when it sees one. Passing one directory both read-write and read-only (`~/repo --ro=~/repo`, or through a symlink) is refused. So is passing it twice through a symlink in the same mode: workspaces are mounted by their real path, so both would be the same mount. These checks compare paths exactly, so on a case-insensitive filesystem (macOS default) `~/repo --ro=~/Repo/vendor` slips past them: type paths with their real case.
 
 `--ro=PATH` protects that directory, not the rest of the session: the agent can still act on what it reads there by writing to the writable workspaces, including git hooks or an `.envrc` the host later runs. For an untrusted repo, use `--ro` so that every workspace is read-only, or give it a session of its own (`--ephemeral --ro`).
+
+### Host paths
+
+In the container every workspace is `/workspaces/<name>`, so by default the agent names files by a path that doesn't exist on your machine. With `--host-paths` (or `CLAUDE_DOCKER_HOST_PATHS=1` in your shell profile) `claude-docker` adds a few lines to claude's system prompt that map each `/workspaces/<name>` to the host path you gave, in Windows form under Git Bash. They tell the agent to keep working through `/workspaces` and to give you the host path when it points you to a file.
+
+- The paths are labels only: nothing more is mounted, and the agent can't reach a host path from inside. They do go to the model provider with every request, and into the session transcript: your username, your directory layout, and directory names such as client names. That is why the flag is opt-in.
+- A host path containing a control character (a newline, a tab) is left out of the map, with a warning.
+- claude uses only the last `--append-system-prompt` it is given. So your own `--append-system-prompt` after `--` is not passed as a second flag: its text follows the map in the one flag `claude-docker` passes. If you pass it more than once, only the last one counts, as without the wrapper. `--append-system-prompt-file` is passed through unchanged; claude combines it with the map.
+- claude records the system prompt when a conversation starts and reuses it on resume until the conversation is compacted. A resumed session keeps the map it started with, even if you resume it with other workspaces or without `--host-paths`.
 
 For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](security.md#threat-model) for what it does and doesn't protect.
 

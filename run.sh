@@ -148,6 +148,11 @@ Wrapper flags:
                       panes). Equivalent to CLAUDE_DOCKER_TMUX=cc.
   --tmux              Wrap claude in plain tmux (works in any terminal).
                       Equivalent to CLAUDE_DOCKER_TMUX=1.
+  --host-paths        Tell claude which host directory each workspace is
+                      mounted from, so it names files by their host path
+                      when it points you to one. Those paths (your username,
+                      directory names) go to the model with every request.
+                      Env: CLAUDE_DOCKER_HOST_PATHS=1.
   --claude-dir=PATH   Use PATH as the host Claude config dir instead of
                       ~/.claude. Affects agents, commands, skills, themes,
                       CLAUDE.md, and statusline. Env: CLAUDE_DOCKER_CONFIG_DIR.
@@ -167,6 +172,7 @@ Environment:
                            reuse this wrapper.
   CLAUDE_DOCKER_CONFIG_DIR Override the host Claude config dir (same as
                            --claude-dir=PATH).
+  CLAUDE_DOCKER_HOST_PATHS 1 → same as --host-paths.
   CLAUDE_DOCKER_RUNTIME    Container engine to invoke: docker or podman. Unset
                            (default) auto-detects, preferring docker then
                            podman. This is the canonical way to force an engine
@@ -225,6 +231,7 @@ WORKSPACES_RO=()
 CLAUDE_FLAGS=()
 EPHEMERAL=0
 RO_WORKSPACES=0
+WITH_HOST_PATHS=0
 WITH_AWS=0
 WITH_GH=0
 WITH_GH_DIRECT=0
@@ -329,6 +336,7 @@ parse_args() {
         # shellcheck disable=SC2088  # literal "~/" is the intended case pattern
         case "$path" in "~/"*) path="$HOME/${path#\~/}" ;; esac
         WORKSPACES+=("$path"); WORKSPACES_RO+=(1) ;;
+      --host-paths)   WITH_HOST_PATHS=1 ;;
       --aws)          WITH_AWS=1 ;;
       --gh)           WITH_GH=1 ;;
       --gh-direct)    WITH_GH_DIRECT=1 ;;
@@ -2894,6 +2902,66 @@ stage_glab_config() {
   fi
 }
 
+# --host-paths: tell claude which host directory each /workspaces/<name> is
+# mounted from, so it can name files by the path the user sees. Labels only:
+# nothing more is mounted, and the host paths don't exist in the container.
+#
+# claude keeps only the last --append-system-prompt it is given (likewise
+# --append-system-prompt-file; one of each is combined). So the map can't be
+# a flag of its own next to the user's: every --append-system-prompt in
+# CLAUDE_FLAGS is taken out, and the last one's text (the one claude would
+# have used) follows the map in a single flag. --append-system-prompt-file
+# stays the user's.
+build_host_path_prompt() {
+  local n i shown a map="" user_text="" have_user=0 flags=()
+  [ "$WITH_HOST_PATHS" = "1" ] || [ "${CLAUDE_DOCKER_HOST_PATHS:-0}" = "1" ] || return 0
+  n=${#CONTAINER_PATHS[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    shown=${SEEN_SHOWN[$i]}
+    if [ "${IS_MSYS:-0}" = "1" ] && command -v cygpath >/dev/null 2>&1; then
+      shown=$(cygpath -w "$shown") || shown=${SEEN_SHOWN[$i]}
+    fi
+    # A newline could start a line of its own in the prompt: a path with any
+    # control character is left out rather than escaped.
+    case "$shown" in
+      *[[:cntrl:]]*)
+        echo "claude-docker: --host-paths: leaving out the host path of ${CONTAINER_PATHS[$i]}: it contains a control character" >&2 ;;
+      *)
+        map+="- ${CONTAINER_PATHS[$i]} is ${shown} on the host${SEEN_RO[$i]:+ (read-only)}"$'\n' ;;
+    esac
+    i=$((i + 1))
+  done
+  [ -n "$map" ] || return 0
+
+  # A trailing bare --append-system-prompt has no value; it stays, for claude
+  # to report.
+  n=${#CLAUDE_FLAGS[@]}
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    a=${CLAUDE_FLAGS[$i]}
+    case "$a" in
+      --append-system-prompt)
+        if [ $((i + 1)) -lt "$n" ]; then
+          user_text=${CLAUDE_FLAGS[$((i + 1))]}; have_user=1; i=$((i + 2)); continue
+        fi ;;
+      --append-system-prompt=*)
+        user_text=${a#--append-system-prompt=}; have_user=1; i=$((i + 1)); continue ;;
+    esac
+    flags+=("$a")
+    i=$((i + 1))
+  done
+  CLAUDE_FLAGS=()
+  [ "${#flags[@]}" -gt 0 ] && CLAUDE_FLAGS=("${flags[@]}")
+
+  a="# Host paths (claude-docker)
+This session runs in a container. Each workspace is mounted from a directory on the user's host:
+${map}Read and write files only through the /workspaces paths: the host paths do not exist in this container.
+When you name a file for the user to open, give its host path."
+  [ "$have_user" = "1" ] && a+=$'\n\n'"$user_text"
+  CMD+=("--append-system-prompt" "$a")
+}
+
 build_cmd() {
   local n i HOLD_ON_ERR
   CMD=(claude)
@@ -2906,6 +2974,7 @@ build_cmd() {
     CMD+=("--add-dir" "${CONTAINER_PATHS[$i]}")
     i=$((i + 1))
   done
+  build_host_path_prompt
   [ "${#CLAUDE_FLAGS[@]}" -gt 0 ] && CMD+=("${CLAUDE_FLAGS[@]}")
   # Test-only hook for the run.sh-driven integration harness (tests/): replace
   # the agent container's command entirely so the harness can run assertions

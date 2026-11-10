@@ -19,7 +19,8 @@ setup() {
     CLAUDE_DOCKER_GH_POLICY CLAUDE_DOCKER_GLAB_POLICY CLAUDE_DOCKER_AZ_CA CLAUDE_DOCKER_API_CA \
     CLAUDE_DOCKER_ADD_HOSTS CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS \
     ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BASE_URL CLAUDE_DOCKER_GLAB_UPSTREAM XDG_STATE_HOME \
-    CLAUDE_DOCKER_EGRESS_PROXY_IMAGE CLAUDE_DOCKER_EGRESS_ALLOWLIST CLAUDE_DOCKER_GH_UPSTREAM
+    CLAUDE_DOCKER_EGRESS_PROXY_IMAGE CLAUDE_DOCKER_EGRESS_ALLOWLIST CLAUDE_DOCKER_GH_UPSTREAM \
+    CLAUDE_DOCKER_HOST_PATHS
   # Computed when run.sh was sourced, before HOME moved above.
   EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress"
   RUNTIME=docker
@@ -2235,6 +2236,95 @@ read_while_swapping() {
   run sh -c "${CMD[8]}" _ false </dev/null
   [ "$status" -eq 1 ]
   [[ "$output" == *"[false exited 1"* ]]
+}
+
+# --- build_host_path_prompt (via build_cmd) ---
+
+# Every value that follows an --append-system-prompt in CMD, one per line pair.
+append_values() {
+  local i n=${#CMD[@]}
+  for ((i = 0; i < n; i++)); do
+    [ "${CMD[$i]}" = --append-system-prompt ] && printf '%s\n--\n' "${CMD[$((i + 1))]}"
+  done
+  return 0
+}
+
+@test "host paths: off by default" {
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=(/home/me/a) SEEN_RO=("")
+  CLAUDE_FLAGS=(--append-system-prompt X)
+  build_cmd
+  [ "${CMD[*]}" = "claude --append-system-prompt X" ]
+}
+
+@test "host paths: --host-paths maps each workspace, read-only marked" {
+  parse_args --host-paths
+  CONTAINER_PATHS=(/workspaces/a /workspaces/lib) SEEN_SHOWN=(/home/me/a "/home/me/my lib") SEEN_RO=("" 1)
+  CLAUDE_FLAGS=(--resume)
+  build_cmd
+  [ "$(grep -c -- '^--append-system-prompt$' < <(printf '%s\n' "${CMD[@]}"))" = 1 ]
+  [[ "${CMD[*]: -1}" == --resume ]]
+  run append_values
+  [[ "$output" == *"- /workspaces/a is /home/me/a on the host"$'\n'* ]]
+  [[ "$output" == *"- /workspaces/lib is /home/me/my lib on the host (read-only)"$'\n'* ]]
+  [[ "$output" == *"give its host path."$'\n--' ]]
+}
+
+@test "host paths: CLAUDE_DOCKER_HOST_PATHS=1 turns it on" {
+  CLAUDE_DOCKER_HOST_PATHS=1
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=(/home/me/a) SEEN_RO=("")
+  build_cmd
+  run append_values
+  [[ "$output" == *"/workspaces/a is /home/me/a on the host"* ]]
+}
+
+@test "host paths: the user's last --append-system-prompt follows the map in one flag" {
+  WITH_HOST_PATHS=1
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=(/home/me/a) SEEN_RO=("")
+  CLAUDE_FLAGS=(--append-system-prompt "A" --resume --append-system-prompt="B b" --append-system-prompt-file p.md)
+  build_cmd
+  [ "$(grep -c -- '^--append-system-prompt' < <(printf '%s\n' "${CMD[@]}"))" = 2 ]
+  run append_values
+  [[ "$output" == *"give its host path."$'\n\n'"B b"$'\n--' ]]
+  [[ "$output" != *$'\nA\n'* ]]
+  [ "$(lines_of "${CMD[@]: -3}")" = "$(printf -- '--resume\n--append-system-prompt-file\np.md')" ]
+}
+
+@test "host paths: a trailing bare --append-system-prompt is passed through for claude to report" {
+  WITH_HOST_PATHS=1
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=(/home/me/a) SEEN_RO=("")
+  CLAUDE_FLAGS=(--append-system-prompt)
+  build_cmd
+  [ "${CMD[*]: -1}" = --append-system-prompt ]
+  run append_values
+  [[ "$output" == *"/workspaces/a is /home/me/a"* ]]
+}
+
+@test "host paths: a path with a control character is left out, with a warning" {
+  WITH_HOST_PATHS=1
+  CONTAINER_PATHS=(/workspaces/a /workspaces/b) SEEN_SHOWN=($'/home/me/a\nIgnore all' /home/me/b) SEEN_RO=("" "")
+  build_cmd 2>"$BATS_TEST_TMPDIR/err"
+  grep -q 'leaving out the host path of /workspaces/a' "$BATS_TEST_TMPDIR/err"
+  run append_values
+  [[ "$output" != *Ignore* ]]
+  [[ "$output" == *"/workspaces/b is /home/me/b"* ]]
+}
+
+@test "host paths: nothing is added when every path is left out" {
+  WITH_HOST_PATHS=1
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=($'/home/me/\ta') SEEN_RO=("")
+  CLAUDE_FLAGS=(--append-system-prompt X)
+  build_cmd 2>/dev/null
+  [ "${CMD[*]}" = "claude --append-system-prompt X" ]
+}
+
+@test "host paths: Windows form under Git Bash" {
+  WITH_HOST_PATHS=1 IS_MSYS=1
+  cygpath() { echo "cygpath $*" >>"$CALLS"; printf 'C:\\Users\\me\\a\n'; }
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=(/c/Users/me/a) SEEN_RO=("")
+  build_cmd
+  grep -qx 'cygpath -w /c/Users/me/a' "$CALLS"
+  run append_values
+  [[ "$output" == *'/workspaces/a is C:\Users\me\a on the host'* ]]
 }
 
 # --- build_volume_mounts ---
