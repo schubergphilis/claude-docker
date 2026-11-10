@@ -133,12 +133,23 @@ setup() {
 # --- trust_workspaces ---
 
 # The safe.directory values written to the stand-in system config.
-trusted() { command git config --file "$GIT_SYSTEM_CONFIG" --get-all safe.directory | paste -sd,; }
+trusted() { command git -C / config --file "$GIT_SYSTEM_CONFIG" --get-all safe.directory | paste -sd,; }
 
 @test "trust_workspaces: each vouched-for workspace and its nested repos are trusted" {
   CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo:/workspaces/other run trust_workspaces
   [ "$status" -eq 0 ] && [ -z "$output" ]
   [ "$(trusted)" = "/workspaces/repo,/workspaces/repo/*,/workspaces/other,/workspaces/other/*" ]
+}
+
+@test "trust_workspaces: a worktree whose gitdir isn't mounted doesn't stop it" {
+  # The entrypoint starts in the workspace; a .git pointer to a missing gitdir
+  # makes git die in repo discovery unless it runs elsewhere.
+  mkdir -p "$BATS_TEST_TMPDIR/ws"
+  printf 'gitdir: /nonexistent/.git/worktrees/ws\n' >"$BATS_TEST_TMPDIR/ws/.git"
+  cd "$BATS_TEST_TMPDIR/ws"
+  CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/ws run trust_workspaces
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ "$(trusted)" = "/workspaces/ws,/workspaces/ws/*" ]
 }
 
 @test "trust_workspaces: no list writes nothing" {
