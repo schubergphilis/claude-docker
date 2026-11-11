@@ -214,6 +214,11 @@ the package's type or its location within the image — and SHALL NOT be scoped 
 identifier. An identifier-scoped suppression expires silently when upstream fixes it, and
 covers none of the next findings in the same unfixable component.
 
+The one exception is a finding that the image's distribution marks not-affected for every
+version of the package it ships: no update will ever clear it, so its identifier is the
+property that stays true. Such a suppression SHALL name the vulnerability identifier, the
+package and the package type, and SHALL record that the distribution rules it out.
+
 A suppression SHALL NOT extend beyond the component it was accepted for. In particular, a
 finding accepted because it lives in a vendored dependency tree SHALL NOT also suppress the
 same package where the image installs it in its own right.
@@ -238,6 +243,16 @@ same package where the image installs it in its own right.
 - **GIVEN** a vulnerable package outside every recorded suppression's scope
 - **WHEN** the pipeline scans the image
 - **THEN** it blocks publication
+
+#### Scenario: a finding the distribution rules out is accepted by identifier
+
+- **GIVEN** a finding in a distribution package that the distribution marks not-affected for
+  every version it ships
+- **WHEN** the pipeline scans the image
+- **THEN** a suppression naming that identifier, package and package type keeps it from
+  blocking publication
+- **AND** the suppression records that the distribution rules it out
+- **AND** any other finding in the same package still blocks publication
 
 ### Requirement: The publishing pipeline does not gate merges
 
@@ -297,16 +312,19 @@ have, and the mismatch is invisible to a reader comparing the two by eye.
 The project's README SHALL document the published image as an install path: the reference to
 pull, the tag scheme a consumer must pin, the architectures published, which of them the
 scanners cover, and how to point the wrapper at a published image instead of a locally built
-one.
+one. It SHALL also document the Homebrew install as an install path, the published image it
+runs by default, and how to override that image.
 
 Building the image locally SHALL remain a supported and documented path. The published image
-is an addition to it, not a replacement, and the wrapper SHALL keep defaulting to the locally
-built tag.
+is an addition to it, not a replacement, and the wrapper script SHALL keep defaulting to the
+locally built tag. Only the Homebrew-installed command defaults to a published image, the one
+of its own version.
 
 #### Scenario: a new user chooses an install path
 
 - **WHEN** a user reads the README's install documentation
-- **THEN** both building locally and pulling the published image are presented as supported
+- **THEN** Homebrew, building locally and pulling the published image are presented as
+  supported
 - **AND** the pull path states the reference, the tag to pin, and the architectures covered
 
 #### Scenario: pointing the wrapper at the published image
@@ -315,6 +333,13 @@ built tag.
 - **WHEN** a user wants the wrapper to run it instead of a locally built one
 - **THEN** the README names the existing image override for doing so
 - **AND** the wrapper's default behaviour is unchanged for users who do not set it
+
+#### Scenario: a Homebrew user learns which image they run
+
+- **WHEN** a user reads the Homebrew install documentation
+- **THEN** it names the published image the installed command runs by default and how to
+  override it
+- **AND** it states which architecture's image the publish scans do not cover
 
 ### Requirement: Releases are drafted, and published by a maintainer
 
