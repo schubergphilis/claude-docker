@@ -9,9 +9,9 @@ argcomplete==3.5.3 \
     # via
     #   azure-cli-core
     #   knack
-azure-cli-core==2.91.0 \
-    --hash=sha256:1fc6366796c1c5d2ee532ef3d94c9a551ce07121a3c4749aeeb516fddc0eefb9 \
-    --hash=sha256:5b8ee74922c25e70ab238dd8739bcd77c6698a432ac27bde3c4cda8e5609d5c2
+azure-cli-core==2.92.0 \
+    --hash=sha256:1c80ab7e75cb7f759685d129f36891bc569b7ad206e3eabd14896da49f58c31a \
+    --hash=sha256:667987028d4f5ca211c24deb8e84321b399ae08b1aa5aca58a045da2ae06c1dd
 azure-cli-telemetry==1.1.0 \
     --hash=sha256:2fc12608c0cf0ea6e69b392af9cab92f1249340b8caff7e9674cf91b3becb337 \
     --hash=sha256:d922379cda1b48952be75fb3bd2ac5e7ceecf569492a6088bab77894c624a278
