@@ -1552,15 +1552,33 @@ normalize_path() {
 # worktree; when the .git file names a relative path, which in the container
 # resolves against /workspaces/<name> rather than the host directory; and for
 # a submodule (no commondir), whose gitdir names its host working tree.
+# The workspace is writable from the container, so its .git file may have been
+# planted to lead anywhere. The result must therefore be a git directory laid
+# out as git lays it out: the gitdir is <common>/worktrees/<name> both as text
+# and on disk (no symlink or .. between them, so the pointer resolves the same
+# in the container), <common> has HEAD, objects and refs, and the gitdir's own
+# gitdir file, outside the workspace, names this workspace's .git back.
 worktree_common_dir() {
-  local ws="$1" gd common
+  local ws="$1" gd common name back
   [ -f "$ws/.git" ] && [ ! -L "$ws/.git" ] || return 1
   gd=$(sed -n 's/^gitdir: //p' "$ws/.git" 2>/dev/null | head -1)
   case "$gd" in /?*) ;; *) return 1 ;; esac
+  [ "$(normalize_path "$gd")" = "$gd" ] || return 1
   [ -f "$gd/commondir" ] || return 1
   common=$(head -1 "$gd/commondir" 2>/dev/null)
   case "$common" in "") return 1 ;; /*) ;; *) common="$gd/$common" ;; esac
-  normalize_path "$common"
+  common=$(normalize_path "$common")
+  name=${gd##*/}
+  [ "$gd" = "$common/worktrees/$name" ] || return 1
+  [ "$(cd -P "$gd" 2>/dev/null && pwd -P)" \
+    = "$(cd -P "$common" 2>/dev/null && pwd -P)/worktrees/$name" ] || return 1
+  [ -f "$common/HEAD" ] && [ -d "$common/objects" ] && [ -d "$common/refs" ] || return 1
+  [ -f "$gd/gitdir" ] || return 1
+  back=$(head -1 "$gd/gitdir" 2>/dev/null)
+  case "$back" in "") return 1 ;; /*) ;; *) back="$gd/$back" ;; esac
+  [ "${back##*/}" = .git ] || return 1
+  [ "$(cd -P "${back%/*}/" 2>/dev/null && pwd -P)" = "$(cd -P "$ws" 2>/dev/null && pwd -P)" ] || return 1
+  printf '%s\n' "$common"
 }
 
 # Whether the user can be asked a question. A function so the tests can stand

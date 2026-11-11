@@ -778,8 +778,10 @@ trusted_value() {
 # Make $1 a worktree of the repository at $2, its .git file naming the gitdir
 # by absolute path as `git worktree add` does.
 make_worktree() {
-  mkdir -p "$2/.git/worktrees/${1##*/}" "$1"
+  mkdir -p "$2/.git/worktrees/${1##*/}" "$2/.git/objects" "$2/.git/refs" "$1"
+  printf 'ref: refs/heads/main\n' >"$2/.git/HEAD"
   printf '../..\n' >"$2/.git/worktrees/${1##*/}/commondir"
+  printf '%s/.git\n' "$1" >"$2/.git/worktrees/${1##*/}/gitdir"
   printf 'gitdir: %s\n' "$2/.git/worktrees/${1##*/}" >"$1/.git"
 }
 # Mount, vouch for and offer the worktrees in "$@" ($MAIN's git directory).
@@ -820,6 +822,57 @@ gitdir_mounts() {
   rm "$WS/.git" && mkdir "$WS/.git"
   run worktree_common_dir "$WS"
   [ "$status" -ne 0 ]
+}
+
+@test "worktree_common_dir: a pointer planted to lead to a directory that is no repository gives nothing" {
+  # The session writes .git and a fake gitdir whose commondir names $HOME.
+  mkdir -p "$WS/fake" "$BATS_TEST_TMPDIR/home"
+  printf '%s\n' "$BATS_TEST_TMPDIR/home" >"$WS/fake/commondir"
+  printf '%s/.git\n' "$WS" >"$WS/fake/gitdir"
+  printf 'gitdir: %s\n' "$WS/fake" >"$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+  # Laid out as worktrees/<name>, but the directory holds no git repository.
+  mkdir -p "$BATS_TEST_TMPDIR/home/worktrees/x"
+  printf '../..\n' >"$BATS_TEST_TMPDIR/home/worktrees/x/commondir"
+  printf '%s/.git\n' "$WS" >"$BATS_TEST_TMPDIR/home/worktrees/x/gitdir"
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/home/worktrees/x" >"$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+}
+
+@test "worktree_common_dir: another worktree's gitdir gives nothing" {
+  make_worktree "$BATS_TEST_TMPDIR/other" "$BATS_TEST_TMPDIR/main"
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/main/.git/worktrees/other" >"$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+}
+
+@test "worktree_common_dir: a relative back-pointer naming this worktree is accepted" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  printf '../../../../repo/.git\n' >"$BATS_TEST_TMPDIR/main/.git/worktrees/repo/gitdir"
+  [ "$(worktree_common_dir "$WS")" = "$BATS_TEST_TMPDIR/main/.git" ]
+}
+
+@test "worktree_common_dir: a symlink or .. between the gitdir and its repository gives nothing" {
+  # wts links into the repository's worktrees; textually ../.. from
+  # wts/repo is the home directory, but git opens /data/main/.git.
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/data/main"
+  mkdir -p "$BATS_TEST_TMPDIR/home"
+  ln -s "$BATS_TEST_TMPDIR/data/main/.git/worktrees" "$BATS_TEST_TMPDIR/home/wts"
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/home/wts/repo" >"$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/data/x/../main/.git/worktrees/repo" >"$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+}
+
+@test "worktree_common_dir: a symlink above the repository's git directory is kept as named" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/data/main"
+  ln -s "$BATS_TEST_TMPDIR/data" "$BATS_TEST_TMPDIR/link"
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/link/main/.git/worktrees/repo" >"$WS/.git"
+  [ "$(worktree_common_dir "$WS")" = "$BATS_TEST_TMPDIR/link/main/.git" ]
 }
 
 @test "build_worktree_gitdirs: =ro mounts the repository's git directory read-only at its path" {
