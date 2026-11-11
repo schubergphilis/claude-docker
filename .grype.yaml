@@ -42,7 +42,9 @@ ignore:
     package:
       name: openssh-client
       type: deb
-    reason: sshd-on-musl only; Ubuntu resolute not-affected; image ships the client on glibc.
+    reason: >-
+      sshd on musl only; Ubuntu resolute not-affected; the image ships
+      the client, on glibc.
 
   # npm's own bundle (pins/npm.env). npm vendors its deps, so this clears only
   # with an npm release that carries the fix; npm 12.2.1 still ships undici
