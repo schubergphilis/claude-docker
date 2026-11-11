@@ -4,6 +4,8 @@
 
 When a workspace's `.git` is a regular file naming its gitdir by an absolute path, that gitdir has a `commondir`, and the repository's git directory it leads to lies inside no mounted workspace, `run.sh` SHALL offer to mount that git directory read-only. Accepted, `run.sh` SHALL bind-mount the git directory's physical host path, read-only, at the path the `.git` file and `commondir` name (normalized, symlinks unresolved), so the pointer resolves unchanged in the container, and SHALL print a notice naming it. Only the git directory SHALL be mounted, not the repository's working tree.
 
+Because the workspace is writable from the container, `run.sh` SHALL make the offer only when what the `.git` file leads to is laid out as git lays out a worktree: the gitdir SHALL be `<git directory>/worktrees/<name>` both as normalized text and as physical path (no symlink or `..` between them), the git directory SHALL have `HEAD`, `objects` and `refs`, and the gitdir's own `gitdir` file SHALL name the workspace's `.git` (absolute, or relative to the gitdir). Otherwise no offer and no mount SHALL follow.
+
 `run.sh` SHALL make the offer only for a workspace it vouches for under *In-container git trusts only the workspaces you own*, SHALL NOT make it on Windows hosts, and SHALL NOT mount at `/`, under `/workspaces`, `/root`, `/proc`, `/sys` or `/dev`, or at a path containing `:` or `,`. Several workspaces that are worktrees of one repository SHALL lead to one offer and at most one mount.
 
 `CLAUDE_DOCKER_WORKTREE_GITDIR` SHALL decide the offer: `ask` (the default, also when unset or empty) asks on the terminal, `ro` mounts without asking, `off` never mounts. Any other value SHALL stop `claude-docker` with an error naming the variable before any container starts. Asked, an empty answer or `y`/`yes` in any case SHALL accept; anything else SHALL decline. When stdin or stderr is not a terminal, `ask` SHALL decline without reading.
@@ -52,6 +54,12 @@ Whenever the offer is declined, `run.sh` SHALL print a warning naming the worksp
 
 - **GIVEN** `~/wt` is a worktree whose gitdir, or that gitdir's commondir, another host user owns
 - **WHEN** the user runs `claude-docker ~/wt`
+- **THEN** no question is asked and nothing is mounted for it
+
+#### Scenario: A planted pointer to a directory that is no worktree's repository is not offered
+
+- **GIVEN** a session wrote `~/wt/.git` to name a gitdir whose `commondir` leads to the user's home directory, or to another repository's worktree gitdir, or through a symlink to a path other than the one git opens
+- **WHEN** the user runs `CLAUDE_DOCKER_WORKTREE_GITDIR=ro claude-docker ~/wt`
 - **THEN** no question is asked and nothing is mounted for it
 
 #### Scenario: An unknown value is refused
