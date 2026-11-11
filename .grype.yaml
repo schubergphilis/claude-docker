@@ -3,7 +3,7 @@
 # only-fixed=false, and the scan runs before the push — so without these rules
 # nothing can ever publish. Rules are scoped by package type or location rather
 # than by CVE so they do not go stale. deb and npm findings stay enforced,
-# apart from the version-scoped rules below.
+# apart from the version-scoped rules below and a CVE the distro rules out.
 ignore:
   # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries,
   # which only an upstream rebuild moves. Scoped to /usr/bin so it does NOT
@@ -32,6 +32,17 @@ ignore:
       version: 3.0.3
       location: "**/node_modules/@fission-ai/openspec/**"
     reason: No patched braces exists; moves with pins/openspec.env.
+
+  # CVE-2026-123158 is a password-auth bypass in sshd on musl libc without
+  # PAM (e.g. Alpine). The image ships only openssh-client, on glibc, and
+  # Ubuntu marks every resolute openssh "not-affected", so no package update
+  # will clear it. Scoped to this CVE and openssh-client, not by version:
+  # any other openssh-client finding stays enforced.
+  - vulnerability: CVE-2026-123158
+    package:
+      name: openssh-client
+      type: deb
+    reason: sshd-on-musl only; Ubuntu resolute not-affected; image ships the client on glibc.
 
   # npm's own bundle (pins/npm.env). npm vendors its deps, so this clears only
   # with an npm release that carries the fix; npm 12.2.1 still ships undici
