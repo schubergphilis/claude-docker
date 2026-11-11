@@ -214,6 +214,11 @@ the package's type or its location within the image — and SHALL NOT be scoped 
 identifier. An identifier-scoped suppression expires silently when upstream fixes it, and
 covers none of the next findings in the same unfixable component.
 
+The one exception is a finding that the image's distribution marks not-affected for every
+version of the package it ships: no update will ever clear it, so its identifier is the
+property that stays true. Such a suppression SHALL name the vulnerability identifier, the
+package and the package type, and SHALL record that the distribution rules it out.
+
 A suppression SHALL NOT extend beyond the component it was accepted for. In particular, a
 finding accepted because it lives in a vendored dependency tree SHALL NOT also suppress the
 same package where the image installs it in its own right.
@@ -238,6 +243,16 @@ same package where the image installs it in its own right.
 - **GIVEN** a vulnerable package outside every recorded suppression's scope
 - **WHEN** the pipeline scans the image
 - **THEN** it blocks publication
+
+#### Scenario: a finding the distribution rules out is accepted by identifier
+
+- **GIVEN** a finding in a distribution package that the distribution marks not-affected for
+  every version it ships
+- **WHEN** the pipeline scans the image
+- **THEN** a suppression naming that identifier, package and package type keeps it from
+  blocking publication
+- **AND** the suppression records that the distribution rules it out
+- **AND** any other finding in the same package still blocks publication
 
 ### Requirement: The publishing pipeline does not gate merges
 
