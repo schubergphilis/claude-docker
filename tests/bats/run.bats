@@ -20,7 +20,7 @@ setup() {
     CLAUDE_DOCKER_ADD_HOSTS CLAUDE_DOCKER_TMUX CLAUDE_DOCKER_TEST_ENTRY CLAUDE_DOCKER_FLAGS \
     ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY ANTHROPIC_BASE_URL CLAUDE_DOCKER_GLAB_UPSTREAM XDG_STATE_HOME \
     CLAUDE_DOCKER_EGRESS_PROXY_IMAGE CLAUDE_DOCKER_EGRESS_ALLOWLIST CLAUDE_DOCKER_GH_UPSTREAM \
-    CLAUDE_DOCKER_HOST_PATHS
+    CLAUDE_DOCKER_HOST_PATHS CLAUDE_DOCKER_WORKTREE_GITDIR
   # Computed when run.sh was sourced, before HOME moved above.
   EGRESS_LOG_DIR="$HOME/.local/state/claude-docker/egress"
   RUNTIME=docker
@@ -771,6 +771,132 @@ trusted_value() {
 
 @test "owned_by_me: a directory you created is yours" {
   owned_by_me "$WS"
+}
+
+# --- build_worktree_gitdirs ---
+
+# Make $1 a worktree of the repository at $2, its .git file naming the gitdir
+# by absolute path as `git worktree add` does.
+make_worktree() {
+  mkdir -p "$2/.git/worktrees/${1##*/}" "$1"
+  printf '../..\n' >"$2/.git/worktrees/${1##*/}/commondir"
+  printf 'gitdir: %s\n' "$2/.git/worktrees/${1##*/}" >"$1/.git"
+}
+# Mount, vouch for and offer the worktrees in "$@" ($MAIN's git directory).
+setup_worktree_gitdirs() {
+  MAIN="$BATS_TEST_TMPDIR/main"
+  WORKSPACES=("$@")
+  build_workspace_mounts
+  IS_MSYS=0
+  build_git_trust 2>/dev/null
+  MAIN_GIT=$(cd -P "$MAIN/.git" && pwd -P)
+}
+# The mount args build_worktree_gitdirs added for $MAIN's git directory.
+gitdir_mounts() {
+  local a
+  for a in "${MOUNT_ARGS[@]}"; do
+    case "$a" in *":$MAIN/.git:ro") printf '%s\n' "$a" ;; esac
+  done
+}
+
+@test "normalize_path: . and .. resolve as text" {
+  [ "$(normalize_path /a/./b/../c//d/..)" = /a/c ]
+  [ "$(normalize_path /a/..)" = / ]
+}
+
+@test "worktree_common_dir: the gitdir joined with its commondir" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  [ "$(worktree_common_dir "$WS")" = "$BATS_TEST_TMPDIR/main/.git" ]
+}
+
+@test "worktree_common_dir: a relative gitdir, a submodule or a repository gives nothing" {
+  mkdir -p "$BATS_TEST_TMPDIR/main/.git/modules/sub"
+  printf 'gitdir: ../main/.git/worktrees/repo\n' >"$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+  printf 'gitdir: %s\n' "$BATS_TEST_TMPDIR/main/.git/modules/sub" >"$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+  rm "$WS/.git" && mkdir "$WS/.git"
+  run worktree_common_dir "$WS"
+  [ "$status" -ne 0 ]
+}
+
+@test "build_worktree_gitdirs: =ro mounts the repository's git directory read-only at its path" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ "$(gitdir_mounts)" = "$MAIN_GIT:$MAIN/.git:ro" ]
+  grep -q "mounting '$MAIN/.git' read-only for /workspaces/repo" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "build_worktree_gitdirs: =off mounts nothing and warns" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=off build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+  grep -q "warning: '$WS' is a git worktree of '$MAIN/.git', which isn't mounted, so git won't work in it" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "build_worktree_gitdirs: without a terminal nothing is read or mounted" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$WS"
+  can_ask() { return 1; }
+  build_worktree_gitdirs <<<y 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+  [ "$(grep -c '\[Y/n\]' "$BATS_TEST_TMPDIR/err")" -eq 0 ]
+  grep -q "won't work in it" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "build_worktree_gitdirs: Enter at the question mounts, once for two worktrees" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  make_worktree "$BATS_TEST_TMPDIR/other" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$WS" "$BATS_TEST_TMPDIR/other"
+  can_ask() { return 0; }
+  build_worktree_gitdirs <<<'' 2>"$BATS_TEST_TMPDIR/err"
+  [ "$(gitdir_mounts)" = "$MAIN_GIT:$MAIN/.git:ro" ]
+  [ "$(grep -c '\[Y/n\]' "$BATS_TEST_TMPDIR/err")" -eq 1 ]
+}
+
+@test "build_worktree_gitdirs: n at the question mounts nothing and warns" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$WS"
+  can_ask() { return 0; }
+  build_worktree_gitdirs <<<n 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+  grep -q "won't work in it" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "build_worktree_gitdirs: the repository passed as a workspace is not offered" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$BATS_TEST_TMPDIR/main" "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+  [ ! -s "$BATS_TEST_TMPDIR/err" ]
+}
+
+@test "build_worktree_gitdirs: a worktree of another user's repository is not offered" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  owned_by_me() { [ "$1" != "$BATS_TEST_TMPDIR/main/.git/worktrees/repo" ]; }
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+  [ ! -s "$BATS_TEST_TMPDIR/err" ]
+}
+
+@test "build_worktree_gitdirs: nothing is offered on Windows" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$WS"
+  IS_MSYS=1
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+}
+
+@test "validate_opts: an unknown CLAUDE_DOCKER_WORKTREE_GITDIR is rejected" {
+  CLAUDE_DOCKER_WORKTREE_GITDIR=rw
+  run validate_opts
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"CLAUDE_DOCKER_WORKTREE_GITDIR must be ask, ro or off, not 'rw'"* ]]
 }
 
 # --- build_cred_mounts ---
