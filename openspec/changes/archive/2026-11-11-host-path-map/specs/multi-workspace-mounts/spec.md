@@ -2,7 +2,7 @@
 
 ### Requirement: Host path map on request
 
-With `--host-paths`, or `CLAUDE_DOCKER_HOST_PATHS=1`, `run.sh` SHALL pass `claude` one `--append-system-prompt` listing each workspace's container path, its host path as the user gave it (Windows form under Git Bash), and whether it is read-only. The text SHALL tell the agent to work only through the container paths and to give the host path when it names a file for the user. Otherwise `run.sh` SHALL add no such text.
+With `--host-paths`, or `CLAUDE_DOCKER_HOST_PATHS=1`, `run.sh` SHALL pass `claude` one `--append-system-prompt` listing each workspace's container path, its absolute host path with symlinks unresolved (Windows form under Git Bash), and whether it is read-only. The text SHALL tell the agent to work only through the container paths and to give the host path when it names a file for the user. Otherwise `run.sh` SHALL add no such text.
 
 #### Scenario: Off by default
 

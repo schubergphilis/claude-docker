@@ -64,12 +64,12 @@ A `--ro=PATH` directory inside a writable workspace (`~/repo --ro=~/repo/vendor`
 
 ### Host paths
 
-In the container every workspace is `/workspaces/<name>`, so by default the agent names files by a path that doesn't exist on your machine. With `--host-paths` (or `CLAUDE_DOCKER_HOST_PATHS=1` in your shell profile) `claude-docker` adds a few lines to claude's system prompt that map each `/workspaces/<name>` to the host path you gave, in Windows form under Git Bash. They tell the agent to keep working through `/workspaces` and to give you the host path when it points you to a file.
+In the container every workspace is `/workspaces/<name>`, so by default the agent names files by a path that doesn't exist on your machine. With `--host-paths` (or `CLAUDE_DOCKER_HOST_PATHS=1` in your shell profile) `claude-docker` adds a few lines to claude's system prompt that map each `/workspaces/<name>` to its absolute host path (`.` becomes the full path; symlinks are kept as you typed them), in Windows form under Git Bash. They tell the agent to keep working through `/workspaces` and to give you the host path when it points you to a file.
 
 - The paths are labels only: nothing more is mounted, and the agent can't reach a host path from inside. They do go to the model provider with every request, and into the session transcript: your username, your directory layout, and directory names such as client names. That is why the flag is opt-in.
 - A host path containing a control character (a newline, a tab) is left out of the map, with a warning.
 - claude uses only the last `--append-system-prompt` it is given. So your own `--append-system-prompt` after `--` is not passed as a second flag: its text follows the map in the one flag `claude-docker` passes. If you pass it more than once, only the last one counts, as without the wrapper. `--append-system-prompt-file` is passed through unchanged; claude combines it with the map.
-- claude records the system prompt when a conversation starts and reuses it on resume until the conversation is compacted. A resumed session keeps the map it started with, even if you resume it with other workspaces or without `--host-paths`.
+- claude records the system prompt when a conversation starts, in the session transcript, and reuses it on resume until the conversation is compacted (observed on Claude Code 2.1.319; see `claude --help`, `--system-prompt-snapshot`). A resumed session keeps the map it started with, even if you resume it with other workspaces or without `--host-paths`.
 
 For `--iterm` / `--tmux` (teammate split panes), see [Split-pane agent teams](#split-pane-agent-teams). In-container YOLO narrows the blast radius compared to running on the host, but see [Threat model](security.md#threat-model) for what it does and doesn't protect.
 

@@ -2238,13 +2238,13 @@ read_while_swapping() {
   [[ "$output" == *"[false exited 1"* ]]
 }
 
-# --- build_host_path_prompt (via build_cmd) ---
+# --- add_claude_flags / --host-paths (via build_cmd) ---
 
 # Every value that follows an --append-system-prompt in CMD, one per line pair.
 append_values() {
   local i n=${#CMD[@]}
   for ((i = 0; i < n; i++)); do
-    [ "${CMD[$i]}" = --append-system-prompt ] && printf '%s\n--\n' "${CMD[$((i + 1))]}"
+    [ "${CMD[$i]}" = --append-system-prompt ] && [ $((i + 1)) -lt "$n" ] && printf '%s\n--\n' "${CMD[$((i + 1))]}"
   done
   return 0
 }
@@ -2287,6 +2287,18 @@ append_values() {
   [[ "$output" == *"give its host path."$'\n\n'"B b"$'\n--' ]]
   [[ "$output" != *$'\nA\n'* ]]
   [ "$(lines_of "${CMD[@]: -3}")" = "$(printf -- '--resume\n--append-system-prompt-file\np.md')" ]
+  # CLAUDE_FLAGS stays as parsed, so building the command twice gives the same command.
+  [ "${#CLAUDE_FLAGS[@]}" = 6 ]
+  local first=("${CMD[@]}")
+  build_cmd
+  [ "$(lines_of "${CMD[@]}")" = "$(lines_of "${first[@]}")" ]
+}
+
+@test "host paths: --help lists the flag, its env var, and that paths go to the model" {
+  run print_help
+  [[ "$output" == *"--host-paths"* ]]
+  [[ "$output" == *"CLAUDE_DOCKER_HOST_PATHS"* ]]
+  [[ "$output" == *"go to the model"* ]]
 }
 
 @test "host paths: a trailing bare --append-system-prompt is passed through for claude to report" {
