@@ -255,6 +255,8 @@ ENV_ARGS=(-e TERM -e COLORTERM)
 CONTAINER_PATHS=()
 SEEN_NAMES=()
 SEEN_PATHS=()
+# Parallel to SEEN_PATHS: 1 for a workspace build_git_trust vouched for.
+GIT_VOUCHED=()
 CWD=""
 CMD=()
 IS_MSYS=0
@@ -619,6 +621,13 @@ validate_opts() {
     echo "claude-docker: --api and --api-direct are mutually exclusive — pick the auth-proxy sidecar (--api) or direct forwarding (--api-direct)" >&2
     exit 1
   fi
+
+  case "${CLAUDE_DOCKER_WORKTREE_GITDIR:-ask}" in
+    ask | ro | off) ;;
+    *)
+      echo "claude-docker: CLAUDE_DOCKER_WORKTREE_GITDIR must be ask, ro or off, not '$CLAUDE_DOCKER_WORKTREE_GITDIR'" >&2
+      exit 1 ;;
+  esac
 
   # --api without a gateway token would let Claude Code send the volume's claude.ai
   # OAuth token to ANTHROPIC_BASE_URL as its bearer. Empty counts as unset, so a
@@ -1486,13 +1495,14 @@ git_dirs_owned() {
 # another host user owns gets no entry, and git refuses it as it would on the
 # host. On Windows ownership means nothing, so every workspace is trusted.
 build_git_trust() {
-  local n=${#SEEN_PATHS[@]} i j ws trusted="" vouched=() parent
+  GIT_VOUCHED=()
+  local n=${#SEEN_PATHS[@]} i j ws trusted="" parent
   i=0
   while [ "$i" -lt "$n" ]; do
     ws="${SEEN_PATHS[$i]}"
-    vouched[$i]=""
+    GIT_VOUCHED[i]=""
     if [ "$IS_MSYS" = "1" ] || { owned_by_me "$ws" && git_dirs_owned "$ws"; }; then
-      vouched[$i]=1
+      GIT_VOUCHED[i]=1
       trusted="${trusted:+$trusted:}${CONTAINER_PATHS[$i]}"
     fi
     i=$((i + 1))
@@ -1502,12 +1512,12 @@ build_git_trust() {
   # paths, so this sees through symlinks.
   i=0
   while [ "$i" -lt "$n" ]; do
-    if [ -z "${vouched[$i]}" ]; then
+    if [ -z "${GIT_VOUCHED[$i]}" ]; then
       parent=""
       j=0
       while [ "$j" -lt "$n" ]; do
         case "${SEEN_PATHS[$i]}" in
-          "${SEEN_PATHS[$j]}"/*) [ -n "${vouched[$j]}" ] && parent="${SEEN_PATHS[$j]}" ;;
+          "${SEEN_PATHS[$j]}"/*) [ -n "${GIT_VOUCHED[$j]}" ] && parent="${SEEN_PATHS[$j]}" ;;
         esac
         j=$((j + 1))
       done
@@ -1520,6 +1530,100 @@ build_git_trust() {
     i=$((i + 1))
   done
   ENV_ARGS+=("-e" "CLAUDE_DOCKER_TRUSTED_WORKSPACES=$trusted")
+}
+
+# Absolute path $1 with . and .. resolved as text, symlinks left alone.
+normalize_path() {
+  local IFS=/ part out="" parts=()
+  read -ra parts <<<"$1"
+  for part in "${parts[@]}"; do
+    case "$part" in
+      '' | .) ;;
+      ..) out=${out%/*} ;;
+      *) out="$out/$part" ;;
+    esac
+  done
+  printf '%s\n' "${out:-/}"
+}
+
+# The repository git directory that worktree $1's .git file leads to, as the
+# path git in the container looks up: the gitdir it names joined with that
+# gitdir's commondir, normalized but not physical. Fails when $1 is no
+# worktree; when the .git file names a relative path, which in the container
+# resolves against /workspaces/<name> rather than the host directory; and for
+# a submodule (no commondir), whose gitdir names its host working tree.
+worktree_common_dir() {
+  local ws="$1" gd common
+  [ -f "$ws/.git" ] && [ ! -L "$ws/.git" ] || return 1
+  gd=$(sed -n 's/^gitdir: //p' "$ws/.git" 2>/dev/null | head -1)
+  case "$gd" in /?*) ;; *) return 1 ;; esac
+  [ -f "$gd/commondir" ] || return 1
+  common=$(head -1 "$gd/commondir" 2>/dev/null)
+  case "$common" in "") return 1 ;; /*) ;; *) common="$gd/$common" ;; esac
+  normalize_path "$common"
+}
+
+# Whether the user can be asked a question. A function so the tests can stand
+# in for a terminal.
+can_ask() { [ -t 0 ] && [ -t 2 ]; }
+
+# A workspace that is a worktree of a repository not passed with it has a .git
+# file naming a host path that isn't there in the container, so git fails in
+# it. Offer to mount that repository's git directory, and only that, read-only
+# at the same path, so the pointer resolves unchanged: git can then show
+# status, history and diffs, but not commit (that needs the main repository
+# passed as a workspace, and `git worktree repair`). Asked once per repository;
+# CLAUDE_DOCKER_WORKTREE_GITDIR=ro mounts without asking and off never does,
+# and with no terminal to ask on nothing is mounted. Only for a workspace
+# vouched for (build_git_trust): git would refuse another user's repository
+# anyway, and its config and hooks have no business in the session. No new
+# safe.directory entry is needed, since git matches it against the worktree.
+build_worktree_gitdirs() {
+  local n=${#SEEN_PATHS[@]} i j common src covered answer done_dirs=""
+  [ "$IS_MSYS" = "1" ] && return 0
+  i=0
+  while [ "$i" -lt "$n" ]; do
+    if [ -n "${GIT_VOUCHED[$i]:-}" ] \
+       && common=$(worktree_common_dir "${SEEN_PATHS[$i]}") \
+       && src=$(cd -P "$common" 2>/dev/null && pwd -P); then
+      # A repository inside a mounted workspace is the `git worktree repair`
+      # route; mounting its .git a second time would only confuse that.
+      covered=""
+      j=0
+      while [ "$j" -lt "$n" ]; do
+        case "$src" in "${SEEN_PATHS[$j]}" | "${SEEN_PATHS[$j]}"/*) covered=1 ;; esac
+        j=$((j + 1))
+      done
+      # Paths the container needs for itself, and characters that break -v.
+      case "$common" in
+        / | /workspaces | /workspaces/* | /root | /root/* | /proc | /proc/* \
+          | /sys | /sys/* | /dev | /dev/* | *:* | *,*) covered=1 ;;
+      esac
+      case "$done_dirs" in *"|$common|"*) covered=1 ;; esac
+      if [ -z "$covered" ]; then
+        done_dirs="$done_dirs|$common|"
+        answer=""
+        case "${CLAUDE_DOCKER_WORKTREE_GITDIR:-ask}" in
+          ro) answer=y ;;
+          ask)
+            if can_ask; then
+              echo "claude-docker: '${SEEN_SHOWN[$i]}' is a git worktree of a repository that isn't mounted, so git won't work in it." >&2
+              printf "claude-docker: mount its git directory '%s' read-only? Git can then show status, history and diffs, but not commit. [Y/n] " "$common" >&2
+              IFS= read -r answer || answer=n
+              answer=${answer:-y}
+            fi ;;
+        esac
+        case "$answer" in
+          [Yy] | [Yy][Ee][Ss])
+            MOUNT_ARGS+=("-v" "$(hostpath "$src"):$common:ro")
+            echo "claude-docker: mounting '$common' read-only for ${CONTAINER_PATHS[$i]}; git there can read but not commit" >&2 ;;
+          *)
+            echo "claude-docker: warning: '${SEEN_SHOWN[$i]}' is a git worktree of '$common', which isn't mounted, so git won't work in it; pass the repository too, or set CLAUDE_DOCKER_WORKTREE_GITDIR=ro to mount its git directory read-only" >&2 ;;
+        esac
+      fi
+    fi
+    i=$((i + 1))
+  done
 }
 
 build_cred_mounts() {
@@ -3093,6 +3197,7 @@ main() {
   detect_msys
   build_workspace_mounts
   build_git_trust
+  build_worktree_gitdirs
   build_cred_mounts
   build_env_args
   discover_tokens

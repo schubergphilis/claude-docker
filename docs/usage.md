@@ -169,6 +169,15 @@ To convert pre-existing absolute-path worktrees, ask Claude to run `git worktree
 
 Use this when you passed a repo and a _sibling_ worktree as separate workspace args (`claude-docker ~/repo ~/repo-feature`). Sibling-flattened mounts collapse the parent directory, so the relative offset between worktree and repo is not preserved by the bind mount and relative paths can't help.
 
+**A worktree without its main repo:** when you pass a worktree whose main repo isn't one of the workspaces (common with tools that keep worktrees outside the repo, such as `git worktree add ../x`), its `.git` file names a path in the main repo's `.git/` that doesn't exist in the container, and git fails there with `fatal: not a git repository`. `claude-docker` asks at startup whether to mount the main repo's `.git` directory, and only that, read-only at that same path:
+
+```
+claude-docker: '/Users/me/wt' is a git worktree of a repository that isn't mounted, so git won't work in it.
+claude-docker: mount its git directory '/Users/me/repo/.git' read-only? Git can then show status, history and diffs, but not commit. [Y/n]
+```
+
+Say yes (or press Enter) and `git status`, `git log` and `git diff` work in the worktree; `git add`, `git commit` and anything else that writes fail, so do those on the host. The main repo's files outside `.git` are not mounted. Say no and git keeps failing there, with a warning. `claude-docker` asks once per repo, and only for a worktree whose git directory you own. Set `CLAUDE_DOCKER_WORKTREE_GITDIR` to answer in advance: `ro` mounts without asking, `off` never mounts, `ask` is the default. Without a terminal to ask on (a script, piped input), nothing is mounted unless it is `ro`. The offer is not made on Windows, for a worktree whose `.git` file names a relative path, or for a submodule. To commit from the container, pass the main repo as a workspace too (see the fallback above).
+
 **Caveats:**
 
 - The overlay only applies to workspaces whose `.git` is a real directory (the main repo). If you mount only a worktree without its main repo, no overlay is created for it. Mount the main repo alongside if you need bidirectional worktree work.
