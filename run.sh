@@ -1472,15 +1472,32 @@ git_dirs_owned() {
   [ -e "$ws/.git" ] || return 0
   owned_by_me "$ws/.git" || return 1
   [ -f "$ws/.git" ] || return 0
-  gd=$(sed -n 's/^gitdir: //p' "$ws/.git" 2>/dev/null | head -1)
-  [ -n "$gd" ] || return 1
+  gd=$(pointer_gitdir "$ws") || return 1
   case "$gd" in /*) ;; *) gd="$ws/$gd" ;; esac
   owned_by_me "$gd" || return 1
   [ -f "$gd/commondir" ] || return 0
-  cd=$(head -1 "$gd/commondir" 2>/dev/null)
-  [ -n "$cd" ] || return 1
-  case "$cd" in /*) ;; *) cd="$gd/$cd" ;; esac
+  cd=$(gitdir_commondir "$gd") || return 1
   owned_by_me "$cd"
+}
+
+# The gitdir the .git pointer file of workspace $1 names, as written there.
+# Fails when it names none. git_dirs_owned and worktree_common_dir share it, so
+# the ownership check and the mount read the same pointer.
+pointer_gitdir() {
+  local gd
+  gd=$(sed -n 's/^gitdir: //p' "$1/.git" 2>/dev/null | head -1)
+  [ -n "$gd" ] || return 1
+  printf '%s\n' "$gd"
+}
+
+# The commondir of gitdir $1, joined to $1 when relative. Fails when $1 has no
+# commondir file or an empty one.
+gitdir_commondir() {
+  local cd
+  [ -f "$1/commondir" ] || return 1
+  cd=$(head -1 "$1/commondir" 2>/dev/null)
+  case "$cd" in "") return 1 ;; /*) ;; *) cd="$1/$cd" ;; esac
+  printf '%s\n' "$cd"
 }
 
 # Which mounted workspaces git in the container may trust despite an owner
@@ -1561,12 +1578,10 @@ normalize_path() {
 worktree_common_dir() {
   local ws="$1" gd common name back
   [ -f "$ws/.git" ] && [ ! -L "$ws/.git" ] || return 1
-  gd=$(sed -n 's/^gitdir: //p' "$ws/.git" 2>/dev/null | head -1)
+  gd=$(pointer_gitdir "$ws") || return 1
   case "$gd" in /?*) ;; *) return 1 ;; esac
   [ "$(normalize_path "$gd")" = "$gd" ] || return 1
-  [ -f "$gd/commondir" ] || return 1
-  common=$(head -1 "$gd/commondir" 2>/dev/null)
-  case "$common" in "") return 1 ;; /*) ;; *) common="$gd/$common" ;; esac
+  common=$(gitdir_commondir "$gd") || return 1
   common=$(normalize_path "$common")
   name=${gd##*/}
   [ "$gd" = "$common/worktrees/$name" ] || return 1
@@ -1585,62 +1600,189 @@ worktree_common_dir() {
 # in for a terminal.
 can_ask() { [ -t 0 ] && [ -t 2 ]; }
 
+# Whether $1 can go into a -v argument unchanged, and onto the terminal: no
+# : or , (which split the argument) and no control character (an escape
+# sequence would rewrite what the question shows).
+mount_safe() {
+  case "$1" in *:* | *,* | *[[:cntrl:]]*) return 1 ;; esac
+}
+
 # A workspace that is a worktree of a repository not passed with it has a .git
 # file naming a host path that isn't there in the container, so git fails in
-# it. Offer to mount that repository's git directory, and only that, read-only
-# at the same path, so the pointer resolves unchanged: git can then show
-# status, history and diffs, but not commit (that needs the main repository
-# passed as a workspace, and `git worktree repair`). Asked once per repository;
-# CLAUDE_DOCKER_WORKTREE_GITDIR=ro mounts without asking and off never does,
-# and with no terminal to ask on nothing is mounted. Only for a workspace
-# vouched for (build_git_trust): git would refuse another user's repository
-# anyway, and its config and hooks have no business in the session. No new
-# safe.directory entry is needed, since git matches it against the worktree.
+# it. Offer to mount what git reads from that repository's git directory,
+# read-only at the same path, so the pointer resolves unchanged: git can then
+# show status, history and diffs, but not commit (that needs the main
+# repository passed as a workspace, and `git worktree repair`). Asked once per
+# repository; CLAUDE_DOCKER_WORKTREE_GITDIR=ro mounts without asking and off
+# never does, and with no terminal to ask on nothing is mounted. Only for a
+# workspace vouched for (build_git_trust): git would refuse another user's
+# repository anyway. No new safe.directory entry is needed, since git matches
+# it against the worktree. This only asks, and records the answer in WT_*;
+# stage_worktree_gitdirs checks again and mounts, just before the container
+# starts. The host git is needed to read the repository's config.
 build_worktree_gitdirs() {
-  local n=${#SEEN_PATHS[@]} i j common src covered answer done_dirs=""
+  local n=${#SEEN_PATHS[@]} i j k common src gd skip answer asked=""
+  # Per repository accepted: its git directory as named, its physical path,
+  # and that path's dev:inode. Per worktree of one: its SEEN_PATHS index and
+  # the repository's index.
+  WT_COMMON=(); WT_SRC=(); WT_ID=(); WT_WS=(); WT_REPO=()
   [ "$IS_MSYS" = "1" ] && return 0
+  command -v git >/dev/null 2>&1 || return 0
   i=0
   while [ "$i" -lt "$n" ]; do
     if [ -n "${GIT_VOUCHED[$i]:-}" ] \
        && common=$(worktree_common_dir "${SEEN_PATHS[$i]}") \
-       && src=$(cd -P "$common" 2>/dev/null && pwd -P); then
+       && src=$(cd -P "$common" 2>/dev/null && pwd -P) \
+       && gd=$(pointer_gitdir "${SEEN_PATHS[$i]}"); then
       # A repository inside a mounted workspace is the `git worktree repair`
       # route; mounting its .git a second time would only confuse that.
-      covered=""
+      skip=""
       j=0
       while [ "$j" -lt "$n" ]; do
-        case "$src" in "${SEEN_PATHS[$j]}" | "${SEEN_PATHS[$j]}"/*) covered=1 ;; esac
+        case "$src" in "${SEEN_PATHS[$j]}" | "${SEEN_PATHS[$j]}"/*) skip=1 ;; esac
         j=$((j + 1))
       done
-      # Paths the container needs for itself, and characters that break -v.
+      # Paths the container needs for itself.
       case "$common" in
         / | /workspaces | /workspaces/* | /root | /root/* | /proc | /proc/* \
-          | /sys | /sys/* | /dev | /dev/* | *:* | *,*) covered=1 ;;
+          | /sys | /sys/* | /dev | /dev/* | /etc | /etc/* | /usr | /usr/* \
+          | /bin | /bin/* | /sbin | /sbin/* | /lib | /lib/* | /lib64 | /lib64/* \
+          | /run | /run/* | /boot | /boot/*) skip=1 ;;
       esac
-      case "$done_dirs" in *"|$common|"*) covered=1 ;; esac
-      if [ -z "$covered" ]; then
-        done_dirs="$done_dirs|$common|"
-        answer=""
-        case "${CLAUDE_DOCKER_WORKTREE_GITDIR:-ask}" in
-          ro) answer=y ;;
-          ask)
-            if can_ask; then
-              echo "claude-docker: '${SEEN_SHOWN[$i]}' is a git worktree of a repository that isn't mounted, so git won't work in it." >&2
-              printf "claude-docker: mount its git directory '%s' read-only? Git can then show status, history and diffs, but not commit. [Y/n] " "$common" >&2
-              IFS= read -r answer || answer=n
-              answer=${answer:-y}
-            fi ;;
-        esac
-        case "$answer" in
-          [Yy] | [Yy][Ee][Ss])
-            MOUNT_ARGS+=("-v" "$(hostpath "$src"):$common:ro")
-            echo "claude-docker: mounting '$common' read-only for ${CONTAINER_PATHS[$i]}; git there can read but not commit" >&2 ;;
+      mount_safe "$common" && mount_safe "$src" && mount_safe "${gd##*/}" || skip=1
+      k=0
+      while [ "$k" -lt "${#WT_COMMON[@]}" ] && [ "${WT_COMMON[$k]}" != "$common" ]; do
+        k=$((k + 1))
+      done
+      if [ -n "$skip" ]; then
+        :
+      elif [ "$k" -lt "${#WT_COMMON[@]}" ]; then
+        WT_WS+=("$i"); WT_REPO+=("$k")
+      else
+        case "$asked" in
+          *"|$common|"*) ;;
           *)
-            echo "claude-docker: warning: '${SEEN_SHOWN[$i]}' is a git worktree of '$common', which isn't mounted, so git won't work in it; pass the repository too, or set CLAUDE_DOCKER_WORKTREE_GITDIR=ro to mount its git directory read-only" >&2 ;;
+            asked="$asked|$common|"
+            answer=""
+            case "${CLAUDE_DOCKER_WORKTREE_GITDIR:-ask}" in
+              ro) answer=y ;;
+              ask)
+                if can_ask; then
+                  echo "claude-docker: '${SEEN_SHOWN[$i]}' is a git worktree of a repository that isn't mounted, so git won't work in it." >&2
+                  printf "claude-docker: mount what git needs from its git directory '%s' read-only (objects, refs, this worktree's entry; not its config or hooks)? Git can then show status, history and diffs, but not commit. [Y/n] " "$common" >&2
+                  IFS= read -r answer || answer=n
+                  answer=${answer:-y}
+                fi ;;
+            esac
+            case "$answer" in
+              [Yy] | [Yy][Ee][Ss])
+                WT_COMMON+=("$common"); WT_SRC+=("$src"); WT_ID+=("$(file_id "$src")")
+                WT_WS+=("$i"); WT_REPO+=("$k") ;;
+              *)
+                echo "claude-docker: warning: '${SEEN_SHOWN[$i]}' is a git worktree of '$common', which isn't mounted, so git won't work in it; pass the repository too, or set CLAUDE_DOCKER_WORKTREE_GITDIR=ro to mount its git directory read-only" >&2 ;;
+            esac ;;
         esac
       fi
     fi
     i=$((i + 1))
+  done
+}
+
+# Print, as a git config file, only the entries of the config file $2 in
+# directory $1 whose name matches extended regexp $3; a missing file gives an
+# empty one. $2 is read without following a symlink (cat_nofollow), and with
+# git's include.* not followed (--file leaves includes off). An entry with a
+# subsection, or a value other than a plain word, is dropped: what is kept are
+# format settings, never a path, URL or command.
+scrub_git_config() {
+  local raw="$stage/scrub-git-config" entry key val
+  if [ -e "$1/$2" ] || [ -L "$1/$2" ]; then
+    cat_nofollow "$1" "$2" >"$raw" || return 1
+  else
+    : >"$raw" || return 1
+  fi
+  # 1 is git config's "nothing matched". -C /: the working directory may be a
+  # worktree whose gitdir is missing, and git dies on that even for --file.
+  git -C / config --file "$raw" -z --get-regexp "$3" >"$raw.out" || [ $? -eq 1 ] || return 1
+  while IFS= read -r -d '' entry; do
+    key=${entry%%$'\n'*}
+    case "$entry" in *$'\n'*) val=${entry#*$'\n'} ;; *) val=true ;; esac
+    case "$key" in *.*.* | .* | *. | *[!a-z0-9.-]*) continue ;; esac
+    case "$val" in '' | *[!A-Za-z0-9._-]*) continue ;; esac
+    printf '[%s]\n\t%s = %s\n' "${key%%.*}" "${key#*.}" "$val"
+  done <"$raw.out"
+  rm -f "$raw" "$raw.out"
+}
+
+# Mount what git reads in a worktree from each repository build_worktree_gitdirs
+# was told to mount, and no more, read-only at the path the .git file names:
+# HEAD, objects, refs, and packed-refs, reftable and shallow when there; each
+# passed worktree's own worktrees/<name> entry; and a copy of the config with
+# only core.repositoryformatversion and extensions.*, which git needs to read
+# the object and ref formats (a config.worktree in the entry gets the same,
+# keeping only the sparse-checkout settings). Not the remotes, credentials,
+# hooks, fsmonitor or any other config; not the other worktrees' entries,
+# reflogs, modules or lfs. Nothing run.sh mounts here makes git run anything.
+# The repository may sit in a workspace another session can write, which could
+# have swapped it for a link to elsewhere since the question: so this runs just
+# before the container starts, and checks again that each worktree's pointer
+# still leads to the repository asked about, that it is still the same
+# directory (physical path and dev:inode), and that nothing mounted is a
+# symlink. The runtime resolves each source once more as the container starts;
+# a swap in that moment is not caught (docs/security.md).
+stage_worktree_gitdirs() {
+  local n=${#WT_WS[@]} m i k common src gd name entry args mounted="" part
+  m=0
+  while [ "$m" -lt "$n" ]; do
+    i=${WT_WS[$m]}; k=${WT_REPO[$m]}
+    common=${WT_COMMON[$k]}; src=${WT_SRC[$k]}
+    args=()
+    if [ "$(worktree_common_dir "${SEEN_PATHS[$i]}")" = "$common" ] \
+       && [ "$(cd -P "$common" 2>/dev/null && pwd -P)" = "$src" ] \
+       && [ "$(file_id "$src")" = "${WT_ID[$k]}" ] \
+       && gd=$(pointer_gitdir "${SEEN_PATHS[$i]}") && name=${gd##*/} && mount_safe "$name" \
+       && [ ! -L "$src/worktrees" ] && [ -d "$src/worktrees/$name" ] && [ ! -L "$src/worktrees/$name" ]; then
+      entry="$src/worktrees/$name"
+      args=("-v" "$(hostpath "$entry"):$common/worktrees/$name:ro")
+      if [ -e "$entry/config.worktree" ] || [ -L "$entry/config.worktree" ]; then
+        if scrub_git_config "$entry" config.worktree '^core\.sparsecheckout(cone)?$' \
+             >"$stage/worktree-config-$k-$m"; then
+          args+=("-v" "$(hostpath "$stage/worktree-config-$k-$m"):$common/worktrees/$name/config.worktree:ro")
+        else
+          args=()
+        fi
+      fi
+      [ "${#args[@]}" -gt 0 ] && case "$mounted" in
+        *"|$k|"*) ;;
+        *)
+          for part in HEAD objects refs packed-refs reftable shallow; do
+            if [ -L "$src/$part" ]; then
+              args=()
+            elif [ -e "$src/$part" ]; then
+              args+=("-v" "$(hostpath "$src/$part"):$common/$part:ro")
+            else
+              case "$part" in HEAD | objects | refs) args=() ;; esac
+            fi
+            [ "${#args[@]}" -gt 0 ] || break
+          done
+          if [ "${#args[@]}" -gt 0 ]; then
+            if scrub_git_config "$src" config '^(core\.repositoryformatversion|extensions\..*)$' \
+                 >"$stage/worktree-config-$k"; then
+              args+=("-v" "$(hostpath "$stage/worktree-config-$k"):$common/config:ro")
+              mounted="$mounted|$k|"
+            else
+              args=()
+            fi
+          fi ;;
+      esac
+    fi
+    if [ "${#args[@]}" -gt 0 ]; then
+      MOUNT_ARGS+=("${args[@]}")
+      echo "claude-docker: mounting what git needs from '$common' read-only for ${CONTAINER_PATHS[$i]}; git there can read but not commit" >&2
+    else
+      echo "claude-docker: warning: not mounting '$common' for ${CONTAINER_PATHS[$i]}: it, or the worktree's pointer to it, changed since startup, or holds a symlink; git won't work there" >&2
+    fi
+    m=$((m + 1))
   done
 }
 
@@ -3232,6 +3374,7 @@ main() {
   stage_host_config
   stage_git_overlays
   stage_glab_config
+  stage_worktree_gitdirs
   build_cmd
   build_volume_mounts
   run_container

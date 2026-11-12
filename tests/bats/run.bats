@@ -792,12 +792,20 @@ setup_worktree_gitdirs() {
   IS_MSYS=0
   build_git_trust 2>/dev/null
   MAIN_GIT=$(cd -P "$MAIN/.git" && pwd -P)
+  stage="$BATS_TEST_TMPDIR/stage"; mkdir -p "$stage"
+  MOUNT_ARGS=()
+  # The config copy is read with the real git.
+  git() { command git "$@"; }
 }
-# The mount args build_worktree_gitdirs added for $MAIN's git directory.
+# Ask, then mount, as main does with the other steps between.
+worktree_gitdirs() {
+  build_worktree_gitdirs && stage_worktree_gitdirs
+}
+# The mount args added for $MAIN's git directory, one per line.
 gitdir_mounts() {
   local a
   for a in "${MOUNT_ARGS[@]}"; do
-    case "$a" in *":$MAIN/.git:ro") printf '%s\n' "$a" ;; esac
+    case "$a" in *":$MAIN/.git/"*) printf '%s\n' "$a" ;; esac
   done
 }
 
@@ -875,18 +883,105 @@ gitdir_mounts() {
   [ "$(worktree_common_dir "$WS")" = "$BATS_TEST_TMPDIR/link/main/.git" ]
 }
 
-@test "build_worktree_gitdirs: =ro mounts the repository's git directory read-only at its path" {
+@test "build_worktree_gitdirs: =ro mounts only what git needs, read-only at its path" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  mkdir -p "$BATS_TEST_TMPDIR/main/.git/hooks" "$BATS_TEST_TMPDIR/main/.git/logs" "$BATS_TEST_TMPDIR/main/.git/worktrees/other"
+  printf 'x\n' >"$BATS_TEST_TMPDIR/main/.git/packed-refs"
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ "$(gitdir_mounts | sort)" = "$(sort <<EOF
+$MAIN_GIT/worktrees/repo:$MAIN/.git/worktrees/repo:ro
+$MAIN_GIT/HEAD:$MAIN/.git/HEAD:ro
+$MAIN_GIT/objects:$MAIN/.git/objects:ro
+$MAIN_GIT/refs:$MAIN/.git/refs:ro
+$MAIN_GIT/packed-refs:$MAIN/.git/packed-refs:ro
+$stage/worktree-config-0:$MAIN/.git/config:ro
+EOF
+)" ]
+  grep -q "mounting what git needs from '$MAIN/.git' read-only for /workspaces/repo" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "stage_worktree_gitdirs: the config copy keeps only the repository format" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  cat >"$BATS_TEST_TMPDIR/main/.git/config" <<'EOF'
+[core]
+	repositoryformatversion = 1
+	fsmonitor = /tmp/evil
+	hooksPath = /tmp/hooks
+[extensions]
+	objectFormat = sha256
+	worktreeConfig
+	odd = "a b"
+[extensions "sub"]
+	x = y
+[remote "origin"]
+	url = https://user:token@example.com/r.git
+[include]
+	path = /tmp/other
+EOF
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>/dev/null
+  [ "$(cat "$stage/worktree-config-0")" = "$(printf '[core]\n\trepositoryformatversion = 1\n[extensions]\n\tobjectformat = sha256\n[extensions]\n\tworktreeconfig = true')" ]
+}
+
+@test "stage_worktree_gitdirs: a config.worktree keeps only the sparse-checkout settings" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  printf '[core]\n\tsparseCheckout = true\n\tfsmonitor = /tmp/evil\n' >"$BATS_TEST_TMPDIR/main/.git/worktrees/repo/config.worktree"
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>/dev/null
+  gitdir_mounts | grep -qxF "$stage/worktree-config-0-0:$MAIN/.git/worktrees/repo/config.worktree:ro"
+  [ "$(cat "$stage/worktree-config-0-0")" = "$(printf '[core]\n\tsparsecheckout = true')" ]
+}
+
+@test "stage_worktree_gitdirs: a symlinked config mounts nothing" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  printf 'secret\n' >"$BATS_TEST_TMPDIR/secret"
+  ln -s "$BATS_TEST_TMPDIR/secret" "$BATS_TEST_TMPDIR/main/.git/config"
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+  grep -q "warning: not mounting '$MAIN/.git'" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "stage_worktree_gitdirs: a symlinked objects directory mounts nothing" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  rmdir "$BATS_TEST_TMPDIR/main/.git/objects"
+  mkdir -p "$BATS_TEST_TMPDIR/home/.ssh"
+  ln -s "$BATS_TEST_TMPDIR/home/.ssh" "$BATS_TEST_TMPDIR/main/.git/objects"
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>/dev/null
+  [ -z "$(gitdir_mounts)" ]
+}
+
+@test "stage_worktree_gitdirs: a repository swapped for a link after the question mounts nothing" {
   make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
   setup_worktree_gitdirs "$WS"
-  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
-  [ "$(gitdir_mounts)" = "$MAIN_GIT:$MAIN/.git:ro" ]
-  grep -q "mounting '$MAIN/.git' read-only for /workspaces/repo" "$BATS_TEST_TMPDIR/err"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>/dev/null
+  # Another session with the repository mounted swaps its .git for a link to
+  # a look-alike holding other data, while this one waits at the question.
+  mv "$MAIN/.git" "$MAIN/.git-real"
+  cp -R "$MAIN/.git-real" "$BATS_TEST_TMPDIR/elsewhere"
+  ln -s "$BATS_TEST_TMPDIR/elsewhere" "$MAIN/.git"
+  stage_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  [ -z "$(gitdir_mounts)" ]
+  grep -q "changed since startup" "$BATS_TEST_TMPDIR/err"
+}
+
+@test "stage_worktree_gitdirs: a repository replaced in place after the question mounts nothing" {
+  make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
+  setup_worktree_gitdirs "$WS"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>/dev/null
+  # Same path, another directory: the dev:inode no longer matches.
+  mv "$MAIN/.git" "$MAIN/.git-real"
+  cp -R "$MAIN/.git-real" "$MAIN/.git"
+  stage_worktree_gitdirs 2>/dev/null
+  [ -z "$(gitdir_mounts)" ]
 }
 
 @test "build_worktree_gitdirs: =off mounts nothing and warns" {
   make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
   setup_worktree_gitdirs "$WS"
-  CLAUDE_DOCKER_WORKTREE_GITDIR=off build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=off worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
   grep -q "warning: '$WS' is a git worktree of '$MAIN/.git', which isn't mounted, so git won't work in it" "$BATS_TEST_TMPDIR/err"
 }
@@ -895,7 +990,7 @@ gitdir_mounts() {
   make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
   setup_worktree_gitdirs "$WS"
   can_ask() { return 1; }
-  build_worktree_gitdirs <<<y 2>"$BATS_TEST_TMPDIR/err"
+  worktree_gitdirs <<<y 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
   [ "$(grep -c '\[Y/n\]' "$BATS_TEST_TMPDIR/err")" -eq 0 ]
   grep -q "won't work in it" "$BATS_TEST_TMPDIR/err"
@@ -906,16 +1001,18 @@ gitdir_mounts() {
   make_worktree "$BATS_TEST_TMPDIR/other" "$BATS_TEST_TMPDIR/main"
   setup_worktree_gitdirs "$WS" "$BATS_TEST_TMPDIR/other"
   can_ask() { return 0; }
-  build_worktree_gitdirs <<<'' 2>"$BATS_TEST_TMPDIR/err"
-  [ "$(gitdir_mounts)" = "$MAIN_GIT:$MAIN/.git:ro" ]
+  worktree_gitdirs <<<'' 2>"$BATS_TEST_TMPDIR/err"
   [ "$(grep -c '\[Y/n\]' "$BATS_TEST_TMPDIR/err")" -eq 1 ]
+  [ "$(gitdir_mounts | grep -c ":$MAIN/.git/objects:ro")" -eq 1 ]
+  gitdir_mounts | grep -qxF "$MAIN_GIT/worktrees/repo:$MAIN/.git/worktrees/repo:ro"
+  gitdir_mounts | grep -qxF "$MAIN_GIT/worktrees/other:$MAIN/.git/worktrees/other:ro"
 }
 
 @test "build_worktree_gitdirs: n at the question mounts nothing and warns" {
   make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
   setup_worktree_gitdirs "$WS"
   can_ask() { return 0; }
-  build_worktree_gitdirs <<<n 2>"$BATS_TEST_TMPDIR/err"
+  worktree_gitdirs <<<n 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
   grep -q "won't work in it" "$BATS_TEST_TMPDIR/err"
 }
@@ -923,7 +1020,7 @@ gitdir_mounts() {
 @test "build_worktree_gitdirs: the repository passed as a workspace is not offered" {
   make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
   setup_worktree_gitdirs "$BATS_TEST_TMPDIR/main" "$WS"
-  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
   [ ! -s "$BATS_TEST_TMPDIR/err" ]
 }
@@ -932,16 +1029,29 @@ gitdir_mounts() {
   make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
   owned_by_me() { [ "$1" != "$BATS_TEST_TMPDIR/main/.git/worktrees/repo" ]; }
   setup_worktree_gitdirs "$WS"
-  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
   [ ! -s "$BATS_TEST_TMPDIR/err" ]
+}
+
+@test "build_worktree_gitdirs: a path with a control character, : or , is not offered" {
+  local d
+  mkdir -p "$BATS_TEST_TMPDIR/main/.git"
+  for d in "$(printf 'esc\033[2Kx')" 'co:lon' 'com,ma'; do
+    make_worktree "$WS" "$BATS_TEST_TMPDIR/$d"
+    setup_worktree_gitdirs "$WS"
+    can_ask() { return 0; }
+    worktree_gitdirs <<<y 2>"$BATS_TEST_TMPDIR/err"
+    [ "${#MOUNT_ARGS[@]}" -eq 0 ] || [ -z "$(printf '%s\n' "${MOUNT_ARGS[@]}" | grep -F "$d")" ]
+    [ "$(grep -c '\[Y/n\]' "$BATS_TEST_TMPDIR/err")" -eq 0 ]
+  done
 }
 
 @test "build_worktree_gitdirs: nothing is offered on Windows" {
   make_worktree "$WS" "$BATS_TEST_TMPDIR/main"
   setup_worktree_gitdirs "$WS"
   IS_MSYS=1
-  CLAUDE_DOCKER_WORKTREE_GITDIR=ro build_worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
+  CLAUDE_DOCKER_WORKTREE_GITDIR=ro worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
 }
 
