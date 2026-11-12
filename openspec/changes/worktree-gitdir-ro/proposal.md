@@ -22,11 +22,20 @@ startup says why. Users of tools that keep worktrees outside the repository
   whose git directory isn't inside a mounted workspace, `run.sh` asks:
   ```
   claude-docker: '~/wt' is a git worktree of a repository that isn't mounted, so git won't work in it.
-  claude-docker: mount its git directory '/Users/me/repo/.git' read-only? Git can then show status, history and diffs, but not commit. [Y/n]
+  claude-docker: mount what git needs from its git directory '/Users/me/repo/.git' read-only (objects, refs, this worktree's entry; not its config or hooks)? Git can then show status, history and diffs, but not commit. [Y/n]
   ```
-  - Yes (the default): the repository's git directory, and only that, is
-    mounted read-only at the path the `.git` file names, so the pointer
-    resolves unchanged. A notice says so.
+  - Yes (the default): what git reads from the repository's git directory,
+    and only that, is mounted read-only at the path the `.git` file names, so
+    the pointer resolves unchanged: `HEAD`, `objects`, `refs` (with
+    `packed-refs`, `reftable`, `shallow`), this worktree's `worktrees/<name>`
+    entry, and a copy of the config holding only the repository format
+    (`core.repositoryformatversion`, `extensions.*`). Remote URLs,
+    credentials, hooks, `core.fsmonitor`, reflogs and other worktrees' entries
+    stay on the host. A notice says so.
+  - Checked again just before the container starts: the pointer still leads
+    to the same directory (path and dev:inode), and nothing mounted is a
+    symlink, so a swap made by another session while the question waits is
+    caught.
   - No: nothing is mounted, and a warning says git won't work there.
   - One question per repository, however many of its worktrees are passed.
 - **`CLAUDE_DOCKER_WORKTREE_GITDIR`** answers in advance: `ro` mounts without
@@ -69,7 +78,9 @@ workspaces to system git config* holds as written, and git matches
 
 - `entrypoint.sh`: `trust_workspaces` runs git from `/`.
 - `run.sh`: `build_git_trust` keeps which workspaces it vouched for;
-  new `build_worktree_gitdirs` after it; `validate_opts` checks
-  `CLAUDE_DOCKER_WORKTREE_GITDIR`.
+  new `build_worktree_gitdirs` after it asks, and `stage_worktree_gitdirs`,
+  last before `build_cmd`, checks again and mounts; `pointer_gitdir` and
+  `gitdir_commondir` are shared with `git_dirs_owned`; `validate_opts`
+  checks `CLAUDE_DOCKER_WORKTREE_GITDIR`.
 - `tests/bats/entrypoint.bats`, `tests/bats/run.bats`.
 - `docs/usage.md` (Git worktrees), `docs/security.md` (what is mounted).
