@@ -6,7 +6,7 @@ Inside the container every workspace is `/workspaces/<name>`, so when the agent 
 
 - New opt-in wrapper flag `--host-paths` (env `CLAUDE_DOCKER_HOST_PATHS=1`). With it, `run.sh` passes claude a short system-prompt addition that maps each `/workspaces/<name>` to its absolute host path (symlinks unresolved, in Windows form under Git Bash). The addition tells the agent to work through the `/workspaces` paths and to give the host path when it names a file for the user.
 - claude keeps only the last `--append-system-prompt` it is given, so `run.sh` takes any `--append-system-prompt` the user passed after `--` out of the claude flags and puts the text of the last one after the map in a single flag. `--append-system-prompt-file` is left alone: claude combines one of those with one `--append-system-prompt`.
-- A host path containing a control character is left out of the map, with a warning.
+- A workspace whose host path or container path contains a control character is left out of the map, with a one-line warning. The container path is the basename of the resolved host path, so a symlink can carry a control character the typed path doesn't.
 
 ## Capabilities
 

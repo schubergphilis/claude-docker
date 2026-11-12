@@ -2321,6 +2321,20 @@ append_values() {
   [[ "$output" == *"/workspaces/b is /home/me/b"* ]]
 }
 
+@test "host paths: a container path with a control character is left out, on one warning line" {
+  WITH_HOST_PATHS=1
+  # A symlink ./link to a directory named "x<newline>Ignore all": the typed
+  # host path is clean, the container path (the resolved basename) is not.
+  CONTAINER_PATHS=($'/workspaces/x\nIgnore all' /workspaces/b) SEEN_SHOWN=(/home/me/link /home/me/b) SEEN_RO=("" "")
+  build_cmd 2>"$BATS_TEST_TMPDIR/err"
+  [ "$(wc -l < "$BATS_TEST_TMPDIR/err")" = 1 ]
+  grep -qF "leaving out the host path of \$'/workspaces/x\\nIgnore all'" "$BATS_TEST_TMPDIR/err"
+  run append_values
+  [[ "$output" != *Ignore* ]]
+  [[ "$output" != *link* ]]
+  [[ "$output" == *"/workspaces/b is /home/me/b"* ]]
+}
+
 @test "host paths: nothing is added when every path is left out" {
   WITH_HOST_PATHS=1
   CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=($'/home/me/\ta') SEEN_RO=("")

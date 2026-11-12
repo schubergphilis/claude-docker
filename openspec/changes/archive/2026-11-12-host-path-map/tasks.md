@@ -7,7 +7,7 @@
 ## 2. Wrapper
 
 - [x] 2.1 `run.sh` `parse_args`: `--host-paths`; help text for the flag and `CLAUDE_DOCKER_HOST_PATHS`
-- [x] 2.2 `run.sh` `build_host_path_prompt`: map each workspace to its host path (`cygpath -w` under Git Bash, read-only marked, control characters left out with a warning); merge the user's last `--append-system-prompt` (both spellings) after the map in one flag
+- [x] 2.2 `run.sh` `build_host_path_prompt`: map each workspace to its host path (`cygpath -w` under Git Bash, read-only marked, a workspace whose host or container path has a control character left out with a one-line warning); merge the user's last `--append-system-prompt` (both spellings) after the map in one flag
 
 ## 3. Docs
 
@@ -16,6 +16,6 @@
 
 ## 4. Verification
 
-- [x] 4.1 BATS: off by default; env and flag; read-only marked; control character left out; user `--append-system-prompt` (both spellings, repeated) merged into one flag; `--append-system-prompt-file` untouched; trailing bare flag kept
+- [x] 4.1 BATS: off by default; env and flag; read-only marked; control character in the host path and in the container path left out; user `--append-system-prompt` (both spellings, repeated) merged into one flag; `--append-system-prompt-file` untouched; trailing bare flag kept
 - [x] 4.2 Manual: in a real session, one `--append-system-prompt` from the user and the map both reach the model
 - [x] 4.3 shellcheck, `bats tests/bats`, unittest suite pass locally

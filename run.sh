@@ -2963,11 +2963,14 @@ host_path_map() {
     if [ "${IS_MSYS:-0}" = "1" ] && command -v cygpath >/dev/null 2>&1; then
       shown=$(cygpath -w "$shown") || shown=${SEEN_SHOWN[$i]}
     fi
-    # A newline could start a line of its own in the prompt: a path with any
-    # control character is left out rather than escaped.
-    case "$shown" in
+    # A newline could start a line of its own in the prompt: a workspace whose
+    # host or container path has any control character is left out rather
+    # than escaped. The container path is the basename of the resolved host
+    # path, so a symlink can carry one the typed path doesn't. %q keeps the
+    # warning on one line.
+    case "${CONTAINER_PATHS[$i]}$shown" in
       *[[:cntrl:]]*)
-        echo "claude-docker: --host-paths: leaving out the host path of ${CONTAINER_PATHS[$i]}: it contains a control character" >&2 ;;
+        printf 'claude-docker: --host-paths: leaving out the host path of %q: a path contains a control character\n' "${CONTAINER_PATHS[$i]}" >&2 ;;
       *)
         printf -- '- %s is %s on the host%s\n' "${CONTAINER_PATHS[$i]}" "$shown" "${SEEN_RO[$i]:+ (read-only)}" ;;
     esac
