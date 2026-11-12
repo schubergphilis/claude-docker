@@ -185,6 +185,11 @@ main() {
   install_cas || return
   trust_workspaces || return
   approve_api_key || return
+  # A root host user: claude runs as root, so run.sh grants this container no
+  # capabilities at all (#210). The steps above need none while the volumes
+  # are root-owned: chown to the owner a file already has is allowed. A volume
+  # a non-root run has chowned fails at the first chown above; root couldn't
+  # write it without CAP_DAC_OVERRIDE anyway.
   if [ "$uid" = 0 ]; then
     exec "$@"
   fi

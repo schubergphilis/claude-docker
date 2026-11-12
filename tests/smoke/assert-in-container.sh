@@ -175,11 +175,13 @@ check_security() {
   fi
 
   # Root-legacy path: with HOST_UID=0 the entrypoint execs directly as root
-  # (entrypoint.sh :11-13) and never drops privileges, so root legitimately
-  # retains effective caps. The dropped-privilege posture below does NOT apply;
-  # asserting CapEff==0 here would wrongly fail a correct image.
+  # and never drops privileges, so run.sh grants no capabilities at all (#210):
+  # anything added would stay effective for the whole session.
   if [ "${EXPECT_UID:-0}" = "0" ]; then
-    pass "security: HOST_UID=0 root-legacy path — cap-drop posture N/A (runs as root by design)"
+    assert_eq "root: CapEff=0" "$cap_eff" "0000000000000000"
+    assert_eq "root: CapPrm=0" "$cap_prm" "0000000000000000"
+    assert_eq "root: CapAmb=0" "$cap_amb" "0000000000000000"
+    assert_eq "root: CapBnd=0" "$cap_bnd" "0000000000000000"
     return
   fi
 

@@ -165,6 +165,25 @@ status_fixture() {
   [[ "$output" == *"PASS: CapBnd+NoNewPrivs"* ]]
 }
 
+@test "check_security: root runs with no capabilities at all (#210)" {
+  printf '%s\n' "CapPrm:	0000000000000000" "CapEff:	0000000000000000" "CapAmb:	0000000000000000" \
+    "CapBnd:	0000000000000000" "NoNewPrivs:	1" > "$PROC_STATUS"
+  find() { :; }
+  EXPECT_UID=0 run check_security
+  [[ "$output" != *"FAIL: root:"* ]] && [[ "$output" != *"FAIL: NoNewPrivs"* ]]
+  [[ "$output" == *"PASS: root: CapEff=0"* ]]
+  [[ "$output" == *"PASS: root: CapBnd=0"* ]]
+}
+
+@test "check_security: root holding the setup caps fails (#210)" {
+  printf '%s\n' "CapPrm:	00000000000000c5" "CapEff:	00000000000000c5" "CapAmb:	0000000000000000" \
+    "CapBnd:	00000000000000c5" "NoNewPrivs:	1" > "$PROC_STATUS"
+  find() { :; }
+  EXPECT_UID=0 run check_security
+  [[ "$output" == *"FAIL: root: CapEff=0"* ]]
+  [[ "$output" == *"FAIL: root: CapBnd=0"* ]]
+}
+
 @test "check_security: a missing Cap field fails instead of aborting" {
   status_fixture
   EXPECT_UID=1000 run bash -c 'set -euo pipefail; source "$1"; PROC_STATUS=$2; find() { :; }; check_security; echo done' _ \

@@ -38,7 +38,7 @@ The container narrows blast radius vs. running `claude --yolo` on the host, but 
 
 **Applied at runtime:**
 
-- `--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH`. The four added caps are held only during entrypoint setup. The kernel clears them from the effective / permitted / ambient sets when the entrypoint drops UID 0 → host UID (the bounding set keeps them but is inert under `no-new-privileges`), so claude itself runs with no usable capabilities.
+- `--cap-drop ALL --cap-add CHOWN --cap-add SETUID --cap-add SETGID --cap-add DAC_READ_SEARCH`. The four added caps are held only during entrypoint setup. The kernel clears them from the effective / permitted / ambient sets when the entrypoint drops UID 0 → host UID (the bounding set keeps them but is inert under `no-new-privileges`), so claude itself runs with no usable capabilities. When you run `claude-docker` as root, the container gets none of the four: claude then runs as root, with no capabilities. A root run can't use the named volumes after a non-root run has taken them over; use one or the other.
 - `--security-opt no-new-privileges`.
 - `--init`: tini reaps subprocess zombies; `runuser` would otherwise be PID 1.
 - The container starts as root and drops to the host user before exec'ing claude (see [File ownership](usage.md#file-ownership)).
