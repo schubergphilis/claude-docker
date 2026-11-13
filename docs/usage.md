@@ -163,7 +163,14 @@ This asymmetry is deliberate: the extension flag — when written into the host'
 
 To convert pre-existing absolute-path worktrees, ask Claude to run `git worktree repair --relative-paths <worktree-path>`, or type it yourself as `! git worktree repair --relative-paths <worktree-path>`. New worktrees added in the container get relative paths automatically.
 
-**Trade-off:** container-side `git config` writes (e.g. `git remote add ...` writing to local config) land in the ephemeral overlay and are discarded when the container exits. Persistent `git config` edits should happen on the host.
+**Repo config is read-only in a session.** The overlay is mounted read-only, so nothing in the container can change a repo's config: git commands that try print `could not write config file .git/config`, and the rest of the command still runs. In practice:
+
+- `git push -u` pushes, but doesn't record the upstream branch. Push with `git push origin HEAD` instead.
+- New branches don't track a remote branch: the image sets `branch.autoSetupMerge = false` in its system git config, so git doesn't attempt that write. Your repo or global config still overrides it.
+- `git branch -d` deletes the branch, then prints the error while removing its (possibly empty) config section.
+- `git remote add`, `git remote set-url`, `git branch --set-upstream-to` and `git config --local` fail. Change repo config on the host: the overlay is copied at start, so the next session sees it.
+
+`claude-docker` prints a line about this at start, and tells Claude the same, so it doesn't try to fix the errors.
 
 **Fallback — `git worktree repair` (no flag):** ask Claude to run it, or type `! git worktree repair`.
 

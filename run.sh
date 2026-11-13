@@ -249,6 +249,9 @@ WITH_EGRESS_ALLOWLIST=0
 EGRESS_ALLOWLIST_ARG=""
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 MOUNT_ARGS=()
+# 1 once stage_git_overlays mounts a read-only .git/config; add_claude_flags
+# then tells the agent.
+GIT_CONFIG_RO=0
 # COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
 # the container and custom theme colours render rounded (host-config-parity).
 ENV_ARGS=(-e TERM -e COLORTERM)
@@ -2811,9 +2814,13 @@ stage_git_overlays() {
   # live in the shared on-disk tree and are readable by both ends.
   # Bumping core.repositoryformatversion to 1 in the overlay is required — git
   # refuses an extensions entry on a v0 repo ("v1-only extension found").
-  # Overlay is NOT mounted :ro: container-side `git config` / `git remote add`
-  # need to succeed; those writes land in the ephemeral overlay and are dropped
-  # at exit, which matches the trade-off documented in docs/security.md.
+  # The overlay is mounted :ro (#1). git saves config by renaming config.lock
+  # over it, and a rename over a mountpoint fails (EBUSY) whether the mount is
+  # read-only or not, so git's own config writes fail either way. :ro also
+  # fails a tool that writes the file in place, which would otherwise succeed
+  # and vanish at exit. The session is told at start (stderr, and the agent
+  # through add_claude_flags); the image sets branch.autoSetupMerge=false so
+  # creating a branch doesn't try that write. See docs/usage.md.
   # Counter loop for bash 3.2 (no "${!arr[@]}" on indexed arrays).
   n=${#SEEN_NAMES[@]}
   i=0
@@ -2850,7 +2857,8 @@ EOF
          && case $ws_autocrlf in true | false | input) ;; *) false ;; esac; then
         printf '[core]\n\tautocrlf = %s\n' "$ws_autocrlf" >>"$stage/git-config-$ws_name" || exit 1
       fi
-      MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config")
+      MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config:ro")
+      GIT_CONFIG_RO=1
     else
       rm -f "$stage/git-config-$ws_name"
       # Quiet for a workspace with no repo, or a worktree/submodule pointer.
@@ -2861,6 +2869,9 @@ EOF
     fi
     i=$((i + 1))
   done
+  if [ "$GIT_CONFIG_RO" = "1" ]; then
+    echo "claude-docker: repo config (.git/config) is read-only in the container; push with 'git push origin HEAD' (-u can't save tracking) and change repo config on the host" >&2
+  fi
 }
 
 # The in-container glab reads job_token through the OS keyring whenever the
@@ -2914,12 +2925,32 @@ stage_glab_config() {
 # --append-system-prompt is left out, and the last one's text (the one claude
 # would have used) follows the map in a single flag.
 # --append-system-prompt-file stays the user's.
+#
+# A read-only .git/config overlay (GIT_CONFIG_RO, #1): tell claude, so it
+# doesn't spend turns on the failed config writes. The text quotes git's
+# message (tests/smoke/assert-in-container.sh checks git still prints it).
+# Both notes, when present, share the one flag in the same way.
 add_claude_flags() {
-  local n i a map="" user_text="" have_user=0 flags=()
+  local n i a map="" notes="" user_text="" have_user=0 flags=()
   if [ "$WITH_HOST_PATHS" = "1" ] || [ "${CLAUDE_DOCKER_HOST_PATHS:-0}" = "1" ]; then
     map=$(host_path_map) || return 1
   fi
-  if [ -z "$map" ]; then
+  if [ -n "$map" ]; then
+    notes="# Host paths (claude-docker)
+This session runs in a container. Each workspace is mounted from a directory on the user's host:
+${map}
+Read and write files only through the /workspaces paths: the host paths do not exist in this container.
+When you name a file for the user to open, give its host path."
+  fi
+  if [ "$GIT_CONFIG_RO" = "1" ]; then
+    [ -z "$notes" ] || notes+=$'\n\n'
+    notes+="# Repository config (claude-docker)
+Each repository's .git/config under /workspaces is read-only in this session, so git can't change it. A git command that tries prints \"could not write config file .git/config\". That is expected and needs no fixing: in a push, branch or worktree command the rest of the command still ran.
+- Push with \`git push origin HEAD\`, not \`git push -u\`: -u pushes but can't record the upstream branch, and git's advice to run \`git branch --set-upstream-to\` fails the same way.
+- New branches don't track a remote branch; name the remote and branch when you push or pull.
+- Leave changes to remotes and other repository settings to the user, on the host."
+  fi
+  if [ -z "$notes" ]; then
     [ "${#CLAUDE_FLAGS[@]}" -eq 0 ] || CMD+=("${CLAUDE_FLAGS[@]}")
     return 0
   fi
@@ -2942,11 +2973,7 @@ add_claude_flags() {
     i=$((i + 1))
   done
 
-  a="# Host paths (claude-docker)
-This session runs in a container. Each workspace is mounted from a directory on the user's host:
-${map}
-Read and write files only through the /workspaces paths: the host paths do not exist in this container.
-When you name a file for the user to open, give its host path."
+  a=$notes
   [ "$have_user" = "0" ] || a+=$'\n\n'"$user_text"
   CMD+=("--append-system-prompt" "$a")
   [ "${#flags[@]}" -eq 0 ] || CMD+=("${flags[@]}")
