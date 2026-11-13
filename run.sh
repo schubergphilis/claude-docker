@@ -1668,8 +1668,7 @@ build_worktree_gitdirs() {
               ro) answer=y ;;
               ask)
                 if can_ask; then
-                  echo "claude-docker: '${SEEN_SHOWN[$i]}' is a git worktree of a repository that isn't mounted, so git won't work in it." >&2
-                  printf "claude-docker: mount what git needs from its git directory '%s' read-only (objects, refs, this worktree's entry; not its config or hooks)? Git can then show status, history and diffs, but not commit. [Y/n] " "$common" >&2
+                  printf "claude-docker: '%s' is a git worktree. Mount its repository's .git (%s) read-only? [Y/n] " "${SEEN_SHOWN[$i]}" "$common" >&2
                   IFS= read -r answer || answer=n
                   answer=${answer:-y}
                 fi ;;
@@ -1679,7 +1678,7 @@ build_worktree_gitdirs() {
                 WT_COMMON+=("$common"); WT_SRC+=("$src"); WT_ID+=("$(file_id "$src")")
                 WT_WS+=("$i"); WT_REPO+=("$k") ;;
               *)
-                echo "claude-docker: warning: '${SEEN_SHOWN[$i]}' is a git worktree of '$common', which isn't mounted, so git won't work in it; pass the repository too, or set CLAUDE_DOCKER_WORKTREE_GITDIR=ro to mount its git directory read-only" >&2 ;;
+                echo "claude-docker: warning: git won't work in '${SEEN_SHOWN[$i]}': its repository isn't mounted (pass it too, or set CLAUDE_DOCKER_WORKTREE_GITDIR=ro)" >&2 ;;
             esac ;;
         esac
       fi
@@ -1778,9 +1777,9 @@ stage_worktree_gitdirs() {
     fi
     if [ "${#args[@]}" -gt 0 ]; then
       MOUNT_ARGS+=("${args[@]}")
-      echo "claude-docker: mounting what git needs from '$common' read-only for ${CONTAINER_PATHS[$i]}; git there can read but not commit" >&2
+      echo "claude-docker: mounting '$common' read-only for ${CONTAINER_PATHS[$i]}" >&2
     else
-      echo "claude-docker: warning: not mounting '$common' for ${CONTAINER_PATHS[$i]}: it, or the worktree's pointer to it, changed since startup, or holds a symlink; git won't work there" >&2
+      echo "claude-docker: warning: not mounting '$common': it changed since startup or holds a symlink, so git won't work in ${CONTAINER_PATHS[$i]}" >&2
     fi
     m=$((m + 1))
   done

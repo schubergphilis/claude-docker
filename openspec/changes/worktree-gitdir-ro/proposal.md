@@ -21,8 +21,7 @@ startup says why. Users of tools that keep worktrees outside the repository
   workspace whose `.git` file names a gitdir by absolute path, in a repository
   whose git directory isn't inside a mounted workspace, `run.sh` asks:
   ```
-  claude-docker: '~/wt' is a git worktree of a repository that isn't mounted, so git won't work in it.
-  claude-docker: mount what git needs from its git directory '/Users/me/repo/.git' read-only (objects, refs, this worktree's entry; not its config or hooks)? Git can then show status, history and diffs, but not commit. [Y/n]
+  claude-docker: '~/wt' is a git worktree. Mount its repository's .git (/Users/me/repo/.git) read-only? [Y/n]
   ```
   - Yes (the default): what git reads from the repository's git directory,
     and only that, is mounted read-only at the path the `.git` file names, so
