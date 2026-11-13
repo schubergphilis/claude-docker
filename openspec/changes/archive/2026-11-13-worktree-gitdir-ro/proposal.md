@@ -64,7 +64,13 @@ startup says why. Users of tools that keep worktrees outside the repository
 ### Modified Capabilities
 
 - `multi-workspace-mounts`:
-  - ADDED *A worktree's repository can be mounted read-only*.
+  - ADDED *A worktree's repository can be mounted read-only*, *Only what
+    git reads is mounted from a worktree's repository*, *A worktree's
+    repository config is mounted as a format-only copy*, *The worktree mount
+    is checked again before the container starts*, *Only a real worktree of a
+    repository you own is offered*, *The worktree mount avoids container
+    paths and unsafe characters* and *CLAUDE_DOCKER_WORKTREE_GITDIR decides
+    the worktree mount offer*.
   - MODIFIED *Nested worktrees portable via a container-only git config
     overlay*: a worktree mounted without its main repository no longer only
     falls back to `git worktree repair`; it gets the offer above.

@@ -2,57 +2,15 @@
 
 ### Requirement: A worktree's repository can be mounted read-only
 
-When a workspace's `.git` is a regular file naming its gitdir by an absolute path, that gitdir has a `commondir`, and the repository's git directory it leads to lies inside no mounted workspace, `run.sh` SHALL offer to mount what git reads from that git directory, read-only. Accepted, `run.sh` SHALL bind-mount, each read-only from its physical host path at its place under the path the `.git` file and `commondir` name (normalized, symlinks unresolved), so the pointer resolves unchanged in the container: `HEAD`, `objects`, `refs`, `packed-refs`, `reftable` and `shallow` (the last three when present), and the `worktrees/<name>` entry of each such workspace passed. It SHALL mount, as `config`, a copy of the repository's config holding only `core.repositoryformatversion` and `extensions.*` entries without a subsection whose value is a plain word, read without following a symlink or an `include`; and, when the entry has a `config.worktree`, a copy of it holding only `core.sparseCheckout` and `core.sparseCheckoutCone`. Nothing else of the git directory SHALL be mounted (not its hooks, reflogs, other worktrees' entries, `modules` or `lfs`), nor the repository's working tree. `run.sh` SHALL print a notice naming the git directory.
-
-Because the repository may sit in a directory another session can write, `run.sh` SHALL check again just before starting the container, after the question: each workspace's pointer SHALL still lead to the same git directory, that directory SHALL still have the same physical path and dev:inode as when it was offered, and none of the paths mounted from it SHALL be a symbolic link. Otherwise nothing SHALL be mounted for that workspace and `run.sh` SHALL print a warning. The runtime resolves each source once more as it starts the container; a swap in that moment is out of reach of `run.sh`.
-
-Because the workspace is writable from the container, `run.sh` SHALL make the offer only when what the `.git` file leads to is laid out as git lays out a worktree: the gitdir SHALL be `<git directory>/worktrees/<name>` both as normalized text and as physical path (no symlink or `..` between them), the git directory SHALL have `HEAD`, `objects` and `refs`, and the gitdir's own `gitdir` file SHALL name the workspace's `.git` (absolute, or relative to the gitdir). Otherwise no offer and no mount SHALL follow.
-
-`run.sh` SHALL make the offer only for a workspace it vouches for under *In-container git trusts only the workspaces you own*, SHALL NOT make it on Windows hosts or without `git` on the host, and SHALL NOT mount at `/`, or at or under `/workspaces`, `/root`, `/proc`, `/sys`, `/dev`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/run` or `/boot`, or when the git directory's path as named or physical, or the worktree's name, contains `:`, `,` or a control character. Several workspaces that are worktrees of one repository SHALL lead to one offer, and the repository's shared parts SHALL be mounted once.
-
-`CLAUDE_DOCKER_WORKTREE_GITDIR` SHALL decide the offer: `ask` (the default, also when unset or empty) asks on the terminal, `ro` mounts without asking, `off` never mounts. Any other value SHALL stop `claude-docker` with an error naming the variable before any container starts. Asked, an empty answer or `y`/`yes` in any case SHALL accept; anything else SHALL decline. When stdin or stderr is not a terminal, `ask` SHALL decline without reading.
-
-Whenever the offer is declined, `run.sh` SHALL print a warning naming the workspace, saying git won't work there because its repository isn't mounted. The session SHALL start either way.
+When a workspace's `.git` is a regular file naming its gitdir by an absolute path, that gitdir has a `commondir`, and the git directory it leads to lies inside no mounted workspace, `run.sh` SHALL offer to mount that git directory read-only at the path the `.git` file and `commondir` name (normalized, symlinks unresolved), so the pointer resolves unchanged. Accepted, it SHALL print a notice naming it. Worktrees of one repository SHALL lead to one offer.
 
 #### Scenario: Accepting the offer makes git read work in the worktree
 
 - **GIVEN** `~/wt` is a worktree of `~/repo` whose `.git` file names `/Users/me/repo/.git/worktrees/wt`
 - **WHEN** the user runs `claude-docker ~/wt` on a terminal and presses Enter at the question
-- **THEN** `HEAD`, `objects`, `refs` and `worktrees/wt` of `/Users/me/repo/.git` are mounted read-only at the same paths in the container, with the config copy at `/Users/me/repo/.git/config`, and a notice names it
+- **THEN** the git directory is mounted read-only at `/Users/me/repo/.git` in the container, and a notice names it
 - **AND** `git status`, `git log` and `git diff` in `/workspaces/wt` succeed
 - **AND** `git commit` there fails without changing anything on the host
-- **AND** the files of `~/repo` outside `.git`, its hooks, and its other worktrees' entries are not in the container
-
-#### Scenario: The repository's config does not reach the container
-
-- **GIVEN** `~/repo/.git/config` sets `remote.origin.url` with a token in it, `core.hooksPath`, `core.fsmonitor` and `extensions.objectFormat = sha256`
-- **WHEN** the user accepts the offer
-- **THEN** `/Users/me/repo/.git/config` in the container holds `core.repositoryformatversion` and `extensions.objectformat` only
-
-#### Scenario: A repository swapped while the question waits is not mounted
-
-- **GIVEN** the user has been asked about `~/repo/.git`
-- **WHEN** another session replaces `~/repo/.git` with a symbolic link, or with another directory, before the user answers
-- **THEN** nothing is mounted for `~/wt`, and a warning says so
-
-#### Scenario: Declining leaves git broken and says so
-
-- **WHEN** the user answers `n`, or `CLAUDE_DOCKER_WORKTREE_GITDIR=off` is set
-- **THEN** nothing is mounted for the repository
-- **AND** a warning names `~/wt` and says git won't work there
-- **AND** the session starts
-
-#### Scenario: Pre-approved without a question
-
-- **GIVEN** `CLAUDE_DOCKER_WORKTREE_GITDIR=ro`
-- **WHEN** the user runs `claude-docker ~/wt`
-- **THEN** no question is asked, and what git needs from the git directory is mounted read-only with a notice
-
-#### Scenario: No terminal, no mount
-
-- **GIVEN** `CLAUDE_DOCKER_WORKTREE_GITDIR` is unset and stdin is not a terminal
-- **WHEN** `claude-docker ~/wt` runs
-- **THEN** nothing is read from stdin, nothing is mounted, and the warning is printed
 
 #### Scenario: The repository is already a workspace
 
@@ -62,7 +20,47 @@ Whenever the offer is declined, `run.sh` SHALL print a warning naming the worksp
 #### Scenario: Two worktrees of one repository
 
 - **WHEN** the user runs `claude-docker ~/wt-a ~/wt-b` and both are worktrees of `~/repo`
-- **THEN** one question is asked, `objects` and the other shared parts are mounted once, and each worktree's own entry is mounted
+- **THEN** one question is asked, the repository's shared parts are mounted once, and each worktree's own entry is mounted
+
+### Requirement: Only what git reads is mounted from a worktree's repository
+
+For an accepted offer `run.sh` SHALL mount read-only, each from its physical host path: `HEAD`, `objects` and `refs`, and `packed-refs`, `reftable` and `shallow` when present, and the `worktrees/<name>` entry of each worktree passed. Nothing else of the git directory SHALL be mounted (not its hooks, reflogs, other worktrees' entries, `modules` or `lfs`), nor the repository's working tree.
+
+#### Scenario: Hooks, other worktrees and the working tree stay on the host
+
+- **GIVEN** `~/repo/.git` has `hooks/`, `logs/` and a second worktree's entry `worktrees/other`
+- **WHEN** the user accepts the offer for `~/wt`
+- **THEN** none of those, nor the files of `~/repo` outside `.git`, are in the container
+
+### Requirement: A worktree's repository config is mounted as a format-only copy
+
+In place of the repository's `config`, `run.sh` SHALL mount a copy holding only the `core.repositoryformatversion` and `extensions.*` entries that have no subsection and a plain-word value, read without following a symlink or an `include`. A `config.worktree` in the worktree's entry SHALL be replaced the same way, keeping only `core.sparseCheckout` and `core.sparseCheckoutCone`.
+
+#### Scenario: The repository's config does not reach the container
+
+- **GIVEN** `~/repo/.git/config` sets `remote.origin.url` with a token in it, `core.hooksPath`, `core.fsmonitor` and `extensions.objectFormat = sha256`
+- **WHEN** the user accepts the offer
+- **THEN** `/Users/me/repo/.git/config` in the container holds `core.repositoryformatversion` and `extensions.objectformat` only
+
+#### Scenario: A symlinked config mounts nothing
+
+- **GIVEN** `~/repo/.git/config` is a symbolic link
+- **WHEN** the user accepts the offer
+- **THEN** nothing is mounted for `~/wt`, and a warning says so
+
+### Requirement: The worktree mount is checked again before the container starts
+
+Just before starting the container, after the question, `run.sh` SHALL check that each worktree's pointer still leads to the same git directory, that it still has the same physical path and dev:inode as when offered, and that nothing mounted from it is a symbolic link. Otherwise it SHALL mount nothing for that worktree and print a warning. A swap after that, as the runtime resolves the sources, is out of its reach.
+
+#### Scenario: A repository swapped while the question waits is not mounted
+
+- **GIVEN** the user has been asked about `~/repo/.git`
+- **WHEN** another session replaces `~/repo/.git` with a symbolic link, or with another directory, before the user answers
+- **THEN** nothing is mounted for `~/wt`, and a warning says so
+
+### Requirement: Only a real worktree of a repository you own is offered
+
+`run.sh` SHALL make the offer only when the gitdir is `<git directory>/worktrees/<name>` both as normalized text and as physical path, the git directory has `HEAD`, `objects` and `refs`, and the gitdir's own `gitdir` file names the workspace's `.git`. It SHALL make it only for a workspace it vouches for under *In-container git trusts only the workspaces you own*, and not on Windows hosts or without `git` on the host.
 
 #### Scenario: Another user's repository is not offered
 
@@ -75,6 +73,39 @@ Whenever the offer is declined, `run.sh` SHALL print a warning naming the worksp
 - **GIVEN** a session wrote `~/wt/.git` to name a gitdir whose `commondir` leads to the user's home directory, or to another repository's worktree gitdir, or through a symlink to a path other than the one git opens
 - **WHEN** the user runs `CLAUDE_DOCKER_WORKTREE_GITDIR=ro claude-docker ~/wt`
 - **THEN** no question is asked and nothing is mounted for it
+
+### Requirement: The worktree mount avoids container paths and unsafe characters
+
+`run.sh` SHALL NOT offer a mount at `/`, or at or under `/workspaces`, `/root`, `/proc`, `/sys`, `/dev`, `/etc`, `/usr`, `/bin`, `/sbin`, `/lib`, `/lib64`, `/run` or `/boot`, nor when the git directory's path, as named or physical, or the worktree's name contains `:`, `,` or a control character.
+
+#### Scenario: A path with a control character is not offered
+
+- **GIVEN** `~/wt` is a worktree of a repository whose directory name holds an escape sequence, a `:` or a `,`
+- **WHEN** the user runs `claude-docker ~/wt`
+- **THEN** no question is asked and nothing is mounted for it
+
+### Requirement: CLAUDE_DOCKER_WORKTREE_GITDIR decides the worktree mount offer
+
+`CLAUDE_DOCKER_WORKTREE_GITDIR` SHALL decide the offer: `ask` (the default, also when unset or empty) asks on the terminal, `ro` mounts without asking, `off` never mounts. Any other value SHALL stop `claude-docker` before any container starts. Asked, an empty answer or `y`/`yes` in any case accepts, anything else declines. Without a terminal on stdin and stderr, `ask` declines without reading. A decline SHALL print a warning naming the workspace.
+
+#### Scenario: Declining leaves git broken and says so
+
+- **WHEN** the user answers `n`, or `CLAUDE_DOCKER_WORKTREE_GITDIR=off` is set
+- **THEN** nothing is mounted for the repository
+- **AND** a warning names `~/wt` and says git won't work there
+- **AND** the session starts
+
+#### Scenario: Pre-approved without a question
+
+- **GIVEN** `CLAUDE_DOCKER_WORKTREE_GITDIR=ro`
+- **WHEN** the user runs `claude-docker ~/wt`
+- **THEN** no question is asked, and the git directory is mounted read-only with a notice
+
+#### Scenario: No terminal, no mount
+
+- **GIVEN** `CLAUDE_DOCKER_WORKTREE_GITDIR` is unset and stdin is not a terminal
+- **WHEN** `claude-docker ~/wt` runs
+- **THEN** nothing is read from stdin, nothing is mounted, and the warning is printed
 
 #### Scenario: An unknown value is refused
 
