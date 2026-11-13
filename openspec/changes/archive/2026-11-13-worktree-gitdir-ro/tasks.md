@@ -6,6 +6,6 @@
 - [x] 1.4 `run.sh`: `build_worktree_gitdirs` asks once per repository not inside a mounted workspace, mounts its git directory `:ro` at that path on yes, warns on no; `CLAUDE_DOCKER_WORKTREE_GITDIR` (`ask`/`ro`/`off`); no terminal declines. Verify with bats.
 - [x] 1.5 `validate_opts`: refuse an unknown `CLAUDE_DOCKER_WORKTREE_GITDIR`. Verify with bats.
 - [x] 1.6 Docs: `docs/usage.md` (Git worktrees), `docs/security.md`.
-- [ ] 1.7 Run the bats suite and shellcheck; `openspec validate worktree-gitdir-ro --strict`.
-- [ ] 1.8 On a Mac with Docker Desktop or Colima: `claude-docker <worktree>` outside its repo, accept, and check `git status`/`log`/`diff` work and `git commit` fails.
-- [ ] 1.9 `/opsx:archive` (syncs `openspec/specs/`).
+- [x] 1.7 Run the bats suite and shellcheck; `openspec validate worktree-gitdir-ro --strict`.
+- [x] 1.8 On a Mac with Docker Desktop or Colima: `claude-docker <worktree>` outside its repo, accept, and check `git status`/`log`/`diff` work and `git commit` fails.
+- [x] 1.9 `/opsx:archive` (syncs `openspec/specs/`).
