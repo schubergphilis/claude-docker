@@ -12,7 +12,7 @@ Because the workspace is writable from the container, `run.sh` SHALL make the of
 
 `CLAUDE_DOCKER_WORKTREE_GITDIR` SHALL decide the offer: `ask` (the default, also when unset or empty) asks on the terminal, `ro` mounts without asking, `off` never mounts. Any other value SHALL stop `claude-docker` with an error naming the variable before any container starts. Asked, an empty answer or `y`/`yes` in any case SHALL accept; anything else SHALL decline. When stdin or stderr is not a terminal, `ask` SHALL decline without reading.
 
-Whenever the offer is declined, `run.sh` SHALL print a warning naming the workspace and the repository's git directory, saying git won't work there. The session SHALL start either way.
+Whenever the offer is declined, `run.sh` SHALL print a warning naming the workspace, saying git won't work there because its repository isn't mounted. The session SHALL start either way.
 
 #### Scenario: Accepting the offer makes git read work in the worktree
 
@@ -39,7 +39,7 @@ Whenever the offer is declined, `run.sh` SHALL print a warning naming the worksp
 
 - **WHEN** the user answers `n`, or `CLAUDE_DOCKER_WORKTREE_GITDIR=off` is set
 - **THEN** nothing is mounted for the repository
-- **AND** a warning names `~/wt` and `/Users/me/repo/.git` and says git won't work there
+- **AND** a warning names `~/wt` and says git won't work there
 - **AND** the session starts
 
 #### Scenario: Pre-approved without a question

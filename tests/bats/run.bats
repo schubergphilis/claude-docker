@@ -898,7 +898,7 @@ $MAIN_GIT/packed-refs:$MAIN/.git/packed-refs:ro
 $stage/worktree-config-0:$MAIN/.git/config:ro
 EOF
 )" ]
-  grep -q "mounting what git needs from '$MAIN/.git' read-only for /workspaces/repo" "$BATS_TEST_TMPDIR/err"
+  grep -q "mounting '$MAIN/.git' read-only for /workspaces/repo" "$BATS_TEST_TMPDIR/err"
 }
 
 @test "stage_worktree_gitdirs: the config copy keeps only the repository format" {
@@ -983,7 +983,7 @@ EOF
   setup_worktree_gitdirs "$WS"
   CLAUDE_DOCKER_WORKTREE_GITDIR=off worktree_gitdirs 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
-  grep -q "warning: '$WS' is a git worktree of '$MAIN/.git', which isn't mounted, so git won't work in it" "$BATS_TEST_TMPDIR/err"
+  grep -q "warning: git won't work in '$WS': its repository isn't mounted" "$BATS_TEST_TMPDIR/err"
 }
 
 @test "build_worktree_gitdirs: without a terminal nothing is read or mounted" {
@@ -993,7 +993,7 @@ EOF
   worktree_gitdirs <<<y 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
   [ "$(grep -c '\[Y/n\]' "$BATS_TEST_TMPDIR/err")" -eq 0 ]
-  grep -q "won't work in it" "$BATS_TEST_TMPDIR/err"
+  grep -q "git won't work in" "$BATS_TEST_TMPDIR/err"
 }
 
 @test "build_worktree_gitdirs: Enter at the question mounts, once for two worktrees" {
@@ -1014,7 +1014,7 @@ EOF
   can_ask() { return 0; }
   worktree_gitdirs <<<n 2>"$BATS_TEST_TMPDIR/err"
   [ -z "$(gitdir_mounts)" ]
-  grep -q "won't work in it" "$BATS_TEST_TMPDIR/err"
+  grep -q "git won't work in" "$BATS_TEST_TMPDIR/err"
 }
 
 @test "build_worktree_gitdirs: the repository passed as a workspace is not offered" {
