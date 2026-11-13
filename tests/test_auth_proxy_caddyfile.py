@@ -7,14 +7,14 @@ heredoc, so its `{$VAR}` / `{env.VAR}` references reach Caddy unexpanded and no
 credential is ever baked into a staged file. Each heredoc is run through bash
 with those variables set and must come out byte for byte.
 
-Behavioural half: run.sh's own staging functions write the glab and api site
-config into a temp dir, a real Caddy serves it, and mock upstreams record what
-arrives. Skipped unless a `caddy` binary is on PATH (or named by CADDY_BIN) —
+Behavioural half: run.sh's own staging functions write the gh, glab and api
+site config into a temp dir, a real Caddy serves it, and mock upstreams record
+what arrives. Skipped unless a `caddy` binary is on PATH (or named by CADDY_BIN) —
 use the version pinned in run.sh's PROXY_IMAGE; CI copies it out of that image
-and sets CLAUDE_DOCKER_TEST_REQUIRE_CADDY=1 so a missing binary fails. gh's sites listen on :443 and
-are covered by tests/integration/gh-proxy-integration.sh instead; Docker-level wiring
-(--add-host, env in the agent container) is covered there and in
-tests/bats/run.bats.
+and sets CLAUDE_DOCKER_TEST_REQUIRE_CADDY=1 so a missing binary fails. gh's sites listen on :443 in
+the sidecar; here each gets a free port instead. Docker-level wiring
+(--add-host, env in the agent container) is covered by
+tests/integration/gh-proxy-integration.sh and tests/bats/run.bats.
 
 Stdlib only, so CI's unit-test step keeps running with no install step.
 """
@@ -130,7 +130,7 @@ class _Recorder(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    do_GET = do_POST = do_PUT = do_DELETE = do_HEAD = _handle
+    do_GET = do_POST = do_PUT = do_PATCH = do_DELETE = do_HEAD = _handle
 
     def log_message(self, *_):
         pass
@@ -148,7 +148,7 @@ def _missing(reason):
 
 
 class SidecarBehaviourTest(unittest.TestCase):
-    """glab and api sites, staged by run.sh itself, served by a real Caddy."""
+    """gh, glab and api sites, staged by run.sh itself, served by a real Caddy."""
 
     @classmethod
     def setUpClass(cls):
@@ -196,22 +196,26 @@ class SidecarBehaviourTest(unittest.TestCase):
         scheme = "https://localhost" if tls else "http://127.0.0.1"
         return f"{scheme}:{srv.server_address[1]}"
 
-    def _start(self, *, glab_policy="", api_env=None, api_ca=False):
+    def _start(self, *, glab_policy="", gh_policy="", api_env=None, api_ca=False):
         """Stage via run.sh, rehome /etc/caddy and the api port, start Caddy."""
         work = Path(tempfile.mkdtemp(dir=self.tmp.name))
         caddy_dir = work / "caddy"
         self.glab_port, self.api_port, http_port = _free_port(), _free_port(), _free_port()
+        self.gh_ports = {h: _free_port() for h in ("github.com", "api.github.com", "uploads.github.com")}
         env = {k: v for k, v in os.environ.items() if not k.startswith(("ANTHROPIC_", "CLAUDE_DOCKER_"))}
         env.update(api_env or {"ANTHROPIC_API_KEY": "sk-real",
                                "ANTHROPIC_BASE_URL": self.api_up + "/gw/"})
         if glab_policy:
             (work / "user-policy.caddy").write_text(glab_policy)
             env["CLAUDE_DOCKER_GLAB_POLICY"] = str(work / "user-policy.caddy")
+        if gh_policy:
+            (work / "user-gh-policy.caddy").write_text(gh_policy)
+            env["CLAUDE_DOCKER_GH_POLICY"] = str(work / "user-gh-policy.caddy")
         if api_ca:
             env["CLAUDE_DOCKER_API_CA"] = str(self.pki / "ca.pem")
         script = (
             'set -euo pipefail; source "$1"; d="$2"; stage_proxy_root "$d"; '
-            'stage_glab_proxy_site "$d"; stage_api_proxy_site "$d"; '
+            'stage_gh_proxy_site "$d"; stage_glab_proxy_site "$d"; stage_api_proxy_site "$d"; '
             'printf "%s\\n%s\\n%s\\n%s\\n" "$API_PROXY_UPSTREAM" "$API_PROXY_PREFIX" '
             '"${API_PROXY_KEY:-}" "${API_PROXY_BEARER:-}"'
         )
@@ -225,6 +229,9 @@ class SidecarBehaviourTest(unittest.TestCase):
                 # The HTTP->HTTPS redirect listener defaults to :80, which an
                 # unprivileged user can't bind.
                 txt = txt.replace("\tskip_install_trust\n", f"\tskip_install_trust\n\thttp_port {http_port}\n")
+                # gh's site addresses carry no port; the sidecar serves :443.
+                for host, port in self.gh_ports.items():
+                    txt = re.sub(rf"^{re.escape(host)} {{$", f"{host}:{port} {{", txt, flags=re.M)
                 f.write_text(txt)
         # The sidecar image's bundle path; this host's may differ.
         transport = caddy_dir / "api-transport.caddy"
@@ -238,6 +245,9 @@ class SidecarBehaviourTest(unittest.TestCase):
             "GLAB_PROXY_BEARER": "Bearer glpat-real",
             "GLAB_PROXY_BASIC": "Basic b2F1dGgyOmdscGF0LXJlYWw=",
             "API_PROXY_UPSTREAM": upstream, "API_PROXY_PREFIX": prefix,
+            "GH_PROXY_UPSTREAM_GITHUB": self.glab_up, "GH_PROXY_UPSTREAM_API": self.glab_up,
+            "GH_PROXY_UPSTREAM_UPLOADS": self.glab_up,
+            "GH_PROXY_BEARER": "Bearer ghp-real", "GH_PROXY_BASIC": "Basic eC1hY2Nlc3MtdG9rZW46Z2hwLXJlYWw=",
         }
         if key:
             self.caddy_env["API_PROXY_KEY"] = key
@@ -262,17 +272,21 @@ class SidecarBehaviourTest(unittest.TestCase):
         self.glab_ctx = ssl.create_default_context(cafile=str(root))
         # The root exists before the site's leaf is issued; a handshake in
         # between gets TLSV1_ALERT_INTERNAL_ERROR. Ready means one succeeds.
+        for name, port in (("gl.example.test", self.glab_port), ("api.github.com", self.gh_ports["api.github.com"])):
+            self._await_handshake(proc, name, port, deadline)
+        return caddy_dir
+
+    def _await_handshake(self, proc, name, port, deadline):
         while True:
             try:
-                with socket.create_connection(("127.0.0.1", self.glab_port), timeout=2) as sock:
-                    self.glab_ctx.wrap_socket(sock, server_hostname="gl.example.test").close()
+                with socket.create_connection(("127.0.0.1", port), timeout=2) as sock:
+                    self.glab_ctx.wrap_socket(sock, server_hostname=name).close()
                 break
             except (OSError, ssl.SSLError) as e:
                 self.assertIsNone(proc.poll(), self.log.read_text())
                 if time.time() >= deadline:
                     self.fail(f"caddy never completed a TLS handshake ({e}):\n" + self.log.read_text())
                 time.sleep(0.1)
-        return caddy_dir
 
     # -- helpers --
 
@@ -291,10 +305,17 @@ class SidecarBehaviourTest(unittest.TestCase):
 
     def glab(self, method, path, headers=None):
         """Request through the glab site; returns (status, upstream echo or body)."""
-        # SNI and Host must name the GitLab host; the socket goes to loopback.
-        conn = http.client.HTTPSConnection("gl.example.test", self.glab_port, context=self.glab_ctx)
-        conn.sock = self.glab_ctx.wrap_socket(socket.create_connection(("127.0.0.1", self.glab_port)),
-                                              server_hostname="gl.example.test")
+        return self._site("gl.example.test", self.glab_port, method, path, headers)
+
+    def gh(self, method, path, headers=None):
+        """Request through the api.github.com site; returns (status, upstream echo or body)."""
+        return self._site("api.github.com", self.gh_ports["api.github.com"], method, path, headers)
+
+    def _site(self, name, port, method, path, headers):
+        # SNI and Host must name the site's host; the socket goes to loopback.
+        conn = http.client.HTTPSConnection(name, port, context=self.glab_ctx)
+        conn.sock = self.glab_ctx.wrap_socket(socket.create_connection(("127.0.0.1", port)),
+                                              server_hostname=name)
         conn.request(method, path, headers=headers or {})
         r = conn.getresponse()
         body = r.read().decode()
@@ -313,6 +334,100 @@ class SidecarBehaviourTest(unittest.TestCase):
                 return r.status, json.loads(r.read())
         except urllib.error.HTTPError as e:
             return e.code, e.read().decode()
+
+    # -- gh --
+
+    def assertGhBlocked(self, method, path, words):
+        st, body = self.gh(method, path)
+        self.assertEqual(st, 403, f"{method} {path}: {body}")
+        self.assertIn("claude-docker gh-proxy policy", body)
+        self.assertIn(words, body)
+
+    def test_gh_injects_the_bearer_and_passes_ordinary_calls(self):
+        self._start()
+        st, echo = self.gh("GET", "/repos/o/r", {"Authorization": "token claude-docker-proxy"})
+        self.assertEqual(st, 200)
+        self.assertEqual(echo["headers"].get("authorization"), "Bearer ghp-real")
+        allowed = (
+            ("GET", "/user/keys"), ("GET", "/repos/o/r/hooks"), ("GET", "/repos/o/r/collaborators"),
+            ("GET", "/orgs/acme"), ("GET", "/repos/o/r/actions/runners"),
+            ("POST", "/repos/o/r/issues"), ("POST", "/repos/o/r/pulls"), ("PATCH", "/repos/o/r/pulls/1"),
+            ("PATCH", "/repos/o/r/issues/1"), ("PUT", "/repos/o/r/pulls/1/merge"),
+            ("PUT", "/repos/o/r/contents/README.md"), ("POST", "/repos/o/r/git/refs"),
+            ("DELETE", "/repos/o/r/git/refs/heads/x"), ("DELETE", "/repos/o/r/collaborators/x"),
+            ("DELETE", "/repos/o/r/keys/1"), ("POST", "/repos/o/r/hooks/1/pings"),
+            ("POST", "/repos/keys/repo/issues"), ("POST", "/graphql"),
+        )
+        for method, path in allowed:
+            with self.subTest(method=method, path=path):
+                self.assertEqual(self.gh(method, path)[0], 200)
+
+    def test_gh_default_policy_blocks_repository_deletion(self):
+        self._start()
+        # Caddy matches the decoded, cleaned path, so escaped and doubled
+        # spellings are caught too, though GitHub doesn't route them.
+        for path in ("/repos/o/r", "/repos/o/r/", "/repositories/123", "/repos/o/r?x=1",
+                     "//repos/o/r", "/%72epos/o/r"):
+            with self.subTest(path=path):
+                self.assertGhBlocked("DELETE", path, "repository deletion")
+
+    def test_gh_default_policy_blocks_lasting_grants(self):
+        self._start()
+        grants = (
+            ("POST", "/user/keys"), ("POST", "/user/gpg_keys"), ("POST", "/user/ssh_signing_keys"),
+            ("POST", "/user/emails"),
+            ("POST", "/repos/o/r/keys"), ("POST", "/repositories/123/keys"),
+            ("POST", "/repos/o/r/hooks"), ("POST", "/orgs/acme/hooks"), ("POST", "/organizations/9/hooks"),
+            ("POST", "/repos/o/r/transfer"), ("POST", "/repositories/123/transfer"),
+            ("POST", "/repos/o/r/actions/runners/registration-token"),
+            ("POST", "/repos/o/r/actions/runners/generate-jitconfig"),
+            ("POST", "/orgs/acme/actions/runners/registration-token"),
+            ("POST", "/organizations/9/actions/runners/generate-jitconfig"),
+            ("POST", "/orgs/acme/invitations"), ("POST", "/organizations/9/invitations"),
+            ("POST", "/user/keys?x=1"), ("POST", "/user/keys/"), ("POST", "//user//keys"),
+            ("POST", "/%75ser/keys"),
+        )
+        for method, path in grants:
+            with self.subTest(method=method, path=path):
+                self.assertGhBlocked(method, path, "outlives the session")
+        members = ("/repos/o/r/collaborators/eve", "/repositories/123/collaborators/eve",
+                   "/orgs/acme/memberships/eve", "/organizations/9/memberships/eve",
+                   "/orgs/acme/teams/devs/memberships/eve", "/organizations/9/teams/devs/memberships/eve",
+                   "/teams/42/memberships/eve")
+        for path in members:
+            with self.subTest(path=path):
+                self.assertGhBlocked("PUT", path, "adding collaborators")
+        for path in ("/repos/o/r/hooks/1", "/repos/o/r/hooks/1/config", "/orgs/acme/hooks/1/config",
+                     "/repositories/123/hooks/1", "/organizations/9/hooks/1"):
+            with self.subTest(path=path):
+                self.assertGhBlocked("PATCH", path, "changing a webhook")
+
+    def test_gh_default_policy_covers_an_absolute_form_target(self):
+        self._start()
+        self.assertGhBlocked("POST", "https://api.github.com/user/keys", "outlives the session")
+
+    def test_gh_default_policy_blocks_repository_and_organization_settings(self):
+        self._start()
+        for path in ("/repos/o/r", "/repos/o/r/", "/repositories/123", "/orgs/acme", "/organizations/9",
+                     "/repos/o/r?visibility=public"):
+            with self.subTest(path=path):
+                self.assertGhBlocked("PATCH", path, "settings")
+        self.assertEqual(self.gh("GET", "/repos/o/r")[0], 200)
+
+    def test_gh_user_policy_extension_is_honoured(self):
+        self._start(gh_policy=(
+            "@no_ref_delete {\n\tmethod DELETE\n\tpath_regexp ^/repos/[^/]+/[^/]+/git/refs/.*\n}\n"
+            'respond @no_ref_delete "blocked by user policy" 403\n'))
+        self.assertEqual(self.gh("DELETE", "/repos/o/r/git/refs/heads/x"), (403, "blocked by user policy"))
+        self.assertGhBlocked("POST", "/user/keys", "outlives the session")
+
+    def test_gh_audit_log_has_no_token(self):
+        self._start()
+        self.assertGhBlocked("POST", "/user/keys", "outlives the session")
+        self.assertEqual(self.gh("GET", "/user")[0], 200)
+        log, _ = self.audit_log(lambda e: e["request"]["host"].startswith("api.github.com")
+                                and e["request"]["uri"] == "/user/keys" and e["status"] == 403)
+        self.assertNotIn("ghp-real", log)
 
     # -- glab --
 

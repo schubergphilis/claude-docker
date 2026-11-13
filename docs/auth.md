@@ -56,7 +56,21 @@ When a token is found:
 
 > **Revoking vs. re-login — they are not the same.** `gh auth logout` / `login` / `refresh` only change your host's _local_ credential store; none of them revokes a previously-issued token at GitHub. GitHub CLI's OAuth token is long-lived, so a token captured earlier (by a running sidecar, or exfiltrated) stays valid until you **explicitly revoke** it: for OAuth login, _GitHub → Settings → Applications → Authorized OAuth Apps → GitHub CLI → Revoke_; for a PAT, delete it under _Settings → Developer settings_. Relaunching only stops a _new_ container from using the old token — it does not invalidate the old one.
 
-**Filtering and policy.** The generated Caddyfile blocks the one broadly destructive call by default: `DELETE` on `/repos/{owner}/{repo}` (or its numeric-id alias `/repositories/{id}`) gets a `403` naming the claude-docker gh-proxy policy and never reaches GitHub. Extend it with `CLAUDE_DOCKER_GH_POLICY=<path>` pointing at a Caddyfile snippet — `run.sh` stages it and `import`s it into the **`api.github.com` site block only** (a snippet written for `github.com` or `uploads.github.com` traffic has no effect). Policy config lives solely in the sidecar; the agent container can neither read nor write it.
+**Filtering and policy.** The generated Caddyfile answers these on `api.github.com` with a `403` naming the claude-docker gh-proxy policy, and they never reach GitHub:
+
+- repository deletion: `DELETE` on `/repos/{owner}/{repo}`;
+- calls that leave access or a data feed behind once the session ends: adding SSH, GPG or signing keys (`/user/keys`, `/user/gpg_keys`, `/user/ssh_signing_keys`), an account email (`/user/emails`, since a verified address can receive a password reset), a deploy key (`/repos/{owner}/{repo}/keys`), a collaborator, an organization invitation or member, or a team member; adding or changing a repository or organization webhook; registering a self-hosted runner (`actions/runners/registration-token`, `generate-jitconfig`); and transferring a repository;
+- `PATCH` on `/repos/{owner}/{repo}` or `/orgs/{org}`, which changes settings. Visibility and access settings can open lasting access, and the sidecar can't read the body to tell them apart, so `gh repo edit` and `gh repo rename` need `--gh-direct`.
+
+Each is matched under its numeric-id alias too (`/repositories/{id}`, `/organizations/{id}`). Everything else passes: issues, pull requests, comments, refs, file contents, releases, and removing a key or collaborator.
+
+The policy sees only the method and path, so it can't filter:
+
+- **GraphQL:** every query and mutation is `POST /graphql`;
+- **git:** `git push`, force-pushes and `.github/workflows/*` changes go to `github.com` as smart-HTTP `git-receive-pack` requests;
+- **request bodies:** for example, which setting a `PATCH` changes.
+
+It's a policy point that narrows what a session can leave behind, not a guarantee; the token's scope is the real limit. Extend it with `CLAUDE_DOCKER_GH_POLICY=<path>` pointing at a Caddyfile snippet — `run.sh` stages it and `import`s it into the **`api.github.com` site block only** (a snippet written for `github.com` or `uploads.github.com` traffic has no effect). The snippet runs inside the site that holds the token, so it could reference `{env.GH_PROXY_BEARER}`; that crosses no boundary, since it's your own file and you already hold the token on the host, but don't take snippets from elsewhere unread. Policy config lives solely in the sidecar; the agent container can neither read nor write it.
 
 **Audit log.** Every proxied request (method, host, path, status — no token) is written as structured JSON to the sidecar's stdout. View it live with `docker logs <sidecar-name>` (the name `run.sh` prints at startup). The log is deliberately not persisted past the session — it's meant for live debugging, not a compliance trail. It's still a net improvement: host-side `gh` usage has no audit log at all today.
 
