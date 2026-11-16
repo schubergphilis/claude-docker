@@ -129,6 +129,37 @@ SKIP: lbl: c" ]
   [ -z "$(find "$SCRATCH" -name 'rc.*')" ]
 }
 
+@test "timeout_cmd adds --foreground only from a terminal, when timeout has it" {
+  command() { [ "$2" = timeout ]; }
+  timeout() { echo "Usage: timeout [--foreground] DURATION COMMAND"; }
+  stdin_is_tty() { return 0; }
+  [ "$(timeout_cmd)" = "timeout --foreground -k 10 300" ]
+  stdin_is_tty() { return 1; }
+  [ "$(timeout_cmd)" = "timeout -k 10 300" ]
+  stdin_is_tty() { return 0; }
+  timeout() { echo "usage: timeout [-k time] duration command"; }
+  [ "$(timeout_cmd)" = "timeout -k 10 300" ]
+}
+
+@test "timeout_cmd falls back to gtimeout, then to no guard" {
+  stdin_is_tty() { return 1; }
+  command() { [ "$2" = gtimeout ]; }
+  [ "$(timeout_cmd)" = "gtimeout -k 10 300" ]
+  command() { return 1; }
+  [ -z "$(timeout_cmd)" ]
+}
+
+@test "run_wrapped runs the command without a timeout binary" {
+  timeout_cmd() { :; }
+  script() {
+    [ "$1" = --version ] && return 1
+    shift 2
+    "$@"
+  }
+  run run_wrapped "$SCRATCH/log" sh -c 'exit 5'
+  [ "$status" -eq 5 ]
+}
+
 @test "gen_assert_script quotes values containing single quotes" {
   mkdir -p "$SCRATCH/ws"
   gen_assert_script "$SCRATCH/ws/assert.sh" main "tok'en \$x" "1"
@@ -330,6 +361,17 @@ exit_through_cleanup() {
 }
 
 # --- small helpers -----------------------------------------------------------
+
+@test "record_rc_rejected passes only for a non-zero status other than 124" {
+  record_rc_rejected 1 lbl "rejection" > "$SCRATCH/out"
+  grep -qx 'PASS: lbl exits non-zero (1)' "$SCRATCH/out"
+  record_rc_rejected 0 lbl "rejection" > "$SCRATCH/out"
+  grep -qx 'FAIL: lbl exited 0 (expected rejection)' "$SCRATCH/out"
+  record_rc_rejected 124 lbl "rejection" > "$SCRATCH/out"
+  grep -q '^FAIL: lbl timed out or never ran (124)' "$SCRATCH/out"
+  [ "$TOTAL_PASS" -eq 1 ]
+  [ "$TOTAL_FAIL" -eq 2 ]
+}
 
 @test "record_rc_zero records a pass for 0 and a fail otherwise" {
   record_rc_zero 0 lbl > /dev/null

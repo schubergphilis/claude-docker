@@ -283,10 +283,34 @@ capture_baseline() {
 # flavor only decides argv shape. A timeout guards against hangs where one
 # exists (GNU/BSD `timeout`, coreutils `gtimeout`); its absence (stock macOS
 # pre-13) just means no hang guard, not a hard dependency. `-k 10 300` is the
-# flag spelling both GNU and BSD timeout accept. SHELL is pinned to bash so
+# flag spelling both GNU and BSD timeout accept. From a terminal the guard
+# also needs --foreground (see timeout_cmd). SHELL is pinned to bash so
 # the inner shell parses the same quoting `printf %q` just produced. The full
 # session transcript lands in $1 for later grepping (e.g. the sidecar name
 # run.sh prints); the live copy is discarded.
+# Prints the hang-guard prefix for run_wrapped, or nothing when no timeout(1)
+# exists. timeout moves itself into its own process group. From a terminal
+# that group is not the foreground one, so the kernel stops script(1) on its
+# first tcsetattr and run.sh never starts (#179). --foreground keeps timeout
+# in the caller's group. It then signals only script(1) on expiry, not the
+# children, so it is passed only when stdin is a terminal (never in CI) and
+# timeout knows the flag; the cleanup trap's kill_tree covers the rest.
+timeout_cmd() {
+  local bin
+  for bin in timeout gtimeout; do
+    command -v "$bin" >/dev/null 2>&1 || continue
+    if stdin_is_tty && "$bin" --help 2>&1 | grep -q -- '--foreground'; then
+      echo "$bin --foreground -k 10 300"
+    else
+      echo "$bin -k 10 300"
+    fi
+    return 0
+  done
+}
+
+# A function so the BATS tests can stub it.
+stdin_is_tty() { [ -t 0 ]; }
+
 run_wrapped() {
   local logfile="$1"; shift
   local quoted rcfile rc
@@ -296,11 +320,9 @@ run_wrapped() {
     *util-linux*) set -- script -qec "$quoted" "$logfile" ;;
     *) set -- script -q "$logfile" /bin/bash -c "$quoted" ;;
   esac
-  if command -v timeout >/dev/null 2>&1; then
-    set -- timeout -k 10 300 "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    set -- gtimeout -k 10 300 "$@"
-  fi
+  # Unquoted on purpose: timeout_cmd prints nothing or a word-split prefix.
+  # shellcheck disable=SC2046
+  set -- $(timeout_cmd) "$@"
   SHELL=/bin/bash "$@" >/dev/null 2>&1 || true
   rc=$(cat "$rcfile" 2>/dev/null) || rc=""
   rm -f "$rcfile"
@@ -819,6 +841,18 @@ record_rc_zero() {
   if [ "$1" -eq 0 ]; then record_pass "$2 exited 0"; else record_fail "$2 exited $1${3:+ (see $3)}"; fi
 }
 
+# Records PASS when $1 (run_wrapped's exit status) shows run.sh itself gave up:
+# non-zero, and not 124. run_wrapped returns 124 when the hang guard fired or
+# run.sh never ran, which says nothing about what run.sh would have done.
+# $3 is what a 0 should have been, for the FAIL line.
+record_rc_rejected() {
+  case "$1" in
+    0) record_fail "$2 exited 0 (expected $3)" ;;
+    124) record_fail "$2 timed out or never ran (124), so the $3 is unverified" ;;
+    *) record_pass "$2 exits non-zero ($1)" ;;
+  esac
+}
+
 # ===========================================================================
 # Phase 1 (tasks 4.2, 4.3, 4.4): one proxied session, functional + policy +
 # audit-log checks combined so it only pays for one sidecar/CA/network setup.
@@ -1157,11 +1191,7 @@ phase3_flags() {
   mkdir -p "$ws"
   run_wrapped_wait "$log" env GH_TOKEN="$FAKE1" CLAUDE_DOCKER_RUNTIME=docker CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
     bash "$RUN_SH" --gh --gh-direct "$ws"
-  if [ "$RC" -ne 0 ]; then
-    record_pass "4.6 --gh --gh-direct together exits non-zero ($RC)"
-  else
-    record_fail "4.6 --gh --gh-direct together exited 0 (expected rejection)"
-  fi
+  record_rc_rejected "$RC" "4.6 --gh --gh-direct together" "rejection"
   # `--gh` must not be satisfied by the `--gh` prefix of `--gh-direct`.
   if grep -qE -- '--gh([^-]|$)' "$log" 2>/dev/null && grep -qF -- '--gh-direct' "$log" 2>/dev/null; then
     record_pass "4.6 --gh --gh-direct rejection message names the conflicting flags"
@@ -1185,11 +1215,7 @@ phase3_flags() {
     CLAUDE_DOCKER_PROXY_IMAGE="localhost/does-not-exist:0" \
     CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-badimage/assert.sh" \
     bash "$RUN_SH" --gh "$ws"
-  if [ "$RC" -ne 0 ]; then
-    record_pass "4.6 sidecar start failure (bad image) exits non-zero ($RC)"
-  else
-    record_fail "4.6 sidecar start failure (bad image) exited 0 (expected fatal error)"
-  fi
+  record_rc_rejected "$RC" "4.6 sidecar start failure (bad image)" "fatal error"
   # Absence of the sentinel is the pass condition: the assert script must NEVER
   # run in this scenario, so results.txt is deliberately not ingested here.
   if [ -f "$ws/should-not-exist" ]; then
@@ -1318,11 +1344,7 @@ phase6_glab_api_fail_closed() {
     CLAUDE_DOCKER_IMAGE="$TARGET_IMAGE" \
     CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-badpolicy/assert.sh" \
     bash "$RUN_SH" --glab "$ws"
-  if [ "$RC" -ne 0 ]; then
-    record_pass "2.7 invalid CLAUDE_DOCKER_GLAB_POLICY exits non-zero ($RC)"
-  else
-    record_fail "2.7 invalid CLAUDE_DOCKER_GLAB_POLICY exited 0 (expected fatal error)"
-  fi
+  record_rc_rejected "$RC" "2.7 invalid CLAUDE_DOCKER_GLAB_POLICY" "fatal error"
   # run.sh relays the sidecar's own log lines, prefixed '  | ', after its abort message.
   if grep -q 'sidecar exited during startup' "$log" 2>/dev/null && grep -q '^  | ' "$log" 2>/dev/null; then
     record_pass "2.7 invalid policy: the output carries Caddy's own error"
@@ -1378,11 +1400,7 @@ phase6_glab_api_fail_closed() {
     CLAUDE_DOCKER_PROXY_IMAGE="localhost/does-not-exist:0" \
     CLAUDE_DOCKER_TEST_ENTRY="exec bash /workspaces/ghtest-apibadimage/assert.sh" \
     bash "$RUN_SH" --api "$ws"
-  if [ "$RC" -ne 0 ]; then
-    record_pass "3.6 --api with a bad proxy image exits non-zero ($RC)"
-  else
-    record_fail "3.6 --api with a bad proxy image exited 0 (expected fatal error)"
-  fi
+  record_rc_rejected "$RC" "3.6 --api with a bad proxy image" "fatal error"
   if grep -qF -- '--api-direct' "$log" 2>/dev/null; then
     record_pass "3.6 --api failure message names --api-direct"
   else
