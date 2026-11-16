@@ -320,6 +320,15 @@ check_git_trust() {
 }
 
 # ---------------------------------------------------------------------------
+# 3c. git stat comparison — relaxed in system scope by the entrypoint (#229)
+# ---------------------------------------------------------------------------
+
+check_git_stat() {
+  assert_eq "git-check-stat-system" \
+    "$(git config --system --get-all core.checkStat | paste -sd,)" "minimal"
+}
+
+# ---------------------------------------------------------------------------
 # 4. File ownership — write into the workspace, smoke.sh checks host ownership
 # ---------------------------------------------------------------------------
 
@@ -869,6 +878,7 @@ main() {
   check_security
   check_path_order
   check_git_trust
+  check_git_stat
   check_workspace_write
   check_credentials
   check_aws_state_masking

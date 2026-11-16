@@ -175,6 +175,19 @@ trust_workspaces() {
   done
 }
 
+# Compare only mtime seconds, size and mode when git checks whether a file
+# changed. On a virtualised bind mount (Docker Desktop on macOS) the other stat
+# fields can differ between two reads of an untouched file, so git sees files
+# it has just written as locally modified, and rebase and cherry-pick abort on
+# a clean tree (#229). System scope, like trust_workspaces: a GIT_CONFIG_*
+# export or a cleaned environment doesn't remove it, and the repo's own
+# .git/config, which the host's git shares, is left alone. Not fatal: without
+# it git still works, only less reliably.
+relax_git_stat() {
+  git config --file "$GIT_SYSTEM_CONFIG" core.checkStat minimal \
+    || printf 'entrypoint: WARN could not set core.checkStat=minimal for git\n' >&2
+}
+
 main() {
   set -euo pipefail
   local uid="${HOST_UID:-0}" gid="${HOST_GID:-0}"
@@ -184,6 +197,7 @@ main() {
   seed_settings || return
   install_cas || return
   trust_workspaces || return
+  relax_git_stat
   approve_api_key || return
   # A root host user: claude runs as root, so run.sh grants this container no
   # capabilities at all (#210). The steps above need none while the volumes

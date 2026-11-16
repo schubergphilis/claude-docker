@@ -170,6 +170,29 @@ trusted() { command git config --file "$GIT_SYSTEM_CONFIG" --get-all safe.direct
   [[ "$output" != *should-not-run* ]]
 }
 
+# --- relax_git_stat ---
+
+@test "relax_git_stat: main sets core.checkStat=minimal next to the trust entries" {
+  CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo run main echo hello
+  [ "$status" -eq 0 ] && [ "$output" = hello ]
+  [ "$(command git config --file "$GIT_SYSTEM_CONFIG" --get-all core.checkStat)" = minimal ]
+  [ "$(trusted)" = "/workspaces/repo,/workspaces/repo/*" ]
+}
+
+@test "relax_git_stat: a second run leaves one entry" {
+  relax_git_stat
+  relax_git_stat
+  [ "$(command git config --file "$GIT_SYSTEM_CONFIG" --get-all core.checkStat)" = minimal ]
+}
+
+@test "relax_git_stat: a failed write warns and main still execs" {
+  git() { return 1; }
+  run main echo hello
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"entrypoint: WARN could not set core.checkStat=minimal for git"* ]]
+  [[ "$output" == *hello ]]
+}
+
 @test "no claude-docker CA skips update-ca-certificates" {
   run install_cas
   [ "$status" -eq 0 ]
