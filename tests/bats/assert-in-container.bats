@@ -192,6 +192,17 @@ status_fixture() {
   [[ "$output" == *done* ]]
 }
 
+# --- check_git_stat ----------------------------------------------------------
+
+@test "check_git_stat: passes on minimal and fails on anything else" {
+  git() { echo minimal; }
+  run check_git_stat
+  [[ "$output" == *"PASS: git-check-stat-system: got 'minimal'"* ]]
+  git() { :; }
+  run check_git_stat
+  [[ "$output" == *"FAIL: git-check-stat-system: expected 'minimal', got ''"* ]]
+}
+
 # --- check_git_trust ---------------------------------------------------------
 
 # git stands in for the system config and `git init`; git_opens answers per
@@ -471,6 +482,7 @@ stub_checks() {
   check_security() { pass c3; }
   check_path_order() { pass c4; }
   check_git_trust() { pass c4b; }
+  check_git_stat() { pass c4c; }
   check_workspace_write() { pass c5; }
   check_credentials() { pass c6; }
   check_aws_state_masking() { pass c7; }
@@ -483,7 +495,7 @@ stub_checks() {
   check_settings() { fail settings; }
   run main
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Results: 10 passed, 1 failed"* ]]
+  [[ "$output" == *"Results: 11 passed, 1 failed"* ]]
   [[ "$output" == *"RESULT: FAIL" ]]
   [[ "$output" != *"RESULT: PASS"* ]]
 }
