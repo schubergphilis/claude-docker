@@ -57,6 +57,60 @@ The container narrows blast radius vs. running `claude --yolo` on the host, but 
 - Lifecycle scripts: claude-code and pnpm ship their native binary in a per-arch optional dependency and are unusable until their own install script links it. The build runs exactly those two scripts by hand (claude-code's `install.cjs`, pnpm's `install.js`) and asserts the result; the Dockerfile names them with the conditions they're held to. No other package's, or transitive dependency's, lifecycle script ever runs.
 - CI scans the built image for **known** vulnerabilities in its OS and language packages and fails the build on a HIGH or CRITICAL finding that upstream has already fixed. It also runs the publish pipeline's grype scan, which fails on findings with no fix yet as well unless `.grype.yaml` accepts them. Accepted findings in `.trivyignore` carry a mandatory expiry; `.grype.yaml` rules carry a reason but no expiry (see [Image vulnerability scanning](#image-vulnerability-scanning)). A green build means no high-severity CVE that isn't accepted, not an absence of known CVEs.
 
+## Auto mode
+
+Claude Code's [auto mode](https://code.claude.com/docs/en/permission-modes#eliminate-prompts-with-auto-mode) runs without routine permission prompts: a separate classifier model reviews each action first and blocks what looks destructive, irreversible or aimed outside your environment. Recent Claude Code versions start interactive sessions in it, so a plain `claude-docker ~/repo` session is usually an auto-mode session.
+
+**What it allows out of the box.** The built-in rules were read with `claude auto-mode defaults` on Claude Code 2.1.322, and they change between releases:
+
+- Installing dependencies the project's manifest or lockfile already declares is allowed.
+- A package the agent picks itself (`npm install foo`, `npx foo`, `uvx foo`) is not covered by that exception, but no built-in rule blocks it outright either. In practice the agent can build a throwaway test harness and pull new packages from the public registry for it.
+- Routing an install around a private registry is blocked only once the classifier has been told a private registry exists.
+
+So without a policy of your own, auto mode will not keep a session to the packages your project already uses.
+
+**It is not an enforcement boundary.**
+
+- The classifier is a model's judgement. It can be wrong in both directions.
+- It reviews Claude's own tool calls. It does not see what a script, a `postinstall` hook or a Makefile does once it runs.
+- Under `--yolo` (`--dangerously-skip-permissions`) it does not run at all.
+- `/root/.claude/settings.json` in the container is a writable copy. Editing it to loosen the policy is itself a blocked action in auto mode, but nothing at the OS level stops it. The copy is replaced from your host file at the next start.
+
+### A starting policy
+
+[`examples/settings.docker.auto-mode.json`](../examples/settings.docker.auto-mode.json) is a starting point to adapt, not a policy that fits every team. Merge its `autoMode` block into your `~/.claude/settings.docker.json` (see [Host config parity](usage.md#host-config-parity)). Claude Code reads `autoMode` from user settings, which is where that file lands, and ignores it in a project's `.claude/settings.json`, so a workspace can't supply its own rules.
+
+| Rule | List | Effect |
+|---|---|---|
+| Undeclared Package Install | `soft_deny` | A package the manifest or lockfile doesn't declare, a one-off runner (`npx`, `pnpm dlx`, `uvx`) or a throwaway harness with new dependencies is blocked until you ask for that package by name. |
+| Package Manager Config Change | `soft_deny` | Changes to `.npmrc`, `pip.conf`, `uv.toml`, registry env vars or a `--registry` flag are blocked until you ask for them. |
+| Third-Party Code Disclosure | `hard_deny` | Repository contents are never sent to code-review APIs, paste sites, upload services or webhooks, even when asked. |
+
+A `soft_deny` rule gives way when you name the exact action in your message ("install `left-pad`"); a `hard_deny` rule does not.
+
+Three things to know when you adapt it:
+
+- **Keep `"$defaults"` in every list.** A list without it replaces Claude Code's built-in rules for that section; for `hard_deny` that drops the built-in data-exfiltration rule.
+- **Name your private registry** if you use [`--registry`](auth.md#private-package-registries). That switches on the built-in rule against installs that bypass it:
+
+  ```json
+  "environment": ["$defaults", "Internal package registry: npm and PyPI through https://artifacts.example.com"]
+  ```
+
+- **Check the result.** In a session, `! claude auto-mode config` prints the rules the classifier uses, and `! claude auto-mode critique` reviews your own entries for ambiguity. The [auto mode configuration reference](https://code.claude.com/docs/en/auto-mode-config) covers the rest.
+
+To roll a policy out to a team, distribute the `settings.docker.json` file: it is copied into the container at every start, so a change reaches each person's next session.
+
+### What does enforce
+
+The policy above steers the agent. For a limit that holds whatever the model decides, use one of these:
+
+- **`permissions.deny`** in the same settings file blocks a matching tool call before the classifier is asked, in every permission mode, `--yolo` included. It matches command prefixes, so a command written another way slips past it.
+- **[`--registry`](auth.md#private-package-registries)** points `uv`, `pnpm` and pip at your private feed. It sets where packages resolve, not what the network allows.
+- **[`--egress-allowlist`](auth.md#egress-allowlist)** limits the session to the hosts you list, and [`--egress-lock`](auth.md#api-egress-lock) pins model traffic to your endpoint. These are the network boundaries.
+
+Hardening the package managers in the image itself (no lifecycle scripts, a minimum release age) is not done yet; [#178](https://github.com/schubergphilis/claude-docker/issues/178) tracks it.
+
 ## Image vulnerability scanning
 
 CI scans the built image for **known** vulnerabilities with [Trivy](https://trivy.dev) and [grype](https://github.com/anchore/grype), across the whole image filesystem: the Ubuntu base image's system packages, the pinned CLIs, and their transitive dependencies. This is a different question from the one [`scripts/update_pins.py`](../scripts/update_pins.py) answers — that reports when a *newer* version exists, while a pin can sit on the newest release and still carry a disclosed CVE. It is also a different question from the `npm audit signatures` check in [Updating pinned tool versions](maintenance.md#updating-pinned-tool-versions), which establishes that a tarball came from npm's keyring, not that the code inside it is free of known vulnerabilities.

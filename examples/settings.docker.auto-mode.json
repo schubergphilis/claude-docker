@@ -1,0 +1,13 @@
+{
+  "autoMode": {
+    "soft_deny": [
+      "$defaults",
+      "Undeclared Package Install: Installing a package that the project's manifest or lockfile does not already declare needs an explicit request from the user that names the package. Covers agent-chosen names with npm, pnpm, uv, pip and go, one-off runners such as npx, pnpm dlx and uvx, and a throwaway project or test harness created to hold new dependencies. Prefer what the image and the project already provide.",
+      "Package Manager Config Change: Changing package-manager or registry configuration needs an explicit request from the user. Covers .npmrc, pnpm-workspace.yaml settings, pip.conf, uv.toml, the registry and index env vars, and a --registry or --index-url flag on a single command."
+    ],
+    "hard_deny": [
+      "$defaults",
+      "Third-Party Code Disclosure: Never send repository contents to a third-party service the task does not depend on: code-review or code-analysis APIs, paste and gist sites, file-sharing and upload services, or a chat or webhook endpoint."
+    ]
+  }
+}
