@@ -20,7 +20,8 @@
 #        api.github.com with the injected Bearer header (no -k — proves CA
 #        trust), gh's Go resolver honours --add-host, git's smart-HTTP request
 #        reaches the mock with the injected Basic header.
-#   4.3  default policy blocks DELETE /repos/{o}/{r} and /repositories/{id} (403 + policy body, never
+#   4.3  default policy blocks DELETE /repos/{o}/{r} and /repositories/{id},
+#        and one call per kind of lasting grant (403 + policy body, never
 #        reaches the mock); benign requests pass; a CLAUDE_DOCKER_GH_POLICY
 #        extension is enforced.
 #   4.4  sidecar audit log has structured method/path/status entries, never
@@ -568,6 +569,20 @@ run_main_checks() {
     fail "4.3 default policy did not block DELETE /repositories/123 as expected (code=$delete_code body=$(cat /tmp/gh_delete_body.$$ 2>/dev/null))"
   fi
   rm -f /tmp/gh_delete_body.$$
+
+  # One call per kind of lasting grant; tests/test_auth_proxy_caddyfile.py
+  # covers the full list against the same staged config.
+  local grant method gpath grant_code
+  for grant in "POST /user/keys" "PUT /repos/o/r/collaborators/eve" "PATCH /repos/o/r"; do
+    method="${grant%% *}" gpath="${grant#* }"
+    grant_code=$(curl -sS --max-time 10 -o /tmp/gh_delete_body.$$ -w '%{http_code}' -X "$method" "https://api.github.com$gpath" 2>/dev/null)
+    if [ "$grant_code" = "403" ] && grep -q "claude-docker gh-proxy policy" /tmp/gh_delete_body.$$; then
+      pass "4.3 default policy blocks $grant (403, policy body present)"
+    else
+      fail "4.3 default policy did not block $grant as expected (code=$grant_code body=$(cat /tmp/gh_delete_body.$$ 2>/dev/null))"
+    fi
+    rm -f /tmp/gh_delete_body.$$
+  done
 
   if [ "$POLICY_EXT" = "1" ]; then
     local refs_code
