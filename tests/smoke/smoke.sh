@@ -119,6 +119,14 @@ setup_workspace() {
   # cells. Files the container creates are owned by HOST_UID; the host-side
   # ownership assertion reads that ownership back.
   chmod 0777 "${WORKSPACE_HOST}" || die "cannot chmod ${WORKSPACE_HOST}"
+  # A repo, so run.sh mounts its read-only .git/config overlay (#1). .git is
+  # world-writable for the same reason: git takes config.lock next to the file,
+  # and a lock it can't create would fail before the write the cell checks.
+  # The copy lets assert_host check the host file is left as it was. run.sh
+  # now also checks the runner owns .git before trusting it, which it does.
+  git init -q "${WORKSPACE_HOST}" && chmod -R a+rwX "${WORKSPACE_HOST}/.git" \
+    && cp "${WORKSPACE_HOST}/.git/config" "${TMPROOT}/git-config.before" \
+    || die "cannot set up the workspace repo"
 
   # Copy assert-in-container.sh into the workspace so the entrypoint can exec
   # it. Resolve this script's dir portably — `realpath` is GNU coreutils and
@@ -382,6 +390,14 @@ assert_host() {
         die "host-side: probe file owned by ${probe_owner}, expected ${HOST_UID_ARG}"
       fi
     fi
+  fi
+
+  # The container's config writes all failed, so the host's .git/config is
+  # byte-for-byte what it was before the cell.
+  if cmp -s "${TMPROOT}/git-config.before" "${WORKSPACE_HOST}/.git/config"; then
+    log "host-side PASS: workspace .git/config unchanged"
+  else
+    die "host-side: the container changed the workspace's .git/config"
   fi
 
   # 3. Robustness: no spurious 'entrypoint: WARN' on stderr — asserted for EVERY

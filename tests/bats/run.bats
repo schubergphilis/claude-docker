@@ -2018,9 +2018,33 @@ run_statusline() {
   mkdir -p "$stage" "$WS/.git"
   echo "[core]" >"$WS/.git/config"
   SEEN_NAMES=(repo) SEEN_PATHS=("$WS")
-  stage_git_overlays
+  stage_git_overlays 2>/dev/null
   grep -q "relativeWorktrees = true" "$stage/git-config-repo"
-  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/git-config-repo:/workspaces/repo/.git/config"* ]]
+  [[ "$(lines_of "${MOUNT_ARGS[@]}")" == *"$stage/git-config-repo:/workspaces/repo/.git/config:ro"* ]]
+}
+
+@test "stage_git_overlays: the overlay is read-only, and the session is told once" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage" "$WS/.git" "$BATS_TEST_TMPDIR/lib/.git"
+  echo "[core]" >"$WS/.git/config"
+  echo "[core]" >"$BATS_TEST_TMPDIR/lib/.git/config"
+  SEEN_NAMES=(repo lib) SEEN_PATHS=("$WS" "$BATS_TEST_TMPDIR/lib")
+  run --separate-stderr stage_git_overlays
+  [ "$status" -eq 0 ]
+  [ "$stderr" = "claude-docker: repo config (.git/config) is read-only in the container; push with 'git push origin HEAD' (-u can't save tracking) and change repo config on the host" ]
+  stage_git_overlays 2>/dev/null
+  [ "$GIT_CONFIG_RO" = 1 ]
+  [ "$(grep -c -- '/.git/config:ro$' < <(lines_of "${MOUNT_ARGS[@]}"))" = 2 ]
+}
+
+@test "stage_git_overlays: no overlay, no notice" {
+  stage="$BATS_TEST_TMPDIR/stage"
+  mkdir -p "$stage"
+  SEEN_NAMES=(repo) SEEN_PATHS=("$WS")
+  run --separate-stderr stage_git_overlays
+  [ -z "$stderr" ]
+  stage_git_overlays
+  [ "$GIT_CONFIG_RO" = 0 ]
 }
 
 @test "stage_git_overlays: a symlinked .git/config is skipped" {
@@ -2292,6 +2316,31 @@ append_values() {
   local first=("${CMD[@]}")
   build_cmd
   [ "$(lines_of "${CMD[@]}")" = "$(lines_of "${first[@]}")" ]
+}
+
+@test "repo config note: a read-only overlay tells claude, in the one flag" {
+  GIT_CONFIG_RO=1
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=(/home/me/a) SEEN_RO=("")
+  CLAUDE_FLAGS=(--resume)
+  build_cmd
+  [ "$(grep -c -- '^--append-system-prompt$' < <(printf '%s\n' "${CMD[@]}"))" = 1 ]
+  run append_values
+  [[ "$output" == "# Repository config (claude-docker)"$'\n'* ]]
+  [[ "$output" == *'"could not write config file .git/config"'* ]]
+  [[ "$output" == *'`git push origin HEAD`'* ]]
+  [[ "$output" != *"Host paths"* ]]
+}
+
+@test "repo config note: follows the host-path map, before the user's text" {
+  GIT_CONFIG_RO=1 WITH_HOST_PATHS=1
+  CONTAINER_PATHS=(/workspaces/a) SEEN_SHOWN=(/home/me/a) SEEN_RO=("")
+  CLAUDE_FLAGS=(--append-system-prompt "mine")
+  build_cmd
+  [ "$(grep -c -- '^--append-system-prompt$' < <(printf '%s\n' "${CMD[@]}"))" = 1 ]
+  run append_values
+  [[ "$output" == "# Host paths (claude-docker)"$'\n'* ]]
+  [[ "$output" == *"give its host path."$'\n\n'"# Repository config (claude-docker)"$'\n'* ]]
+  [[ "$output" == *"on the host."$'\n\n'"mine"$'\n--' ]]
 }
 
 @test "host paths: --help lists the flag, its env var, and that paths go to the model" {
