@@ -154,7 +154,9 @@ chown_volumes() {
 # the drop: the session can't edit it, and a GIT_CONFIG_* export or a cleaned
 # environment doesn't remove it. Only a /workspaces/<name> path is written;
 # anything else, a * included (git reads "*" as "trust every repository"), is
-# refused with a WARN.
+# refused with a WARN. git runs from / so it never looks at the working
+# directory: a workspace that is a worktree of a repo left unmounted has a .git
+# pointer to a missing gitdir, and git dies on that even for --file.
 trust_workspaces() {
   local p list="${CLAUDE_DOCKER_TRUSTED_WORKSPACES:-}" paths=()
   [ -n "$list" ] || return 0
@@ -166,8 +168,8 @@ trust_workspaces() {
       '') continue ;;
       /workspaces/*/* | */. | */.. | *'*'* | *'?'* | *'['* ) ;;
       /workspaces/?*)
-        git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p" \
-          && git config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p/*" \
+        git -C / config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p" \
+          && git -C / config --file "$GIT_SYSTEM_CONFIG" --add safe.directory "$p/*" \
           || { printf 'entrypoint: ERROR could not trust %s for git\n' "$p" >&2; return 1; }
         continue ;;
     esac
