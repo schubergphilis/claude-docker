@@ -58,6 +58,14 @@ startup says why. Users of tools that keep worktrees outside the repository
   against the host directory; a submodule's gitdir carries a `core.worktree`
   pointing at its host location. Both keep today's behaviour.
 - Windows hosts. The host path (`C:/...`) is no path in the container.
+- A live `packed-refs` (and `HEAD`, `shallow`). These are single files at the
+  top of the git directory, mounted one by one; when git on the host replaces
+  one, the session loses it until it restarts. Making them live means
+  mounting the whole git directory, and laying the cleaned config over the
+  real one there doesn't hold: git on the host replaces its config file too
+  (`git push -u`), and the session then sees the real one, tokens included.
+  Tested on Docker Desktop for Mac. A stale or lost ref costs a restart; a
+  leaked token can't be taken back.
 
 ## Capabilities
 

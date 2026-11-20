@@ -400,6 +400,13 @@ For an accepted offer `run.sh` SHALL mount read-only, each from its physical hos
 - **WHEN** the user accepts the offer for `~/wt`
 - **THEN** none of those, nor the files of `~/repo` outside `.git`, are in the container
 
+#### Scenario: Refs packed on the host are lost to the session until it restarts
+
+- **GIVEN** the user accepted the offer for `~/wt`
+- **WHEN** git on the host replaces `~/repo/.git/packed-refs` (deleting a branch held in it, `git fetch --prune`, `git gc`)
+- **THEN** git in the session no longer sees the refs in that file until the session restarts
+- **AND** nothing on the host changes
+
 ### Requirement: A worktree's repository config is mounted as a format-only copy
 
 In place of the repository's `config`, `run.sh` SHALL mount a copy holding only the `core.repositoryformatversion` and `extensions.*` entries that have no subsection and a plain-word value, read without following a symlink or an `include`. A `config.worktree` in the worktree's entry SHALL be replaced the same way, keeping only `core.sparseCheckout` and `core.sparseCheckoutCone`.
