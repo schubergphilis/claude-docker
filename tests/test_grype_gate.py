@@ -26,6 +26,7 @@ GATED = ("ci.yml", "image-scan.yml")
 # move the two gated workflows to it.
 SCAN_ACTION_FOR_MCVS = {
     "c9dfc78bd277dcabbe8719db6e1fc58b2eb673e1": "27805bf3b4e84b4a5c980df22ed233c00390a439",  # v0.14.0
+    "48deb02baf2342dbb079e1bfd4ffa9b48109f727": "27805bf3b4e84b4a5c980df22ed233c00390a439",  # v0.15.0
 }
 
 MCVS_USES = re.compile(r"uses: schubergphilis/mcvs-docker-action@([0-9a-f]{40})")
