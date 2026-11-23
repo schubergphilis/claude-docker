@@ -2070,6 +2070,20 @@ CADDY
 # staged — the user's snippet when CLAUDE_DOCKER_GH_POLICY is set, an empty
 # file otherwise — so the import needs no conditional (validate_opts has
 # already rejected a set-but-unreadable path).
+# The default policy on api.github.com blocks repository deletion and the REST
+# calls that leave access or a data feed behind once the session ends: SSH,
+# GPG and signing keys, account emails (a verified one can receive a password
+# reset), deploy keys, collaborators, organization invitations and members,
+# team members, repository and organization webhooks (added or repointed),
+# self-hosted runner registrations, and repository transfers. A PATCH on a
+# bare repository or organization path changes its settings, visibility
+# included, and Caddy can't read the body to tell those apart, so it is
+# refused as a whole. Every route is also matched under its numeric-id alias
+# (/repositories/{id}, /organizations/{id}). GitHub's router doesn't decode
+# percent-escapes, merge slashes or fold case in these paths (checked against
+# api.github.com), and path_regexp sees the decoded, cleaned path, so the
+# matches cover every spelling GitHub routes. Best effort: GraphQL and git push
+# aren't filtered, and token scope is the real limit.
 stage_gh_proxy_site() {
   if [ "$GH_POLICY_READ" = "1" ]; then
     # --egress-allowlist: the bytes validate_allowlist checked, not the path.
@@ -2133,6 +2147,30 @@ api.github.com {
 		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+)/?$
 	}
 	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	@gh_proxy_grant_post {
+		method POST
+		path_regexp ^/(user/(keys|gpg_keys|ssh_signing_keys|emails)|(repos/[^/]+/[^/]+|repositories/[0-9]+)/(keys|hooks|transfer|actions/runners/(registration-token|generate-jitconfig))|(orgs/[^/]+|organizations/[0-9]+)/(hooks|invitations|teams|actions/runners/(registration-token|generate-jitconfig)))/?$
+	}
+	respond @gh_proxy_grant_post "claude-docker gh-proxy policy: adding SSH, GPG or signing keys, account emails, deploy keys, webhooks, organization invitations, teams or self-hosted runners, and transferring a repository are blocked by default, since they grant access or a data feed that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	# Teams by numeric id are /organizations/{id}/team/{id}, singular; teams?
+	# takes both spellings.
+	@gh_proxy_grant_put {
+		method PUT
+		path_regexp ^/((repos/[^/]+/[^/]+|repositories/[0-9]+)/collaborators/[^/]+|(orgs/[^/]+|organizations/[0-9]+)/(memberships/[^/]+|teams?/[^/]+/(memberships/[^/]+|repos/[^/]+/[^/]+)|organization-roles/(users|teams)/[^/]+/[^/]+|security-managers/teams/[^/]+)|teams/[0-9]+/(memberships/[^/]+|repos/[^/]+/[^/]+))/?$
+	}
+	respond @gh_proxy_grant_put "claude-docker gh-proxy policy: adding collaborators, organization members or team members, giving a team access to a repository, and assigning organization roles are blocked by default, since they grant access that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	# A team's settings include its parent team, whose repository access the
+	# team then inherits.
+	@gh_proxy_grant_patch {
+		method PATCH
+		path_regexp ^/((repos/[^/]+/[^/]+|repositories/[0-9]+|orgs/[^/]+|organizations/[0-9]+)/hooks/[^/]+(/config)?|(repos/[^/]+/[^/]+|repositories/[0-9]+)/invitations/[^/]+|(orgs/[^/]+|organizations/[0-9]+)/teams?/[^/]+|teams/[0-9]+)/?$
+	}
+	respond @gh_proxy_grant_patch "claude-docker gh-proxy policy: changing a webhook, a pending repository invitation or a team is blocked by default, since it can point a data feed elsewhere or widen access that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	@gh_proxy_settings {
+		method PATCH
+		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+|orgs/[^/]+|organizations/[0-9]+)/?$
+	}
+	respond @gh_proxy_settings "claude-docker gh-proxy policy: changing a repository's or organization's settings is blocked by default, since visibility and access settings can open access that outlives the session. Bypass the proxy with --gh-direct to change them." 403
 	import /etc/caddy/policy.caddy
 
 	reverse_proxy {$GH_PROXY_UPSTREAM_API} {
