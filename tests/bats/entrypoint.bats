@@ -137,12 +137,37 @@ trusted() { command git config --file "$GIT_SYSTEM_CONFIG" --get-all safe.direct
 
 # --- set_git_identity ---
 
-@test "set_git_identity: writes the forwarded identity to system config and unsets the env" {
+@test "set_git_identity: writes the forwarded identity to system config" {
   CLAUDE_DOCKER_GIT_USER_NAME="Ada Lovelace" CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
   set_git_identity
   [ "$(command git config --file "$GIT_SYSTEM_CONFIG" user.name)" = "Ada Lovelace" ]
   [ "$(command git config --file "$GIT_SYSTEM_CONFIG" user.email)" = ada@example.com ]
-  [ -z "${CLAUDE_DOCKER_GIT_USER_NAME:-}" ] && [ -z "${CLAUDE_DOCKER_GIT_USER_EMAIL:-}" ]
+}
+
+@test "set_git_identity: the process main execs doesn't inherit the forwarding variables" {
+  export CLAUDE_DOCKER_GIT_USER_NAME="Ada Lovelace" CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  run main env
+  [ "$status" -eq 0 ]
+  [[ "$output" != *CLAUDE_DOCKER_GIT_USER_* ]]
+}
+
+@test "set_git_identity: a different identity in the container's ~/.gitconfig warns" {
+  printf '[user]\n\temail = old@example.com\n' >"$ROOT_HOME/.gitconfig"
+  CLAUDE_DOCKER_GIT_USER_NAME="Ada Lovelace" CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  run set_git_identity
+  [ "$status" -eq 0 ]
+  [ "$output" = "entrypoint: WARN the container's ~/.gitconfig sets user.email to 'old@example.com', which wins over your host's 'ada@example.com'; remove it with: git config --global --unset user.email" ]
+}
+
+@test "set_git_identity: the same identity, or a symlinked ~/.gitconfig, stays quiet" {
+  printf '[user]\n\temail = ada@example.com\n' >"$ROOT_HOME/.gitconfig"
+  CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  run set_git_identity
+  [ -z "$output" ]
+  printf '[user]\n\temail = old@example.com\n' >"$BATS_TEST_TMPDIR/elsewhere"
+  rm "$ROOT_HOME/.gitconfig" && ln -s "$BATS_TEST_TMPDIR/elsewhere" "$ROOT_HOME/.gitconfig"
+  run set_git_identity
+  [ -z "$output" ]
 }
 
 @test "set_git_identity: nothing forwarded writes nothing" {

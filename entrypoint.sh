@@ -181,14 +181,23 @@ trust_workspaces() {
 # host (#1). Env would override them all. -C /: the working directory may be a
 # worktree whose gitdir isn't in the container, and git dies on that even for
 # --file. Not fatal: without it git still works, it only asks for an identity.
+# The container's ~/.gitconfig persists on the claude-code-root volume, where an
+# earlier session may have set an identity; say so when it differs, since it now
+# wins. A symlink there is skipped rather than followed.
 set_git_identity() {
-  local key var val
+  local key var val own
   for key in name email; do
     var="CLAUDE_DOCKER_GIT_USER_$(printf '%s' "$key" | tr '[:lower:]' '[:upper:]')"
     val=${!var:-}
     [ -n "$val" ] || continue
     git -C / config --file "$GIT_SYSTEM_CONFIG" "user.$key" "$val" \
       || printf 'entrypoint: WARN could not set git user.%s\n' "$key" >&2
+    if [ -f "$ROOT_HOME/.gitconfig" ] && [ ! -L "$ROOT_HOME/.gitconfig" ] \
+       && own=$(git -C / config --file "$ROOT_HOME/.gitconfig" --get "user.$key" 2>/dev/null) \
+       && [ "$own" != "$val" ]; then
+      printf "entrypoint: WARN the container's ~/.gitconfig sets user.%s to '%s', which wins over your host's '%s'; remove it with: git config --global --unset user.%s\n" \
+        "$key" "$own" "$val" "$key" >&2
+    fi
   done
   unset CLAUDE_DOCKER_GIT_USER_NAME CLAUDE_DOCKER_GIT_USER_EMAIL
 }
