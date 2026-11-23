@@ -15,3 +15,9 @@
 - [x] 3.2 The new cases fail against `main`'s `run.sh`
 - [x] 3.3 `tests/integration/gh-proxy-integration.sh`: one call per kind of grant is refused in a real session (runs in CI)
 - [x] 3.4 `openspec validate gh-proxy-lasting-grants --strict`
+
+## 4. Review round (#279)
+
+- [x] 4.1 Team routes: creating a team, a team's repository access (org, legacy `/teams/{id}` and `/organizations/{id}/team/{id}` forms), changing a team; organization roles and security-manager teams; `PATCH` on a pending repository invitation
+- [x] 4.2 Docs and spec: the REST list covers known routes only
+- [x] 4.3 Tests: each new route blocked, reads and removals still pass; the new cases fail against `011c874`

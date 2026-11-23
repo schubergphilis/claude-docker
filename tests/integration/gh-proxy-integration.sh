@@ -573,7 +573,8 @@ run_main_checks() {
   # One call per kind of lasting grant; tests/test_auth_proxy_caddyfile.py
   # covers the full list against the same staged config.
   local grant method gpath grant_code
-  for grant in "POST /user/keys" "PUT /repos/o/r/collaborators/eve" "PATCH /repos/o/r"; do
+  for grant in "POST /user/keys" "PUT /repos/o/r/collaborators/eve" "PUT /orgs/acme/teams/devs/repos/o/r" \
+               "PATCH /repos/o/r"; do
     method="${grant%% *}" gpath="${grant#* }"
     grant_code=$(curl -sS --max-time 10 -o /tmp/gh_delete_body.$$ -w '%{http_code}' -X "$method" "https://api.github.com$gpath" 2>/dev/null)
     if [ "$grant_code" = "403" ] && grep -q "claude-docker gh-proxy policy" /tmp/gh_delete_body.$$; then

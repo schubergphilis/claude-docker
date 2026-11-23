@@ -32,7 +32,7 @@ The sidecar SHALL enforce request policy before forwarding, and answer a refused
 
 ### Requirement: Default policy blocks lasting grants and setting changes
 
-The default policy SHALL block, on `api.github.com`, the REST calls that leave access or a data feed behind once the session ends, and `PATCH` on a bare repository or organization path, which is where visibility and access settings change. Each blocked route SHALL also be blocked under its numeric-id alias (`/repositories/{id}`, `/organizations/{id}`), with a query string, and with a trailing slash.
+The default policy SHALL block, on `api.github.com`, the REST calls that leave access or a data feed behind once the session ends, and `PATCH` on a bare repository or organization path, which is where visibility and access settings change. Each blocked route SHALL also be blocked under its numeric-id alias (`/repositories/{id}`, `/organizations/{id}`, and `/organizations/{id}/team/{id}` for a team), with a query string, and with a trailing slash.
 
 #### Scenario: Adding keys or an email is blocked
 
@@ -41,17 +41,17 @@ The default policy SHALL block, on `api.github.com`, the REST calls that leave a
 
 #### Scenario: Repository and organization grants are blocked
 
-- **WHEN** a `POST` to a repository's `keys`, `hooks`, `transfer`, `actions/runners/registration-token` or `actions/runners/generate-jitconfig`, or to an organization's `hooks`, `invitations` or the same runner paths, is made from the agent container
+- **WHEN** a `POST` to a repository's `keys`, `hooks`, `transfer`, `actions/runners/registration-token` or `actions/runners/generate-jitconfig`, or to an organization's `hooks`, `invitations`, `teams` or the same runner paths, is made from the agent container
 - **THEN** the response is `403` from the sidecar and the request never reaches GitHub
 
-#### Scenario: Adding collaborators or members is blocked
+#### Scenario: Adding collaborators, members, team access or roles is blocked
 
-- **WHEN** a `PUT` to `/repos/{owner}/{repo}/collaborators/{user}`, `/orgs/{org}/memberships/{user}`, `/orgs/{org}/teams/{team}/memberships/{user}` or `/teams/{id}/memberships/{user}` is made from the agent container
+- **WHEN** a `PUT` to `/repos/{owner}/{repo}/collaborators/{user}`, `/orgs/{org}/memberships/{user}`, `/orgs/{org}/teams/{team}/memberships/{user}`, `/teams/{id}/memberships/{user}`, `/orgs/{org}/teams/{team}/repos/{owner}/{repo}`, `/teams/{id}/repos/{owner}/{repo}`, `/orgs/{org}/organization-roles/(users|teams)/{name}/{role}` or `/orgs/{org}/security-managers/teams/{team}` is made from the agent container
 - **THEN** the response is `403` from the sidecar
 
-#### Scenario: Repointing a webhook is blocked
+#### Scenario: Repointing a webhook, or widening an invitation or a team, is blocked
 
-- **WHEN** a `PATCH` to a repository's or organization's `hooks/{id}` or `hooks/{id}/config` is made from the agent container
+- **WHEN** a `PATCH` to a repository's or organization's `hooks/{id}` or `hooks/{id}/config`, to `/repos/{owner}/{repo}/invitations/{id}`, or to a team (`/orgs/{org}/teams/{team}`, `/teams/{id}`) is made from the agent container
 - **THEN** the response is `403` from the sidecar
 
 #### Scenario: Setting changes are blocked
@@ -59,7 +59,12 @@ The default policy SHALL block, on `api.github.com`, the REST calls that leave a
 - **WHEN** `gh repo edit --visibility public` runs inside the agent container, or any `PATCH` to `/repos/{owner}/{repo}` or `/orgs/{org}`
 - **THEN** the response is `403` from the sidecar, whose body names `--gh-direct` as the way to change settings
 
+#### Scenario: The documentation names the list's limit
+
+- **WHEN** a user reads the policy section of `docs/auth.md`
+- **THEN** it says the blocked REST routes are the known ones, not every grant GitHub's API offers, and how to extend the list
+
 #### Scenario: Ordinary writes pass
 
-- **WHEN** issues, pull requests, comments, refs or file contents are created or updated from the agent container, or a collaborator or deploy key is removed
+- **WHEN** issues, pull requests, comments, refs or file contents are created or updated from the agent container, or a collaborator, deploy key, team's repository access or pending invitation is removed
 - **THEN** the requests reach GitHub

@@ -357,6 +357,9 @@ class SidecarBehaviourTest(unittest.TestCase):
             ("DELETE", "/repos/o/r/git/refs/heads/x"), ("DELETE", "/repos/o/r/collaborators/x"),
             ("DELETE", "/repos/o/r/keys/1"), ("POST", "/repos/o/r/hooks/1/pings"),
             ("POST", "/repos/keys/repo/issues"), ("POST", "/graphql"),
+            ("GET", "/orgs/acme/teams/devs/repos"), ("GET", "/repos/o/r/invitations"),
+            ("DELETE", "/repos/o/r/invitations/7"), ("DELETE", "/orgs/acme/teams/devs/repos/o/r"),
+            ("GET", "/orgs/acme/organization-roles"),
         )
         for method, path in allowed:
             with self.subTest(method=method, path=path):
@@ -384,6 +387,8 @@ class SidecarBehaviourTest(unittest.TestCase):
             ("POST", "/orgs/acme/actions/runners/registration-token"),
             ("POST", "/organizations/9/actions/runners/generate-jitconfig"),
             ("POST", "/orgs/acme/invitations"), ("POST", "/organizations/9/invitations"),
+            # Creating a team takes `maintainers` and `repo_names` in its body.
+            ("POST", "/orgs/acme/teams"), ("POST", "/organizations/9/teams"),
             ("POST", "/user/keys?x=1"), ("POST", "/user/keys/"), ("POST", "//user//keys"),
             ("POST", "/%75ser/keys"),
         )
@@ -393,12 +398,22 @@ class SidecarBehaviourTest(unittest.TestCase):
         members = ("/repos/o/r/collaborators/eve", "/repositories/123/collaborators/eve",
                    "/orgs/acme/memberships/eve", "/organizations/9/memberships/eve",
                    "/orgs/acme/teams/devs/memberships/eve", "/organizations/9/teams/devs/memberships/eve",
-                   "/teams/42/memberships/eve")
+                   "/teams/42/memberships/eve", "/organizations/9/team/42/memberships/eve",
+                   # A team's access to a repository, and organization-wide roles.
+                   "/orgs/acme/teams/devs/repos/o/r", "/organizations/9/team/42/repos/o/r",
+                   "/organizations/9/teams/42/repos/o/r", "/teams/42/repos/o/r",
+                   "/orgs/acme/organization-roles/users/eve/8", "/orgs/acme/organization-roles/teams/devs/8",
+                   "/organizations/9/organization-roles/users/eve/8",
+                   "/orgs/acme/security-managers/teams/devs", "/organizations/9/security-managers/teams/devs")
         for path in members:
             with self.subTest(path=path):
                 self.assertGhBlocked("PUT", path, "adding collaborators")
+        # A pending repository invitation's permission, and a team's settings
+        # (a new parent team passes on the parent's repository access).
         for path in ("/repos/o/r/hooks/1", "/repos/o/r/hooks/1/config", "/orgs/acme/hooks/1/config",
-                     "/repositories/123/hooks/1", "/organizations/9/hooks/1"):
+                     "/repositories/123/hooks/1", "/organizations/9/hooks/1",
+                     "/repos/o/r/invitations/7", "/repositories/123/invitations/7",
+                     "/orgs/acme/teams/devs", "/organizations/9/team/42", "/teams/42"):
             with self.subTest(path=path):
                 self.assertGhBlocked("PATCH", path, "changing a webhook")
 

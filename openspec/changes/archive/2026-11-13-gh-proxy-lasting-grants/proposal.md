@@ -15,10 +15,15 @@ since #196.
   claude-docker gh-proxy policy:
   - `POST` that adds SSH, GPG or signing keys, account emails (a verified one can
     receive a password reset), deploy keys, repository or organization webhooks,
-    organization invitations, self-hosted runner registrations or JIT runner
+    organization invitations, teams (a new team takes maintainers and
+    repositories in its body), self-hosted runner registrations or JIT runner
     configs, or transfers a repository;
-  - `PUT` that adds a collaborator, an organization member or a team member;
-  - `PATCH` on a webhook or its config (repointing its URL);
+  - `PUT` that adds a collaborator, an organization member or a team member,
+    gives a team access to a repository, or assigns an organization role or a
+    security-manager team;
+  - `PATCH` on a webhook or its config (repointing its URL), on a pending
+    repository invitation (raising its permission), or on a team (a new parent
+    team passes on its repository access);
   - `PATCH` on a bare repository or organization path. That is where visibility
     and access settings change, and Caddy can't read the body to tell those
     apart from harmless settings, so all of it is refused; `--gh-direct` changes
@@ -26,8 +31,9 @@ since #196.
 - Each route is matched under its numeric-id alias too (`/repositories/{id}`,
   `/organizations/{id}`).
 - Docs: the policy's structural blind spots (GraphQL, `git push`, request
-  bodies), a persistence hunt in the incident checklist, and a note that a
-  `CLAUDE_DOCKER_GH_POLICY` snippet runs inside the token-bearing site.
+  bodies), that the REST list covers known routes only, a persistence hunt in
+  the incident checklist, and a note that a `CLAUDE_DOCKER_GH_POLICY` snippet
+  runs inside the token-bearing site.
 
 Matching stays on the decoded path (`path_regexp`), which Caddy also cleans of
 doubled slashes, so it covers more spellings than GitHub routes. Checked
@@ -38,8 +44,10 @@ trailing slash, and it ignores `X-HTTP-Method-Override` and `_method`. So the
 GitLab policy's guards for escaped spellings and method overrides aren't
 needed here.
 
-Not in scope: GraphQL mutations, `git push` of `.github/workflows/*`, and other
-writes that don't outlive the session (branch protection, secrets).
+Not in scope: GraphQL mutations, `git push` of `.github/workflows/*`, other
+writes that don't outlive the session (branch protection, secrets), and
+destructive calls beyond repository deletion, such as deleting an organization
+(a separate change).
 
 ## Capabilities
 

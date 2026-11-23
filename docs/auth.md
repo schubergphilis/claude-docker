@@ -59,10 +59,12 @@ When a token is found:
 **Filtering and policy.** The generated Caddyfile answers these on `api.github.com` with a `403` naming the claude-docker gh-proxy policy, and they never reach GitHub:
 
 - repository deletion: `DELETE` on `/repos/{owner}/{repo}`;
-- calls that leave access or a data feed behind once the session ends: adding SSH, GPG or signing keys (`/user/keys`, `/user/gpg_keys`, `/user/ssh_signing_keys`), an account email (`/user/emails`, since a verified address can receive a password reset), a deploy key (`/repos/{owner}/{repo}/keys`), a collaborator, an organization invitation or member, or a team member; adding or changing a repository or organization webhook; registering a self-hosted runner (`actions/runners/registration-token`, `generate-jitconfig`); and transferring a repository;
+- calls that leave access or a data feed behind once the session ends: adding SSH, GPG or signing keys (`/user/keys`, `/user/gpg_keys`, `/user/ssh_signing_keys`), an account email (`/user/emails`, since a verified address can receive a password reset), a deploy key (`/repos/{owner}/{repo}/keys`), a collaborator, an organization invitation or member, a team or a team member; giving a team access to a repository; assigning an organization role or a security-manager team; changing a pending repository invitation or a team (a new parent team passes on its repository access); adding or changing a repository or organization webhook; registering a self-hosted runner (`actions/runners/registration-token`, `generate-jitconfig`); and transferring a repository;
 - `PATCH` on `/repos/{owner}/{repo}` or `/orgs/{org}`, which changes settings. Visibility and access settings can open lasting access, and the sidecar can't read the body to tell them apart, so `gh repo edit` and `gh repo rename` need `--gh-direct`.
 
-Each is matched under its numeric-id alias too (`/repositories/{id}`, `/organizations/{id}`). Everything else passes: issues, pull requests, comments, refs, file contents, releases, and removing a key or collaborator.
+Each is matched under its numeric-id alias too (`/repositories/{id}`, `/organizations/{id}`). Everything else passes: issues, pull requests, comments, refs, file contents, releases, and removing a key, collaborator, invitation or team's access.
+
+This is a list of the grant routes we know of, not a guarantee: GitHub's REST API keeps growing, and a route missing from the list passes. Extend it with `CLAUDE_DOCKER_GH_POLICY`, and report a missing route as an issue.
 
 The policy sees only the method and path, so it can't filter:
 

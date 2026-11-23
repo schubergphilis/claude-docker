@@ -2146,19 +2146,23 @@ api.github.com {
 	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
 	@gh_proxy_grant_post {
 		method POST
-		path_regexp ^/(user/(keys|gpg_keys|ssh_signing_keys|emails)|(repos/[^/]+/[^/]+|repositories/[0-9]+)/(keys|hooks|transfer|actions/runners/(registration-token|generate-jitconfig))|(orgs/[^/]+|organizations/[0-9]+)/(hooks|invitations|actions/runners/(registration-token|generate-jitconfig)))/?$
+		path_regexp ^/(user/(keys|gpg_keys|ssh_signing_keys|emails)|(repos/[^/]+/[^/]+|repositories/[0-9]+)/(keys|hooks|transfer|actions/runners/(registration-token|generate-jitconfig))|(orgs/[^/]+|organizations/[0-9]+)/(hooks|invitations|teams|actions/runners/(registration-token|generate-jitconfig)))/?$
 	}
-	respond @gh_proxy_grant_post "claude-docker gh-proxy policy: adding SSH, GPG or signing keys, account emails, deploy keys, webhooks, organization invitations or self-hosted runners, and transferring a repository are blocked by default, since they grant access or a data feed that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	respond @gh_proxy_grant_post "claude-docker gh-proxy policy: adding SSH, GPG or signing keys, account emails, deploy keys, webhooks, organization invitations, teams or self-hosted runners, and transferring a repository are blocked by default, since they grant access or a data feed that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	# Teams by numeric id are /organizations/{id}/team/{id}, singular; teams?
+	# takes both spellings.
 	@gh_proxy_grant_put {
 		method PUT
-		path_regexp ^/((repos/[^/]+/[^/]+|repositories/[0-9]+)/collaborators/[^/]+|(orgs/[^/]+|organizations/[0-9]+)/(memberships|teams/[^/]+/memberships)/[^/]+|teams/[0-9]+/memberships/[^/]+)/?$
+		path_regexp ^/((repos/[^/]+/[^/]+|repositories/[0-9]+)/collaborators/[^/]+|(orgs/[^/]+|organizations/[0-9]+)/(memberships/[^/]+|teams?/[^/]+/(memberships/[^/]+|repos/[^/]+/[^/]+)|organization-roles/(users|teams)/[^/]+/[^/]+|security-managers/teams/[^/]+)|teams/[0-9]+/(memberships/[^/]+|repos/[^/]+/[^/]+))/?$
 	}
-	respond @gh_proxy_grant_put "claude-docker gh-proxy policy: adding collaborators, organization members or team members is blocked by default, since it grants access that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
-	@gh_proxy_hook_edit {
+	respond @gh_proxy_grant_put "claude-docker gh-proxy policy: adding collaborators, organization members or team members, giving a team access to a repository, and assigning organization roles are blocked by default, since they grant access that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	# A team's settings include its parent team, whose repository access the
+	# team then inherits.
+	@gh_proxy_grant_patch {
 		method PATCH
-		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+|orgs/[^/]+|organizations/[0-9]+)/hooks/[^/]+(/config)?/?$
+		path_regexp ^/((repos/[^/]+/[^/]+|repositories/[0-9]+|orgs/[^/]+|organizations/[0-9]+)/hooks/[^/]+(/config)?|(repos/[^/]+/[^/]+|repositories/[0-9]+)/invitations/[^/]+|(orgs/[^/]+|organizations/[0-9]+)/teams?/[^/]+|teams/[0-9]+)/?$
 	}
-	respond @gh_proxy_hook_edit "claude-docker gh-proxy policy: changing a webhook is blocked by default, since it can point a data feed that outlives the session at another URL. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	respond @gh_proxy_grant_patch "claude-docker gh-proxy policy: changing a webhook, a pending repository invitation or a team is blocked by default, since it can point a data feed elsewhere or widen access that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
 	@gh_proxy_settings {
 		method PATCH
 		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+|orgs/[^/]+|organizations/[0-9]+)/?$
