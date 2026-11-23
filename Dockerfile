@@ -131,7 +131,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-client \
       unzip \
  && git lfs install --system --skip-repo \
+ && git config --system branch.autoSetupMerge false \
  && rm -rf /var/lib/apt/lists/*
+# branch.autoSetupMerge=false: a workspace's .git/config is read-only in a
+# session (run.sh stage_git_overlays, #1), so creating a branch from a remote
+# one would print a failed config write for tracking it can't save. System
+# scope, not GIT_CONFIG_* env: a session that exports its own GIT_CONFIG_COUNT
+# replaces that whole set. Repo and global config still override it.
 
 # GitHub CLI (keyring fetched at build; TODO: commit the keyring to the repo)
 RUN install -d -m 0755 /etc/apt/keyrings \

@@ -76,7 +76,7 @@ STUBS = {
             for a in "$@"; do
               if [ "$prev" = "-v" ]; then
                 case "$a" in
-                  *:/workspaces/*/.git/config) src="${a%:/workspaces/*}"; cp "$(unwin "$src")" "$RECORD/overlay" ;;
+                  *:/workspaces/*/.git/config:ro) src="${a%:/workspaces/*}"; cp "$(unwin "$src")" "$RECORD/overlay" ;;
                 esac
               fi
               prev="$a"
