@@ -172,6 +172,8 @@ To convert pre-existing absolute-path worktrees, ask Claude to run `git worktree
 
 `claude-docker` prints a line about this at start, and tells Claude the same, so it doesn't try to fix the errors.
 
+This keeps your repo config as you left it. It is not a security boundary: the rest of `.git` stays writable, and hooks or a nested repository's config can still run code on the host. See [Threat model](security.md#threat-model).
+
 **Fallback — `git worktree repair` (no flag):** ask Claude to run it, or type `! git worktree repair`.
 
 Use this when you passed a repo and a _sibling_ worktree as separate workspace args (`claude-docker ~/repo ~/repo-feature`). Sibling-flattened mounts collapse the parent directory, so the relative offset between worktree and repo is not preserved by the bind mount and relative paths can't help.
