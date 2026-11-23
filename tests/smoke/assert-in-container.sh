@@ -28,6 +28,7 @@
 # smoke.sh never sets them; the defaults are the real in-container paths.
 PROC_STATUS="${PROC_STATUS:-/proc/self/status}"
 PROC_MOUNTS="${PROC_MOUNTS:-/proc/self/mounts}"
+PROC_MOUNTINFO="${PROC_MOUNTINFO:-/proc/self/mountinfo}"
 ROOT_HOME="${ROOT_HOME:-/root}"
 SEED_SETTINGS="${SEED_SETTINGS:-/run/claude-docker/settings.json}"
 API_CA="${API_CA:-/usr/local/share/ca-certificates/claude-docker-api.crt}"
@@ -328,7 +329,7 @@ check_git_trust() {
 check_git_config_ro() {
   local ws="${WORKSPACE:-/workspaces/smoke}" out want
   assert_eq "git-config-ro: overlay mounted read-only" \
-    "$(awk -v p="$ws/.git/config" '$5 == p { split($6, o, ","); print o[1] }' /proc/self/mountinfo)" "ro"
+    "$(awk -v p="$ws/.git/config" '$5 == p { split($6, o, ","); print o[1] }' "$PROC_MOUNTINFO")" "ro"
   assert_eq "git-config-ro: image sets branch.autoSetupMerge=false" \
     "$(git config --system --get branch.autoSetupMerge)" "false"
   # The notice quotes this text, so agents recognise it: keep them in step.
