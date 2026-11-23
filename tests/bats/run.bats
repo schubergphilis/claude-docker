@@ -1099,10 +1099,13 @@ TABLE
 
 # --- forward_git_identity / build_flags_env ---
 
-@test "forward_git_identity: forwards name and email" {
+@test "forward_git_identity: forwards name and email for the entrypoint, not as git's env" {
   forward_git_identity
-  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"GIT_AUTHOR_NAME=Ada Lovelace"* ]]
-  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"GIT_COMMITTER_EMAIL=ada@example.com"* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"CLAUDE_DOCKER_GIT_USER_NAME=Ada Lovelace"* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" == *"CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com"* ]]
+  # GIT_AUTHOR_* / GIT_COMMITTER_* would override a repository's own identity.
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_AUTHOR_* ]]
+  [[ "$(lines_of "${ENV_ARGS[@]}")" != *GIT_COMMITTER_* ]]
 }
 
 @test "forward_git_identity: unset identity forwards nothing" {

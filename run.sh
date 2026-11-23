@@ -211,8 +211,9 @@ Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
 
 Git identity (user.name, user.email) is forwarded automatically from the
-host's global git config as GIT_AUTHOR_* / GIT_COMMITTER_* env vars so
-in-container `git commit` works without a `-c user.email=...` override.
+host's global git config into the container's system git config, so
+in-container `git commit` works without a `-c user.email=...` override and
+a repository's own identity still wins, as on the host.
 Not gated: identity is already public on every commit you've ever made.
 Signing, credential helpers, and hooks are NOT forwarded.
 
@@ -1913,16 +1914,19 @@ forward_git_identity() {
   # Forward host git identity so in-container `git commit` works without a
   # per-invocation `-c user.email=...` dance. Non-opt-in: user.name/user.email
   # are already on every public commit the user has ever made, so there is no
-  # credential to gate. GIT_AUTHOR_* / GIT_COMMITTER_* take precedence over
-  # config and are sufficient for commits; we deliberately skip signing and
-  # other host-specific settings (credential helpers, hooks) that wouldn't
-  # work in the container anyway.
+  # credential to gate. The entrypoint writes them to the container's system
+  # git config (set_git_identity), not GIT_AUTHOR_* / GIT_COMMITTER_* env:
+  # those override every config file, so a repository that sets its own
+  # user.email (a work address) would commit under the global one (#1,
+  # "your current settings apply"). We deliberately skip signing and other
+  # host-specific settings (credential helpers, hooks) that wouldn't work in
+  # the container anyway.
   if command -v git >/dev/null 2>&1; then
     if git_name=$(git config --global --get user.name 2>/dev/null) && [ -n "$git_name" ]; then
-      ENV_ARGS+=("-e" "GIT_AUTHOR_NAME=$git_name" "-e" "GIT_COMMITTER_NAME=$git_name")
+      ENV_ARGS+=("-e" "CLAUDE_DOCKER_GIT_USER_NAME=$git_name")
     fi
     if git_email=$(git config --global --get user.email 2>/dev/null) && [ -n "$git_email" ]; then
-      ENV_ARGS+=("-e" "GIT_AUTHOR_EMAIL=$git_email" "-e" "GIT_COMMITTER_EMAIL=$git_email")
+      ENV_ARGS+=("-e" "CLAUDE_DOCKER_GIT_USER_EMAIL=$git_email")
     fi
   fi
 }

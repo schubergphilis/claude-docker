@@ -125,7 +125,7 @@ The chosen dir takes the place of `~/.claude` for every item in the parity table
 
 ### Git identity
 
-`user.name` and `user.email` from your global git config (`~/.gitconfig`) are forwarded automatically as `GIT_AUTHOR_NAME`/`GIT_AUTHOR_EMAIL`/`GIT_COMMITTER_NAME`/`GIT_COMMITTER_EMAIL` so in-container `git commit` works out of the box with your real identity — no `git -c user.email=...` dance, no wrong-author commits. Not gated by a flag: identity is already public on every commit you've made. Signing keys, credential helpers, aliases, and hooks are NOT forwarded — those are host-specific (keychains, absolute paths) and would misfire inside the container.
+`user.name` and `user.email` from your global git config (`~/.gitconfig`) are forwarded automatically, so in-container `git commit` works out of the box with your real identity — no `git -c user.email=...` dance. The entrypoint writes them to the container's system git config (`/etc/gitconfig`), the lowest scope, so a repository that sets its own identity (a work address, say) still commits under it, as on the host. An identity set in the container's own `~/.gitconfig`, which lives on the `claude-code-root` volume, also wins over the forwarded one. Not gated by a flag: identity is already public on every commit you've made. Signing keys, credential helpers, aliases, and hooks are NOT forwarded — those are host-specific (keychains, absolute paths) and would misfire inside the container.
 
 ### Statusline tag for active opt-ins
 
