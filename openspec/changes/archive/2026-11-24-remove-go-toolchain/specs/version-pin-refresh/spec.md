@@ -95,3 +95,35 @@ The refresh tooling SHALL print a report describing the outcome for every tool: 
 - **GIVEN** the ubuntu base tag now resolves to a digest different from the pinned one
 - **WHEN** the operator runs the refresh script
 - **THEN** the report flags the base-image digest as differing and needing review
+
+### Requirement: Every automated pin is verified at runtime, not just at install
+
+For every tool pinned by an automated `pins/<tool>.env` fragment, the build pipeline SHALL execute that tool inside the image it just built and SHALL require the version the tool reports to equal its pinned version. Coverage SHALL be every automated tool, not a subset: a tool that gains an automated pin SHALL become verified without any edit to the pipeline. A reported version that differs from the pin, a tool that cannot be executed, and a tool whose version cannot be read from its output SHALL each fail the pipeline before merge. Manual pins (`nodejs`, `task`, the base-image digest) are outside this requirement; they remain operator reminders.
+
+This closes the gap between "the tool installed" and "the tool works": an install step exiting zero says nothing about whether the resulting executable runs or which version it is.
+
+#### Scenario: pin bumped but image still carries the old version
+
+- **GIVEN** an automated pin was bumped and the image's installed tool still reports the previous version
+- **WHEN** the pipeline runs against the built image
+- **THEN** the pipeline fails, naming the tool, the pinned version, and the reported version
+- **AND** the failure surfaces in CI before merge
+
+#### Scenario: installed but non-functional executable
+
+- **GIVEN** a tool whose install step exited zero but whose executable errors when invoked
+- **WHEN** the pipeline probes that tool for its version
+- **THEN** the pipeline fails rather than treating an unreadable version as a pass
+
+#### Scenario: coverage follows the pin set
+
+- **GIVEN** a tool that is added to or removed from the set of automated pins
+- **WHEN** the pipeline runs
+- **THEN** the set of tools it verifies matches the set of automated pins
+- **AND** no pipeline definition was edited to achieve that
+
+#### Scenario: every tool reporting its pinned version passes
+
+- **GIVEN** an image in which every automated tool reports exactly its pinned version
+- **WHEN** the pipeline verifies them
+- **THEN** every tool passes and the pipeline reports each tool's pinned and reported version

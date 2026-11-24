@@ -26,7 +26,9 @@ base image. This change is the mechanics.
 
 ## Open Questions
 
-- The `package-managers` Purpose paragraph still names Go as "the one
-  exception". OpenSpec deltas cannot edit a Purpose, and `openspec/specs/` is
-  generated: should the archive step regenerate it, or is a one-off follow-up
-  needed?
+- The Purpose paragraphs of `package-managers` ("Go is the one exception,
+  shipped in the image under its own `go-toolchain` capability") and
+  `version-pin-refresh` ("the same reason `go` stays manual (see
+  `go-toolchain`)") still mention Go. OpenSpec deltas cannot edit a Purpose,
+  and `openspec/specs/` is generated: should the archive step regenerate them,
+  or is a one-off follow-up needed?

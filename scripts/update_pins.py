@@ -645,9 +645,8 @@ def task_latest_published(codename: str) -> str:
     """Newest stable `task` (go-task) version published in the Cloudsmith apt
     repo for `codename`. Best-effort: returns '' on any failure.
 
-    task stays a manual pin: a Debian `Packages`
-    index carries no publish dates, so there is nothing here to evaluate the soak
-    window against. This index — not go-task's GitHub releases — is the source
+    task stays a manual pin: a Debian `Packages` index carries no publish
+    dates, so there is nothing here to evaluate the soak window against. This index — not go-task's GitHub releases — is the source
     that matters, because a version the apt repo has not ingested yet is one the
     build's `apt-get install task=<v>` cannot resolve.
 

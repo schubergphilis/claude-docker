@@ -103,7 +103,7 @@ The container's threat model documentation SHALL explicitly note that `npx`, `pn
 
 The documentation SHALL group these by whether they add a capability the image did not already have. `pnpm dlx` running an ordinary package SHALL be identified as functionally equivalent to the already-available `npx`. `uvx` (PyPI execution), `tfenv install` (HashiCorp release-channel execution of an unpinned terraform binary, version-selected by the workspace), and `pnpm dlx` naming a package manager or a runtime SHALL each be identified as a distinct capability whose downloaded binary the image does not pin.
 
-For the last of these, the documentation SHALL state that naming a package manager or a runtime provisions that release rather than installing the npm package of the same name; that the version is selected by the caller or by a workspace field rather than pinned in the image; that pnpm resolves these through npm's trusted package-manager registries and verifies an npm-published one against npm's signature for its exact version before executing it, so provenance is checked even though the version is not pinned; and that no refusal switch equivalent to `GOTOOLCHAIN=local` is documented upstream.
+For the last of these, the documentation SHALL state that naming a package manager or a runtime provisions that release rather than installing the npm package of the same name; that the version is selected by the caller or by a workspace field rather than pinned in the image; that pnpm resolves these through npm's trusted package-manager registries and verifies an npm-published one against npm's signature for its exact version before executing it, so provenance is checked even though the version is not pinned; and that no switch to refuse this download is documented upstream.
 
 These scenarios describe what the documentation says, not which file says it.
 
@@ -298,6 +298,8 @@ managers add to the runtime code-fetch surface.
 - **WHEN** a reader opens the *Extending the image* section of `docs/usage.md`
 - **THEN** it contains a child-image `Dockerfile` that installs a pinned,
   sha256-verified Go toolchain
+- **AND** it puts the toolchain's own directory ahead of `/root/.local/bin` and
+  any volume-persisted directory after every system path
 - **AND** it names the supply-chain pinning as the child image's responsibility
 
 ### Requirement: PATH ordering keeps volume-persisted directories non-shadowing

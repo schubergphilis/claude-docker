@@ -316,7 +316,7 @@ reported from their own pins and need no network resolution of a newest version.
 
 ### Requirement: Every automated pin is verified at runtime, not just at install
 
-For every tool pinned by an automated `pins/<tool>.env` fragment, the build pipeline SHALL execute that tool inside the image it just built and SHALL require the version the tool reports to equal its pinned version. Coverage SHALL be every automated tool, not a subset: a tool that gains an automated pin SHALL become verified without any edit to the pipeline. A reported version that differs from the pin, a tool that cannot be executed, and a tool whose version cannot be read from its output SHALL each fail the pipeline before merge. Manual pins (`nodejs`, `task`, the Go toolchain, the base-image digest) are outside this requirement; they remain operator reminders.
+For every tool pinned by an automated `pins/<tool>.env` fragment, the build pipeline SHALL execute that tool inside the image it just built and SHALL require the version the tool reports to equal its pinned version. Coverage SHALL be every automated tool, not a subset: a tool that gains an automated pin SHALL become verified without any edit to the pipeline. A reported version that differs from the pin, a tool that cannot be executed, and a tool whose version cannot be read from its output SHALL each fail the pipeline before merge. Manual pins (`nodejs`, `task`, the base-image digest) are outside this requirement; they remain operator reminders.
 
 This closes the gap between "the tool installed" and "the tool works": an install step exiting zero says nothing about whether the resulting executable runs or which version it is.
 

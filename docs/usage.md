@@ -248,9 +248,9 @@ Go is not in the base image: a project's language runtimes are fetched per proje
 # .claude-docker/Dockerfile
 FROM claude-code:local
 
-# Bump the version and both hashes together: https://go.dev/dl/ lists the sha256
-# of each tarball. Check them against a locally downloaded copy rather than
-# trusting a page you fetched through the same network path as the tarball.
+# Bump the version and both hashes together. Take each sha256 from
+# https://go.dev/dl/ and confirm it equals the hash of a tarball you downloaded
+# yourself, ideally from another network: neither source alone is independent.
 ARG GO_VERSION=1.26.11
 ARG GO_SHA256_AMD64=9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec
 ARG GO_SHA256_ARM64=6c2f29b458b5add0835f18b776f69c8881a6d88428f1484a6da55755e620757e
@@ -264,17 +264,20 @@ RUN ARCH=$(dpkg --print-architecture); \
  && echo "${SHA}  /tmp/go.tar.gz" | sha256sum -c - \
  && tar -C /usr/local -xzf /tmp/go.tar.gz \
  && rm /tmp/go.tar.gz \
+ && rm -rf /usr/local/go/api /usr/local/go/test \
+ && find /usr/local/go/src -type d -name testdata -prune -exec rm -rf {} + \
  && /usr/local/go/bin/go version
 
-# /root/go/bin is on the persistent claude-code-root volume and agent-writable,
-# so it goes after the system paths in PATH: a binary left there must not shadow
-# git, gh or aws on a later run.
+# /usr/local/go/bin is root-owned, so it goes first: the pinned `go` wins over
+# anything in /root/.local/bin. /root/go/bin is on the persistent
+# claude-code-root volume and agent-writable, so it goes last, after the system
+# paths: a binary left there must not shadow git, gh or aws on a later run.
 ENV GOROOT=/usr/local/go \
     GOPATH=/root/go \
     GOBIN=/root/go/bin \
-    PATH="${PATH}:/usr/local/go/bin:/root/go/bin"
+    PATH="/usr/local/go/bin:${PATH}:/root/go/bin"
 ```
 
-The pin and its upkeep are the child image's: the base image no longer tracks Go releases or scans for Go CVEs. With `GOTOOLCHAIN` at its default `auto`, a `go.mod` that asks for a newer Go downloads that toolchain at runtime; set `GOTOOLCHAIN=local` to refuse it.
+The pin and its upkeep are the child image's: the base image no longer tracks Go releases or scans for Go CVEs. With `GOTOOLCHAIN` at its default `auto`, a `go.mod` that asks for a newer Go downloads that toolchain at runtime; set `GOTOOLCHAIN=local` to refuse it ([Go toolchains](https://go.dev/doc/toolchain)).
 
 Any extra package managers a child image installs (rustup, go, ruby, etc.) _add_ to the runtime code-fetch surface noted under [Threat model](security.md#threat-model) — they don't replace the existing `npx`/`pnpm dlx`/`uvx` primitives.

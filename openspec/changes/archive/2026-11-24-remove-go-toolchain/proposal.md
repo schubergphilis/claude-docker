@@ -39,10 +39,13 @@ give users a child-image recipe instead.
 
 - `package-managers`: ADDED *Go is not preinstalled and a child-image recipe is
   documented*; ADDED *PATH ordering keeps volume-persisted directories
-  non-shadowing* (moved from `go-toolchain`, without Go).
+  non-shadowing* (moved from `go-toolchain`, without Go); MODIFIED *runtime
+  code-fetch capability documented in threat model*, which no longer compares
+  pnpm to `GOTOOLCHAIN=local`.
 - `version-pin-refresh`: MODIFIED *Operator report*, *the task pin is manual and
-  surfaced as an operator reminder* and *the task reminder's version resolution
-  is best-effort*, so none of them names Go.
+  surfaced as an operator reminder*, *the task reminder's version resolution is
+  best-effort* and *Every automated pin is verified at runtime, not just at
+  install*, so none of them names Go.
 
 ## Impact
 

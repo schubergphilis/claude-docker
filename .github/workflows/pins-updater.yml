@@ -145,7 +145,7 @@ jobs:
           {
             echo "Automated pin refresh — \`${CMD}\`, run by [\`pins-updater.yml\`](${workflow_url})."
             echo
-            echo "Review the diff and let CI build the image before merging. The \`⚠ needs your eyes\` block below covers the manual pins (nodejs, task, go, ubuntu base) that the script reports but never rewrites — act on those in a separate commit."
+            echo "Review the diff and let CI build the image before merging. The \`⚠ needs your eyes\` block below covers the manual pins (nodejs, task, ubuntu base) that the script reports but never rewrites — act on those in a separate commit."
             echo
             echo '<details><summary>update_pins.py report</summary>'
             echo

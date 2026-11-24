@@ -746,6 +746,11 @@ class TestPrintReminders(unittest.TestCase):
         for pin in ("nodejs", "task", "ubuntu base"):
             self.assertIn(pin, out, f"{pin} missing from the manual-pin reminder block")
 
+    def test_reminder_block_has_no_go_pin(self):
+        out = self._capture("3.53.1")
+        self.assertIsNone(re.search(r"^\s*⚠ go\s", out, re.M),
+                          "Go left the base image, so it has no manual-pin reminder")
+
 
 class TestCIVersionCheckStep(unittest.TestCase):
     """Runs scripts/verify-pinned-versions.sh (ci.yml's runtime version check)

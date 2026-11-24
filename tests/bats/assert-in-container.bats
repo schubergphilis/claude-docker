@@ -522,6 +522,7 @@ stub_checks() {
   check_identity() { pass c2; }
   check_security() { pass c3; }
   check_path_order() { pass c4; }
+  check_no_go() { pass c4n; }
   check_git_trust() { pass c4b; }
   check_git_config_ro() { pass c4c; }
   check_workspace_write() { pass c5; }

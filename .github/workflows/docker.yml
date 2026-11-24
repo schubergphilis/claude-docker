@@ -116,7 +116,7 @@ jobs:
           # suppression. It reports one key per line per run, so this is the
           # exhaustive set: the base image's own tokens (Canonical's
           # rockcraft/umoci build) plus this Dockerfile's.
-          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,--chmod,--strip-components,ARCH,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,GOBIN,GOPATH,GOROOT,GO_SHA256_AMD64,GO_SHA256_ARM64,GO_VERSION,IS_SANDBOX,LANG,LC_ALL,NODE_VERSION,SHA,TASK_VERSION,URL,magic,nodejs,task,owner,whl,UV_PYTHON_INSTALL_DIR,azure-cli-core,AZURE_DEVOPS_EXT__DEFAULTS_ORGANIZATION,AZURE_EXTENSION_DIR,AZURE_CONFIG_DIR,REQUESTS_CA_BUNDLE,AZURE_CORE_COLLECT_TELEMETRY
+          dockle-accept-key: --clear,org.opencontainers.image.created,org.opencontainers.image.description,org.opencontainers.image.title,org.opencontainers.image.version,PATH,--chmod,--strip-components,ARCH,CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS,DISABLE_AUTOUPDATER,IS_SANDBOX,LANG,LC_ALL,NODE_VERSION,SHA,TASK_VERSION,URL,magic,nodejs,task,owner,whl,UV_PYTHON_INSTALL_DIR,azure-cli-core,AZURE_DEVOPS_EXT__DEFAULTS_ORGANIZATION,AZURE_EXTENSION_DIR,AZURE_CONFIG_DIR,REQUESTS_CA_BUNDLE,AZURE_CORE_COLLECT_TELEMETRY
           # CIS-DI-0010 also flags a hard-coded list of file names, which
           # accept-key cannot suppress. azure-core ships azure/core/settings.py
           # under /opt/az. Dockle matches the name, not the path, so settings.py

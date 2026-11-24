@@ -6,8 +6,9 @@
 # apart from the version-scoped rules below and a CVE the distro rules out.
 ignore:
   # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries,
-  # which only an upstream rebuild moves. Scoped to /usr/bin so it covers only
-  # those prebuilt binaries, not Go code installed anywhere else in the image.
+  # which only an upstream rebuild moves. It covers every Go binary under
+  # /usr/bin (today those three plus the Ubuntu git-lfs); Go binaries installed
+  # anywhere else in the image stay enforced.
   - package:
       type: go-module
       location: /usr/bin/**

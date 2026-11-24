@@ -207,7 +207,7 @@ check_security() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. PATH ordering and the absence of Go
+# 3. PATH ordering
 # ---------------------------------------------------------------------------
 
 # Index of an entry in the colon-separated PATH, or -1 when absent. Matches
@@ -255,17 +255,27 @@ check_path_order() {
   # And the resolution actually lands on the system copy, not merely earlier in
   # a string — this is the invariant the ordering exists to buy.
   assert_eq "path-git-resolves-system" "$(command -v git)" "/usr/bin/git"
+}
 
-  # Go is not part of the base image (a child image installs it): no toolchain,
-  # no Go environment.
-  if command -v go >/dev/null 2>&1 || [ -e /usr/local/go ]; then
-    fail "no-go: go is on PATH or /usr/local/go exists in the base image"
+# Go is not part of the base image (a child image installs it): no toolchain
+# and no Go environment. Unset, not merely empty: an exported empty GOROOT
+# would still be a stray ENV.
+assert_unset() {
+  local label="$1" name="$2"
+  if [ -z "${!name+x}" ]; then
+    pass "$label: $name is unset"
   else
-    pass "no-go: no go toolchain in the base image"
+    fail "$label: $name is set to '${!name}'"
   fi
-  assert_eq "GOROOT unset" "${GOROOT:-}" ""
-  assert_eq "GOPATH unset" "${GOPATH:-}" ""
-  assert_eq "GOBIN unset" "${GOBIN:-}" ""
+}
+
+check_no_go() {
+  assert_eq "no-go: go not on PATH" "$(command -v go || true)" ""
+  assert_eq "no-go: /usr/local/go absent" \
+    "$([ -e /usr/local/go ] && echo present || echo absent)" "absent"
+  assert_unset "no-go" GOROOT
+  assert_unset "no-go" GOPATH
+  assert_unset "no-go" GOBIN
 }
 
 # ---------------------------------------------------------------------------
@@ -902,6 +912,7 @@ main() {
   check_identity
   check_security
   check_path_order
+  check_no_go
   check_git_trust
   check_git_config_ro
   check_workspace_write

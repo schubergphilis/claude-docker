@@ -22,8 +22,15 @@
 - [x] 4.3 `docs/security.md`, `SECURITY.md`, `docs/maintenance.md`, `README.md`: stop listing Go as a bundled tool, its code-fetch path and its pin
 - [ ] 4.4 Release note (goes in the PR description / release draft) for users of `go` in a session
 
-## 5. Verify
+## 5. Review follow-ups
 
-- [x] 5.1 `openspec validate remove-go-toolchain --strict`
-- [ ] 5.2 Local checks from CONTRIBUTING: unit tests pass (206); shellcheck, hadolint, bats and the image build + smoke still to run where docker is available
-- [ ] 5.3 Archive the change; fill in the PR template's OpenSpec section; `Closes #219`
+- [x] 5.0a Go child-image recipe: toolchain directory first in PATH, same pruning as the old base block, `GOTOOLCHAIN` link
+- [x] 5.0b Stale Go mentions: `docs/auth.md`, `docs/security.md`, `pins-updater.yml`, `docker.yml` dockle keys, `.grype.yaml` comment (covers `git-lfs` too)
+- [x] 5.0c Smoke: `check_no_go` with separate assertions and a real unset check; unit test that the Go reminder is gone
+- [x] 5.0d Spec deltas: MODIFIED *Every automated pin is verified at runtime* and the `package-managers` code-fetch requirement
+
+## 6. Verify
+
+- [x] 6.1 `openspec validate remove-go-toolchain --strict`
+- [ ] 6.2 Local checks from CONTRIBUTING: unit tests pass (207); shellcheck, hadolint, bats and the image build + smoke still to run where docker is available
+- [x] 6.3 Archive the change; fill in the PR template's OpenSpec section; `Closes #219`
