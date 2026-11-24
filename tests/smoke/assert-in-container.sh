@@ -207,11 +207,11 @@ check_security() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. PATH ordering and the exported Go environment
+# 3. PATH ordering and the absence of Go
 # ---------------------------------------------------------------------------
 
 # Index of an entry in the colon-separated PATH, or -1 when absent. Matches
-# whole entries only, so /root/go/bin never matches inside /root/go/bin/foo.
+# whole entries only, so /root/.local/bin never matches inside /root/.local/bin/foo.
 path_index() {
   local want="$1" i=0 entry
   local IFS=:
@@ -244,27 +244,28 @@ assert_path_before() {
 check_path_order() {
   # The image PATH survives the privilege drop — entrypoint.sh execs
   # `runuser -u claude` (not -l), so what this script sees IS the shipped
-  # ordering. /root is the persistent claude-code-root volume, so both
-  # /root/.local/bin (pip --user / uv tool install prefix) and /root/go/bin
-  # (GOPATH default, `go install` target) are agent-writable and survive the
-  # session. Neither may precede a system path: a binary one session leaves
-  # there must not shadow git/gh/aws on a later run, in an unrelated workspace.
+  # ordering. /root is the persistent claude-code-root volume, so
+  # /root/.local/bin (pip --user / uv tool install prefix) is agent-writable and
+  # survives the session. It may not precede a system path: a binary one session
+  # leaves there must not shadow git/gh/aws on a later run, in an unrelated
+  # workspace.
   # /usr/bin stands in for "the system paths" — it is where git and gh live.
-  assert_path_before /usr/local/go/bin /usr/bin
   assert_path_before /usr/bin /root/.local/bin
-  assert_path_before /usr/bin /root/go/bin
 
   # And the resolution actually lands on the system copy, not merely earlier in
   # a string — this is the invariant the ordering exists to buy.
   assert_eq "path-git-resolves-system" "$(command -v git)" "/usr/bin/git"
 
-  # Go environment exported by the image (ENV), so it holds for docker run,
-  # docker exec, and non-login shells alike rather than relying on `go env`
-  # defaults. Spelled against a literal /root: Docker does not define HOME at
-  # build time.
-  assert_eq "GOROOT=/usr/local/go" "${GOROOT:-}" "/usr/local/go"
-  assert_eq "GOPATH=/root/go" "${GOPATH:-}" "/root/go"
-  assert_eq "GOBIN=/root/go/bin" "${GOBIN:-}" "/root/go/bin"
+  # Go is not part of the base image (a child image installs it): no toolchain,
+  # no Go environment.
+  if command -v go >/dev/null 2>&1 || [ -e /usr/local/go ]; then
+    fail "no-go: go is on PATH or /usr/local/go exists in the base image"
+  else
+    pass "no-go: no go toolchain in the base image"
+  fi
+  assert_eq "GOROOT unset" "${GOROOT:-}" ""
+  assert_eq "GOPATH unset" "${GOPATH:-}" ""
+  assert_eq "GOBIN unset" "${GOBIN:-}" ""
 }
 
 # ---------------------------------------------------------------------------

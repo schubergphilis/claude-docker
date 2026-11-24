@@ -31,10 +31,6 @@ ARG NODE_VERSION=24.22.1-1nodesource1
 # Bump with: curl -fsSL https://dl.cloudsmith.io/public/task/task/deb/ubuntu/dists/resolute/main/binary-amd64/Packages.gz | gunzip | awk '/^Package: task$/{t=1} /^Version:/{if(t){print $2; t=0}} /^$/{t=0}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1
 ARG TASK_VERSION=3.53.1
 
-# Go is the other MANUAL pin (ARG GO_VERSION + per-arch sha256, see its block
-# below): go.dev's release feed has no publish dates, so update_pins.py can't
-# soak-gate it and only reports how the pin compares to the latest stable.
-#
 # Every other tool's version (and per-arch sha256) is a GENERATED pin under
 # pins/<tool>.env — NOT an ARG. Each install RUN below COPYs and sources its
 # fragment, so `docker build .` is reproducible from the committed lockfile with
@@ -224,46 +220,6 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
  && install -m 0755 "/tmp/uv/uv-${ARCH}-unknown-linux-gnu/uvx" /usr/local/bin/uvx \
  && rm -rf /tmp/uv /tmp/uv.tar.gz /tmp/uv.env
 
-# Go toolchain — the official tarball from go.dev, unpacked into /usr/local/go
-# exactly as https://go.dev/doc/install prescribes (no apt: Ubuntu's golang-go
-# tracks an older release and splits GOROOT across paths the upstream installer
-# assumes are one tree).
-# MANUAL pin, like NODE_VERSION above and NOT a pins/ fragment: go.dev's release
-# JSON carries no publish dates, so update_pins.py cannot evaluate its soak
-# window for Go — it only reminds the operator to look. 1.26.11 was pinned on
-# 2026-11-21, 11 days after its release on 2026-11-10 and so past the 7-day
-# soak. It fixes eight High stdlib CVEs (CVE-2026-97033 to 97039 and
-# CVE-2026-97043) that fail the grype gate. Both hashes were checked against
-# locally downloaded tarballs.
-# Bump with (version + both hashes in one shot):
-#   curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r '.[] | select(.stable) |
-#     .version, (.files[] | select(.os=="linux" and .kind=="archive" and
-#     (.arch=="amd64" or .arch=="arm64")) | "  " + .arch + " " + .sha256)'
-# Confirm a bump the way these two hashes were produced: download both tarballs
-# and sha256sum them locally rather than trusting the JSON's advertised digest.
-# Placed before the npm layers on purpose — the tarball is ~64 MB and Go moves far
-# less often than the claude-code pin, so a weekly claude-code bump does not
-# re-download it.
-# api/ (the stdlib API compatibility lists for Go's own release checks), test/
-# (the compiler's regression suite) and every src/**/testdata are only read by
-# tests of Go itself, never by building or testing user code, so they go.
-ARG GO_VERSION=1.26.11
-ARG GO_SHA256_AMD64=9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec
-ARG GO_SHA256_ARM64=6c2f29b458b5add0835f18b776f69c8881a6d88428f1484a6da55755e620757e
-RUN ARCH=$(dpkg --print-architecture); \
-    case "$ARCH" in \
-      amd64) SHA="${GO_SHA256_AMD64}" ;; \
-      arm64) SHA="${GO_SHA256_ARM64}" ;; \
-      *) echo "Unsupported arch for go: $ARCH" >&2; exit 1 ;; \
-    esac; \
-    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tar.gz \
- && echo "${SHA}  /tmp/go.tar.gz" | sha256sum -c - \
- && tar -C /usr/local -xzf /tmp/go.tar.gz \
- && rm /tmp/go.tar.gz \
- && rm -rf /usr/local/go/api /usr/local/go/test \
- && find /usr/local/go/src -type d -name testdata -prune -exec rm -rf {} + \
- && /usr/local/go/bin/go version
-
 # Azure DevOps CLI: azure-cli-core + the azure-devops extension, not full
 # azure-cli (~500 MB of unused service modules). azure-cli-core and every
 # transitive dep come from pins/az-requirements.txt (--require-hashes), the lock
@@ -413,43 +369,27 @@ EOF
 RUN ln -sfn ../g/ghostty /usr/share/terminfo/x/xterm-ghostty \
  && infocmp xterm-ghostty >/dev/null
 
-# Go environment. Spelled with a literal /root rather than ${HOME}: Docker does
-# not define HOME during the build, so "${HOME}/go" would expand to "/go". /root
-# is correct for both paths through the entrypoint — the legacy root fallback,
-# and the dropped-privilege user, whose passwd entry is created with -d /root.
-# GOROOT is already baked into the go.dev tarball; set explicitly so scripts that
-# read the variable directly (rather than `go env GOROOT`) see it too.
-# GOBIN is spelled out rather than written as ${GOPATH}/bin for the same class of
-# reason: Docker resolves a variable against the value from *before* the current
-# instruction, so ${GOPATH}/bin inside this ENV would yield "/bin".
-ENV GOBIN=/root/go/bin \
-    GOPATH=/root/go \
-    GOROOT=/usr/local/go
-
 # DISABLE_AUTOUPDATER=1 keeps the pinned CLAUDE_CODE_VERSION authoritative —
 # without it, claude auto-replaces itself at runtime, defeating the
 # --ignore-scripts supply-chain pinning above. Bump the image to upgrade.
 # No TASK_X_REMOTE_TASKFILES here: go-task's `includes:` from a remote URL left
 # experimental in 3.53.1, so the feature is on by default and setting the opt-in
 # makes every `task` invocation warn that the experiment is released. It stays a
-# runtime code-fetch primitive in the same class as `pnpm dlx`/`uvx`/`go install`;
+# runtime code-fetch primitive in the same class as `pnpm dlx`/`uvx`;
 # task still prompts before trusting a new remote Taskfile checksum.
-# PATH: /usr/local/go/bin comes first — the go.dev-prescribed entry for the
-# toolchain, ahead of the system paths so the image's pinned Go wins.
-# /root/.local/bin (the pip --user / `uv tool install` prefix) and /root/go/bin
-# (the GOPATH default, where `go install` writes) are appended LAST on purpose:
-# both live in the persistent claude-code-root volume and are writable by the
-# session, so a binary one session drops there must never be able to shadow a
-# system binary (git, gh, aws, …) on a later run. Tools installed into either
-# stay runnable by name; only deliberate overrides are given up. This covers
-# binary shadowing only — rc/config files on the same volume still carry a
-# compromise into later sessions (docs/security.md "Threat model").
+# PATH: /root/.local/bin (the pip --user / `uv tool install` prefix) is appended
+# LAST on purpose: it lives in the persistent claude-code-root volume and is
+# writable by the session, so a binary one session drops there must never be
+# able to shadow a system binary (git, gh, aws, …) on a later run. Tools
+# installed into it stay runnable by name; only deliberate overrides are given
+# up. This covers binary shadowing only — rc/config files on the same volume
+# still carry a compromise into later sessions (docs/security.md "Threat model").
 ENV CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 \
     DISABLE_AUTOUPDATER=1 \
     IS_SANDBOX=1 \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8 \
-    PATH="/usr/local/go/bin:${PATH}:/root/.local/bin:/root/go/bin"
+    PATH="${PATH}:/root/.local/bin"
 
 # Container starts as root so the entrypoint can chown /root to the host
 # UID, then drops privileges via runuser. Steady-state, claude runs as the

@@ -143,14 +143,14 @@ The Dockerfile SHALL obtain every automated tool's version (and, for binary tool
 
 ### Requirement: Operator report
 
-The refresh tooling SHALL print a report describing the outcome for every tool: each updated tool's previous and new version with the new version's age, each `held` tool with the in-soak version that was withheld, and explicit reminders for every residual manual pin (the NodeSource `nodejs` version, the `task` version, the Go toolchain version, and the ubuntu base-image digest). The report SHALL indicate when the base-image tag's currently-resolved digest differs from the pinned digest.
+The refresh tooling SHALL print a report describing the outcome for every tool: each updated tool's previous and new version with the new version's age, each `held` tool with the in-soak version that was withheld, and explicit reminders for every residual manual pin (the NodeSource `nodejs` version, the `task` version, and the ubuntu base-image digest). The report SHALL indicate when the base-image tag's currently-resolved digest differs from the pinned digest.
 
 #### Scenario: report shows updates, holds, and reminders
 
 - **WHEN** the operator runs the refresh script
 - **THEN** the report lists per-tool `old → new` versions with ages
 - **AND** lists any `held` tools with the withheld version and its age
-- **AND** lists `nodejs`, `task`, `go`, and the base-image digest as manual
+- **AND** lists `nodejs`, `task`, and the base-image digest as manual
   reminders
 
 #### Scenario: base digest drift surfaced
@@ -217,7 +217,7 @@ pin: the tool installs from a signed apt repo whose Debian `Packages` index
 carries no publish dates, so the soak window that governs the `pins/` fragments
 cannot be evaluated for `task` from that source. `task` SHALL therefore stay
 pinned in the Dockerfile (not under `pins/`) and SHALL appear in the script's
-manual-pin reminder block alongside `nodejs`, `go`, and the base-image digest,
+manual-pin reminder block alongside `nodejs` and the base-image digest,
 reporting the pinned version against the newest version published in the apt
 repo the build installs from. When the two differ, the reminder SHALL say so and
 SHALL name the newest published version.
@@ -287,10 +287,8 @@ change the status it exits on. Decompression of the fetched index SHALL be
 bounded, so an oversized payload degrades the same way rather than exhausting
 memory.
 
-This states the rule for `task` only. Each manual pin's reminder carries the same
-best-effort contract inside its own capability's requirement — Go's in
-`go-toolchain` — so the rule has exactly one owner per pin and the two cannot
-drift apart.
+This states the rule for `task` only. `nodejs` and the base-image digest are
+reported from their own pins and need no network resolution of a newest version.
 
 #### Scenario: reminder degrades gracefully without network
 

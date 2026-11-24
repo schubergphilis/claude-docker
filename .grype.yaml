@@ -6,9 +6,8 @@
 # apart from the version-scoped rules below and a CVE the distro rules out.
 ignore:
   # Go stdlib and vendored deps inside the prebuilt gh, glab and task binaries,
-  # which only an upstream rebuild moves. Scoped to /usr/bin so it does NOT
-  # cover the Go toolchain this repo pins itself at /usr/local/go — a stdlib
-  # CVE there is fixable by bumping ARG GO_VERSION and stays enforced.
+  # which only an upstream rebuild moves. Scoped to /usr/bin so it covers only
+  # those prebuilt binaries, not Go code installed anywhere else in the image.
   - package:
       type: go-module
       location: /usr/bin/**

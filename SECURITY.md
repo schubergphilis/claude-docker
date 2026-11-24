@@ -56,8 +56,8 @@ the [threat model](docs/security.md#threat-model) before reporting:
 
 - **Full outbound network.** A session can reach anything the host can.
   `--egress-lock` restricts model traffic only, and logs the rest.
-- **Runtime code-fetch.** `npx`, `pnpm dlx`, `uvx`, `tfenv install` and the Go
-  toolchain fetch and execute third-party code on demand, by design.
+- **Runtime code-fetch.** `npx`, `pnpm dlx`, `uvx` and `tfenv install`
+  fetch and execute third-party code on demand, by design.
 - **Workspaces are read-write** unless `--ro` (all) or `--ro=PATH` (that one)
   is passed. `--ro=PATH` does not isolate an untrusted repo: content read
   there can still drive writes to the writable workspaces.

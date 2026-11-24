@@ -57,7 +57,7 @@ setup() {
 }
 
 @test "path_index does not match a prefix" {
-  PATH=/root/go/bin/foo:/usr/bin run path_index /root/go/bin
+  PATH=/root/.local/bin/foo:/usr/bin run path_index /root/.local/bin
   [ "$output" = -1 ]
 }
 
