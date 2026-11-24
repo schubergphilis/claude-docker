@@ -249,7 +249,7 @@ Go is not in the base image: a project's language runtimes are fetched per proje
 FROM claude-code:local
 
 # Keep this block above your frequently edited RUN and COPY lines, so the
-# ~64 MB download stays in the build cache.
+# Go download stays in the build cache.
 #
 # Bump the version and both hashes together. Take each sha256 from
 # https://go.dev/dl/ and confirm it equals the hash of a tarball you downloaded
@@ -281,7 +281,7 @@ ENV GOROOT=/usr/local/go \
     PATH="/usr/local/go/bin:${PATH}:/root/go/bin"
 ```
 
-The PATH order covers binary shadowing only: the Go module cache (`GOPATH`) and Go's config file (`GOENV`, under `/root/.config/go`) live on the same persistent volume, as the rc files in the [threat model](security.md#threat-model) do. A child image that wants to rule that out can add `GOTOOLCHAIN=local` and `GOENV=off` to its `ENV`.
+The PATH order covers binary shadowing only: the Go module cache (`GOPATH`) and Go's config file (`GOENV`, under `/root/.config/go`) live on the same persistent volume, as the rc files in the [threat model](security.md#threat-model) do. A child image can add `GOTOOLCHAIN=local` and `GOENV=off` to its `ENV` so a planted toolchain or `go env` file cannot take effect; the module cache itself stays on the volume (`go mod verify` checks it).
 
 The pin and its upkeep are the child image's: the base image no longer tracks Go releases or scans for Go CVEs. With `GOTOOLCHAIN` at its default `auto`, a `go.mod` that asks for a newer Go downloads that toolchain at runtime; set `GOTOOLCHAIN=local` to refuse it ([Go toolchains](https://go.dev/doc/toolchain)).
 
