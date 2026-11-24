@@ -6,7 +6,7 @@
 # Ubuntu (not Debian): only ubuntu:26.04 ships git ≥ 2.48 in its main archive,
 # needed for the `extensions.relativeWorktrees` repo extension. Rationale and
 # alternatives in openspec/changes/worktree-relative-paths/design.md.
-FROM ubuntu:resolute-20261024.1@sha256:6a06111c3b0a8600feadb270aec771dc239bf407b25625f93f44ab00e11f4d3c
+FROM ubuntu:resolute-20261105.1@sha256:d66b366dac61b575bee2aef07e9c26e8070096fbe84a3d4d3eb0da069b5d76db
 
 # pipefail propagates failures in RUN ... | ... — without this, a failed curl
 # into tee/sha256sum silently succeeds and the build continues with bad data.
