@@ -135,6 +135,82 @@ setup() {
 # The safe.directory values written to the stand-in system config.
 trusted() { command git config --file "$GIT_SYSTEM_CONFIG" --get-all safe.directory | paste -sd,; }
 
+# --- set_git_identity ---
+
+@test "set_git_identity: writes the forwarded identity to system config" {
+  CLAUDE_DOCKER_GIT_USER_NAME="Ada Lovelace" CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  set_git_identity
+  [ "$(command git config --file "$GIT_SYSTEM_CONFIG" user.name)" = "Ada Lovelace" ]
+  [ "$(command git config --file "$GIT_SYSTEM_CONFIG" user.email)" = ada@example.com ]
+}
+
+@test "set_git_identity: the process main execs doesn't inherit the forwarding variables" {
+  export CLAUDE_DOCKER_GIT_USER_NAME="Ada Lovelace" CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  run main env
+  [ "$status" -eq 0 ]
+  [[ "$output" != *CLAUDE_DOCKER_GIT_USER_* ]]
+}
+
+@test "set_git_identity: a different identity in the container's ~/.gitconfig warns" {
+  printf '[user]\n\temail = old@example.com\n' >"$ROOT_HOME/.gitconfig"
+  CLAUDE_DOCKER_GIT_USER_NAME="Ada Lovelace" CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  run set_git_identity
+  [ "$status" -eq 0 ]
+  [ "$output" = "entrypoint: WARN the container's ~/.gitconfig sets user.email to 'old@example.com', which wins over your host's 'ada@example.com'; remove it with: git config --global --unset user.email" ]
+}
+
+@test "set_git_identity: the same identity, or a symlinked ~/.gitconfig, stays quiet" {
+  printf '[user]\n\temail = ada@example.com\n' >"$ROOT_HOME/.gitconfig"
+  CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  run set_git_identity
+  [ -z "$output" ]
+  printf '[user]\n\temail = old@example.com\n' >"$BATS_TEST_TMPDIR/elsewhere"
+  rm "$ROOT_HOME/.gitconfig" && ln -s "$BATS_TEST_TMPDIR/elsewhere" "$ROOT_HOME/.gitconfig"
+  run set_git_identity
+  [ -z "$output" ]
+}
+
+@test "set_git_identity: nothing forwarded writes nothing" {
+  unset CLAUDE_DOCKER_GIT_USER_NAME CLAUDE_DOCKER_GIT_USER_EMAIL
+  set_git_identity
+  [ ! -e "$GIT_SYSTEM_CONFIG" ]
+}
+
+@test "set_git_identity: a repository's own identity wins over the forwarded one" {
+  CLAUDE_DOCKER_GIT_USER_NAME=Global CLAUDE_DOCKER_GIT_USER_EMAIL=global@example.com
+  set_git_identity
+  local repo="$BATS_TEST_TMPDIR/repo" sys="$GIT_SYSTEM_CONFIG"
+  # A container after this change carries none of these (and a CI runner or a
+  # claude-docker session running this suite might).
+  unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL
+  command git init -q "$repo"
+  # GIT_CONFIG_SYSTEM stands in for /etc/gitconfig; HOME keeps ~/.gitconfig out.
+  HOME="$BATS_TEST_TMPDIR/home" GIT_CONFIG_SYSTEM="$sys" command git -C "$repo" commit -q --allow-empty -m a
+  [ "$(command git -C "$repo" log -1 --format=%ae)" = global@example.com ]
+  command git -C "$repo" config user.email repo@example.com
+  HOME="$BATS_TEST_TMPDIR/home" GIT_CONFIG_SYSTEM="$sys" command git -C "$repo" commit -q --allow-empty -m b
+  [ "$(command git -C "$repo" log -1 --format='%ae %ce %an')" = "repo@example.com repo@example.com Global" ]
+}
+
+@test "set_git_identity: runs from / so a dangling worktree cwd doesn't stop it" {
+  mkdir -p "$BATS_TEST_TMPDIR/wt"
+  echo "gitdir: /nonexistent/.git/worktrees/wt" >"$BATS_TEST_TMPDIR/wt/.git"
+  cd "$BATS_TEST_TMPDIR/wt"
+  CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  run set_git_identity
+  [ "$status" -eq 0 ] && [ -z "$output" ]
+  [ "$(command git -C / config --file "$GIT_SYSTEM_CONFIG" user.email)" = ada@example.com ]
+}
+
+@test "set_git_identity: a failed write warns and main still execs" {
+  CLAUDE_DOCKER_GIT_USER_EMAIL=ada@example.com
+  git() { return 1; }
+  run main echo hello
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"entrypoint: WARN could not set git user.email"* ]]
+  [[ "$output" == *hello ]]
+}
+
 @test "trust_workspaces: each vouched-for workspace and its nested repos are trusted" {
   CLAUDE_DOCKER_TRUSTED_WORKSPACES=/workspaces/repo:/workspaces/other run trust_workspaces
   [ "$status" -eq 0 ] && [ -z "$output" ]

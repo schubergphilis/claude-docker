@@ -8,6 +8,7 @@ setup() {
   ROOT_HOME="${BATS_TEST_TMPDIR}/root"
   PROC_STATUS="${BATS_TEST_TMPDIR}/status"
   PROC_MOUNTS="${BATS_TEST_TMPDIR}/mounts"
+  PROC_MOUNTINFO="${BATS_TEST_TMPDIR}/mountinfo"
   API_CA="${BATS_TEST_TMPDIR}/api.crt"
   AUTH_PROXY_CA="${BATS_TEST_TMPDIR}/auth-proxy.crt"
   CA_BUNDLE="${BATS_TEST_TMPDIR}/bundle.crt"
@@ -462,6 +463,57 @@ write_mounts() {
   [[ "$output" == *"FAIL: settings-present:"* ]]
 }
 
+# --- check_git_config_ro -------------------------------------------------------
+
+# A mountinfo line for the overlay with MOUNT_OPTS, and git standing in for the
+# system setting (AUTOSETUP) and the refused write (GIT_MSG). The overlay file
+# is mode 0444, so the in-place write fails as a :ro mount would (not as root).
+git_config_ro_stubs() {
+  WORKSPACE="$BATS_TEST_TMPDIR/ws"
+  mkdir -p "$WORKSPACE/.git"
+  echo '[core]' >"$WORKSPACE/.git/config"
+  chmod 444 "$WORKSPACE/.git/config"
+  MOUNT_OPTS=ro AUTOSETUP=false GIT_MSG="error: could not write config file .git/config: Device or resource busy"
+  printf '335 325 0:45 /stage/git-config-ws %s %s,nosuid - fakeowner /run rw\n' \
+    "$WORKSPACE/.git/config" "$MOUNT_OPTS" >"$PROC_MOUNTINFO"
+  git() {
+    case "$*" in
+      "config --system --get branch.autoSetupMerge") echo "$AUTOSETUP" ;;
+      "-C $WORKSPACE config --local"*) echo "$GIT_MSG" >&2; return 255 ;;
+      *) return 1 ;;
+    esac
+  }
+}
+
+@test "check_git_config_ro: a read-only overlay, the setting and git's message pass" {
+  [ "$(id -u)" != 0 ] || skip "root writes a mode-0444 file"
+  git_config_ro_stubs
+  run check_git_config_ro
+  [[ "$output" == *"PASS: git-config-ro: overlay mounted read-only: got 'ro'"* ]]
+  [[ "$output" == *"PASS: git-config-ro: image sets branch.autoSetupMerge=false"* ]]
+  [[ "$output" == *"PASS: git-config-ro: git config --local refused (error: could not write config file"* ]]
+  [[ "$output" == *"PASS: git-config-ro: an in-place write to .git/config refused"* ]]
+  [[ "$output" != *FAIL* ]]
+}
+
+@test "check_git_config_ro: a writable overlay or a missing setting fails" {
+  git_config_ro_stubs
+  sed -i 's/ ro,nosuid / rw,nosuid /' "$PROC_MOUNTINFO"
+  AUTOSETUP=""
+  run check_git_config_ro
+  [[ "$output" == *"FAIL: git-config-ro: overlay mounted read-only: expected 'ro', got 'rw'"* ]]
+  [[ "$output" == *"FAIL: git-config-ro: image sets branch.autoSetupMerge=false"* ]]
+}
+
+@test "check_git_config_ro: under EXPECT_RO=1 git's lock message is expected instead" {
+  git_config_ro_stubs
+  EXPECT_RO=1 run check_git_config_ro
+  [[ "$output" == *"FAIL: git-config-ro: git config --local failed without 'could not lock config file'"* ]]
+  GIT_MSG="error: could not lock config file .git/config: Read-only file system"
+  EXPECT_RO=1 run check_git_config_ro
+  [[ "$output" == *"PASS: git-config-ro: git config --local refused (error: could not lock config file"* ]]
+}
+
 # --- main --------------------------------------------------------------------
 
 # Stub every check but check_settings with a passing one.
@@ -471,6 +523,7 @@ stub_checks() {
   check_security() { pass c3; }
   check_path_order() { pass c4; }
   check_git_trust() { pass c4b; }
+  check_git_config_ro() { pass c4c; }
   check_workspace_write() { pass c5; }
   check_credentials() { pass c6; }
   check_aws_state_masking() { pass c7; }
@@ -483,7 +536,7 @@ stub_checks() {
   check_settings() { fail settings; }
   run main
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Results: 10 passed, 1 failed"* ]]
+  [[ "$output" == *"Results: 11 passed, 1 failed"* ]]
   [[ "$output" == *"RESULT: FAIL" ]]
   [[ "$output" != *"RESULT: PASS"* ]]
 }

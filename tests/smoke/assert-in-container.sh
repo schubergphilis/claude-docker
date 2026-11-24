@@ -28,6 +28,7 @@
 # smoke.sh never sets them; the defaults are the real in-container paths.
 PROC_STATUS="${PROC_STATUS:-/proc/self/status}"
 PROC_MOUNTS="${PROC_MOUNTS:-/proc/self/mounts}"
+PROC_MOUNTINFO="${PROC_MOUNTINFO:-/proc/self/mountinfo}"
 ROOT_HOME="${ROOT_HOME:-/root}"
 SEED_SETTINGS="${SEED_SETTINGS:-/run/claude-docker/settings.json}"
 API_CA="${API_CA:-/usr/local/share/ca-certificates/claude-docker-api.crt}"
@@ -317,6 +318,38 @@ check_git_trust() {
     fail "git-trust: could not create a repo under $ws"
   fi
   [ -z "$repo" ] || rm -rf "$repo"
+}
+
+# ---------------------------------------------------------------------------
+# 3c. Repo config is read-only (#1): smoke.sh makes the workspace a repo, so
+#     run.sh mounts its .git/config overlay :ro. Every write fails, git's and
+#     an in-place one alike; smoke.sh checks the host file afterwards.
+# ---------------------------------------------------------------------------
+
+check_git_config_ro() {
+  local ws="${WORKSPACE:-/workspaces/smoke}" out want
+  assert_eq "git-config-ro: overlay mounted read-only" \
+    "$(awk -v p="$ws/.git/config" '$5 == p { split($6, o, ","); print o[1] }' "$PROC_MOUNTINFO")" "ro"
+  assert_eq "git-config-ro: image sets branch.autoSetupMerge=false" \
+    "$(git config --system --get branch.autoSetupMerge)" "false"
+  # The notice quotes this text, so agents recognise it: keep them in step.
+  # Under --ro the whole workspace is read-only, so git already fails taking
+  # config.lock next to the file ("could not lock config file").
+  want="could not write config file"
+  [ "${EXPECT_RO:-0}" = "1" ] && want="could not lock config file"
+  if out=$(git -C "$ws" config --local smoke.probe 1 2>&1); then
+    fail "git-config-ro: git config --local succeeded"
+  else
+    case "$out" in
+      *"$want"*) pass "git-config-ro: git config --local refused ($out)" ;;
+      *) fail "git-config-ro: git config --local failed without '$want': $out" ;;
+    esac
+  fi
+  if (printf '[smoke]\n\tprobe = 1\n' >>"$ws/.git/config") 2>/dev/null; then
+    fail "git-config-ro: an in-place write to .git/config succeeded"
+  else
+    pass "git-config-ro: an in-place write to .git/config refused"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -869,6 +902,7 @@ main() {
   check_security
   check_path_order
   check_git_trust
+  check_git_config_ro
   check_workspace_write
   check_credentials
   check_aws_state_masking

@@ -131,7 +131,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       openssh-client \
       unzip \
  && git lfs install --system --skip-repo \
+ && git config --system branch.autoSetupMerge false \
  && rm -rf /var/lib/apt/lists/*
+# branch.autoSetupMerge=false: a workspace's .git/config is read-only in a
+# session (run.sh stage_git_overlays, #1), so creating a branch from a remote
+# one would print a failed config write for tracking it can't save. System
+# scope, not GIT_CONFIG_* env: a session that exports its own GIT_CONFIG_COUNT
+# replaces that whole set. Repo and global config still override it.
 
 # GitHub CLI (keyring fetched at build; TODO: commit the keyring to the repo)
 RUN install -d -m 0755 /etc/apt/keyrings \
@@ -224,11 +230,11 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 # assumes are one tree).
 # MANUAL pin, like NODE_VERSION above and NOT a pins/ fragment: go.dev's release
 # JSON carries no publish dates, so update_pins.py cannot evaluate its soak
-# window for Go — it only reminds the operator to look. 1.26.10 was pinned on
-# 2026-10-22, INSIDE the 7-day soak, on purpose: it fixes a stdlib CVE
-# (CVE-2026-111943 crypto/x509) that fails the Trivy gate, and .trivyignore
-# must not hide a finding a bump can fix. Both hashes were checked against
-# locally downloaded tarballs. The next bump goes back to the normal soak.
+# window for Go — it only reminds the operator to look. 1.26.11 was pinned on
+# 2026-11-21, 11 days after its release on 2026-11-10 and so past the 7-day
+# soak. It fixes eight High stdlib CVEs (CVE-2026-97033 to 97039 and
+# CVE-2026-97043) that fail the grype gate. Both hashes were checked against
+# locally downloaded tarballs.
 # Bump with (version + both hashes in one shot):
 #   curl -fsSL 'https://go.dev/dl/?mode=json' | jq -r '.[] | select(.stable) |
 #     .version, (.files[] | select(.os=="linux" and .kind=="archive" and
@@ -241,9 +247,9 @@ RUN . /tmp/uv.env; set -e; ARCH=$(uname -m); \
 # api/ (the stdlib API compatibility lists for Go's own release checks), test/
 # (the compiler's regression suite) and every src/**/testdata are only read by
 # tests of Go itself, never by building or testing user code, so they go.
-ARG GO_VERSION=1.26.10
-ARG GO_SHA256_AMD64=ccfe7ae822d2c2f41f4fe7c956199967a4dac22d0ee0d2b2bfdb440aab3b20c5
-ARG GO_SHA256_ARM64=3f4227ce7b206a513e794f1393adb473a07b46e94d18bd15d1c684bbb7319797
+ARG GO_VERSION=1.26.11
+ARG GO_SHA256_AMD64=9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec
+ARG GO_SHA256_ARM64=6c2f29b458b5add0835f18b776f69c8881a6d88428f1484a6da55755e620757e
 RUN ARCH=$(dpkg --print-architecture); \
     case "$ARCH" in \
       amd64) SHA="${GO_SHA256_AMD64}" ;; \

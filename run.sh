@@ -211,8 +211,9 @@ Credentials are off by default; combine opt-ins as needed:
   claude-docker --aws --gh ~/repo
 
 Git identity (user.name, user.email) is forwarded automatically from the
-host's global git config as GIT_AUTHOR_* / GIT_COMMITTER_* env vars so
-in-container `git commit` works without a `-c user.email=...` override.
+host's global git config into the container's system git config, so
+in-container `git commit` works without a `-c user.email=...` override and
+a repository's own identity still wins, as on the host.
 Not gated: identity is already public on every commit you've ever made.
 Signing, credential helpers, and hooks are NOT forwarded.
 
@@ -249,6 +250,9 @@ WITH_EGRESS_ALLOWLIST=0
 EGRESS_ALLOWLIST_ARG=""
 CLAUDE_CONFIG_DIR="${CLAUDE_DOCKER_CONFIG_DIR:-$HOME/.claude}"
 MOUNT_ARGS=()
+# 1 once stage_git_overlays mounts a read-only .git/config; add_claude_flags
+# then tells the agent.
+GIT_CONFIG_RO=0
 # COLORTERM next to TERM: without it Claude Code falls back to 256 colours in
 # the container and custom theme colours render rounded (host-config-parity).
 ENV_ARGS=(-e TERM -e COLORTERM)
@@ -1910,16 +1914,19 @@ forward_git_identity() {
   # Forward host git identity so in-container `git commit` works without a
   # per-invocation `-c user.email=...` dance. Non-opt-in: user.name/user.email
   # are already on every public commit the user has ever made, so there is no
-  # credential to gate. GIT_AUTHOR_* / GIT_COMMITTER_* take precedence over
-  # config and are sufficient for commits; we deliberately skip signing and
-  # other host-specific settings (credential helpers, hooks) that wouldn't
-  # work in the container anyway.
+  # credential to gate. The entrypoint writes them to the container's system
+  # git config (set_git_identity), not GIT_AUTHOR_* / GIT_COMMITTER_* env:
+  # those override every config file, so a repository that sets its own
+  # user.email (a work address) would commit under the global one (#1,
+  # "your current settings apply"). We deliberately skip signing and other
+  # host-specific settings (credential helpers, hooks) that wouldn't work in
+  # the container anyway.
   if command -v git >/dev/null 2>&1; then
     if git_name=$(git config --global --get user.name 2>/dev/null) && [ -n "$git_name" ]; then
-      ENV_ARGS+=("-e" "GIT_AUTHOR_NAME=$git_name" "-e" "GIT_COMMITTER_NAME=$git_name")
+      ENV_ARGS+=("-e" "CLAUDE_DOCKER_GIT_USER_NAME=$git_name")
     fi
     if git_email=$(git config --global --get user.email 2>/dev/null) && [ -n "$git_email" ]; then
-      ENV_ARGS+=("-e" "GIT_AUTHOR_EMAIL=$git_email" "-e" "GIT_COMMITTER_EMAIL=$git_email")
+      ENV_ARGS+=("-e" "CLAUDE_DOCKER_GIT_USER_EMAIL=$git_email")
     fi
   fi
 }
@@ -2067,6 +2074,20 @@ CADDY
 # staged — the user's snippet when CLAUDE_DOCKER_GH_POLICY is set, an empty
 # file otherwise — so the import needs no conditional (validate_opts has
 # already rejected a set-but-unreadable path).
+# The default policy on api.github.com blocks repository deletion and the REST
+# calls that leave access or a data feed behind once the session ends: SSH,
+# GPG and signing keys, account emails (a verified one can receive a password
+# reset), deploy keys, collaborators, organization invitations and members,
+# team members, repository and organization webhooks (added or repointed),
+# self-hosted runner registrations, and repository transfers. A PATCH on a
+# bare repository or organization path changes its settings, visibility
+# included, and Caddy can't read the body to tell those apart, so it is
+# refused as a whole. Every route is also matched under its numeric-id alias
+# (/repositories/{id}, /organizations/{id}). GitHub's router doesn't decode
+# percent-escapes, merge slashes or fold case in these paths (checked against
+# api.github.com), and path_regexp sees the decoded, cleaned path, so the
+# matches cover every spelling GitHub routes. Best effort: GraphQL and git push
+# aren't filtered, and token scope is the real limit.
 stage_gh_proxy_site() {
   if [ "$GH_POLICY_READ" = "1" ]; then
     # --egress-allowlist: the bytes validate_allowlist checked, not the path.
@@ -2130,6 +2151,30 @@ api.github.com {
 		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+)/?$
 	}
 	respond @gh_proxy_repo_delete "claude-docker gh-proxy policy: repository deletion is blocked by default. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	@gh_proxy_grant_post {
+		method POST
+		path_regexp ^/(user/(keys|gpg_keys|ssh_signing_keys|emails)|(repos/[^/]+/[^/]+|repositories/[0-9]+)/(keys|hooks|transfer|actions/runners/(registration-token|generate-jitconfig))|(orgs/[^/]+|organizations/[0-9]+)/(hooks|invitations|teams|actions/runners/(registration-token|generate-jitconfig)))/?$
+	}
+	respond @gh_proxy_grant_post "claude-docker gh-proxy policy: adding SSH, GPG or signing keys, account emails, deploy keys, webhooks, organization invitations, teams or self-hosted runners, and transferring a repository are blocked by default, since they grant access or a data feed that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	# Teams by numeric id are /organizations/{id}/team/{id}, singular; teams?
+	# takes both spellings.
+	@gh_proxy_grant_put {
+		method PUT
+		path_regexp ^/((repos/[^/]+/[^/]+|repositories/[0-9]+)/collaborators/[^/]+|(orgs/[^/]+|organizations/[0-9]+)/(memberships/[^/]+|teams?/[^/]+/(memberships/[^/]+|repos/[^/]+/[^/]+)|organization-roles/(users|teams)/[^/]+/[^/]+|security-managers/teams/[^/]+)|teams/[0-9]+/(memberships/[^/]+|repos/[^/]+/[^/]+))/?$
+	}
+	respond @gh_proxy_grant_put "claude-docker gh-proxy policy: adding collaborators, organization members or team members, giving a team access to a repository, and assigning organization roles are blocked by default, since they grant access that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	# A team's settings include its parent team, whose repository access the
+	# team then inherits.
+	@gh_proxy_grant_patch {
+		method PATCH
+		path_regexp ^/((repos/[^/]+/[^/]+|repositories/[0-9]+|orgs/[^/]+|organizations/[0-9]+)/hooks/[^/]+(/config)?|(repos/[^/]+/[^/]+|repositories/[0-9]+)/invitations/[^/]+|(orgs/[^/]+|organizations/[0-9]+)/teams?/[^/]+|teams/[0-9]+)/?$
+	}
+	respond @gh_proxy_grant_patch "claude-docker gh-proxy policy: changing a webhook, a pending repository invitation or a team is blocked by default, since it can point a data feed elsewhere or widen access that outlives the session. Extend policy via CLAUDE_DOCKER_GH_POLICY, or bypass the proxy entirely with --gh-direct." 403
+	@gh_proxy_settings {
+		method PATCH
+		path_regexp ^/(repos/[^/]+/[^/]+|repositories/[0-9]+|orgs/[^/]+|organizations/[0-9]+)/?$
+	}
+	respond @gh_proxy_settings "claude-docker gh-proxy policy: changing a repository's or organization's settings is blocked by default, since visibility and access settings can open access that outlives the session. Bypass the proxy with --gh-direct to change them." 403
 	import /etc/caddy/policy.caddy
 
 	reverse_proxy {$GH_PROXY_UPSTREAM_API} {
@@ -2811,9 +2856,13 @@ stage_git_overlays() {
   # live in the shared on-disk tree and are readable by both ends.
   # Bumping core.repositoryformatversion to 1 in the overlay is required — git
   # refuses an extensions entry on a v0 repo ("v1-only extension found").
-  # Overlay is NOT mounted :ro: container-side `git config` / `git remote add`
-  # need to succeed; those writes land in the ephemeral overlay and are dropped
-  # at exit, which matches the trade-off documented in docs/security.md.
+  # The overlay is mounted :ro (#1). git saves config by renaming config.lock
+  # over it, and a rename over a mountpoint fails (EBUSY) whether the mount is
+  # read-only or not, so git's own config writes fail either way. :ro also
+  # fails a tool that writes the file in place, which would otherwise succeed
+  # and vanish at exit. The session is told at start (stderr, and the agent
+  # through add_claude_flags); the image sets branch.autoSetupMerge=false so
+  # creating a branch doesn't try that write. See docs/usage.md.
   # Counter loop for bash 3.2 (no "${!arr[@]}" on indexed arrays).
   n=${#SEEN_NAMES[@]}
   i=0
@@ -2850,7 +2899,8 @@ EOF
          && case $ws_autocrlf in true | false | input) ;; *) false ;; esac; then
         printf '[core]\n\tautocrlf = %s\n' "$ws_autocrlf" >>"$stage/git-config-$ws_name" || exit 1
       fi
-      MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config")
+      MOUNT_ARGS+=("-v" "$(hostpath "$stage/git-config-$ws_name"):/workspaces/$ws_name/.git/config:ro")
+      GIT_CONFIG_RO=1
     else
       rm -f "$stage/git-config-$ws_name"
       # Quiet for a workspace with no repo, or a worktree/submodule pointer.
@@ -2861,6 +2911,9 @@ EOF
     fi
     i=$((i + 1))
   done
+  if [ "$GIT_CONFIG_RO" = "1" ]; then
+    echo "claude-docker: repo config (.git/config) is read-only in the container; push with 'git push origin HEAD' (-u can't save tracking) and change repo config on the host" >&2
+  fi
 }
 
 # The in-container glab reads job_token through the OS keyring whenever the
@@ -2914,12 +2967,32 @@ stage_glab_config() {
 # --append-system-prompt is left out, and the last one's text (the one claude
 # would have used) follows the map in a single flag.
 # --append-system-prompt-file stays the user's.
+#
+# A read-only .git/config overlay (GIT_CONFIG_RO, #1): tell claude, so it
+# doesn't spend turns on the failed config writes. The text quotes git's
+# message (tests/smoke/assert-in-container.sh checks git still prints it).
+# Both notes, when present, share the one flag in the same way.
 add_claude_flags() {
-  local n i a map="" user_text="" have_user=0 flags=()
+  local n i a map="" notes="" user_text="" have_user=0 flags=()
   if [ "$WITH_HOST_PATHS" = "1" ] || [ "${CLAUDE_DOCKER_HOST_PATHS:-0}" = "1" ]; then
     map=$(host_path_map) || return 1
   fi
-  if [ -z "$map" ]; then
+  if [ -n "$map" ]; then
+    notes="# Host paths (claude-docker)
+This session runs in a container. Each workspace is mounted from a directory on the user's host:
+${map}
+Read and write files only through the /workspaces paths: the host paths do not exist in this container.
+When you name a file for the user to open, give its host path."
+  fi
+  if [ "$GIT_CONFIG_RO" = "1" ]; then
+    [ -z "$notes" ] || notes+=$'\n\n'
+    notes+="# Repository config (claude-docker)
+Each repository's .git/config under /workspaces is read-only in this session, so git can't change it. A git command that tries prints \"could not write config file .git/config\". That is expected and needs no fixing: in a push, branch or worktree command the rest of the command still ran.
+- Push with \`git push origin HEAD\`, not \`git push -u\`: -u pushes but can't record the upstream branch, and git's advice to run \`git branch --set-upstream-to\` fails the same way.
+- New branches don't track a remote branch; name the remote and branch when you push or pull.
+- Leave changes to remotes and other repository settings to the user, on the host."
+  fi
+  if [ -z "$notes" ]; then
     [ "${#CLAUDE_FLAGS[@]}" -eq 0 ] || CMD+=("${CLAUDE_FLAGS[@]}")
     return 0
   fi
@@ -2942,11 +3015,7 @@ add_claude_flags() {
     i=$((i + 1))
   done
 
-  a="# Host paths (claude-docker)
-This session runs in a container. Each workspace is mounted from a directory on the user's host:
-${map}
-Read and write files only through the /workspaces paths: the host paths do not exist in this container.
-When you name a file for the user to open, give its host path."
+  a=$notes
   [ "$have_user" = "0" ] || a+=$'\n\n'"$user_text"
   CMD+=("--append-system-prompt" "$a")
   [ "${#flags[@]}" -eq 0 ] || CMD+=("${flags[@]}")
