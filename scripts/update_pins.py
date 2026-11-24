@@ -646,9 +646,10 @@ def task_latest_published(codename: str) -> str:
     repo for `codename`. Best-effort: returns '' on any failure.
 
     task stays a manual pin: a Debian `Packages` index carries no publish
-    dates, so there is nothing here to evaluate the soak window against. This index — not go-task's GitHub releases — is the source
-    that matters, because a version the apt repo has not ingested yet is one the
-    build's `apt-get install task=<v>` cannot resolve.
+    dates, so there is nothing here to evaluate the soak window against. This
+    index — not go-task's GitHub releases — is the source that matters, because
+    a version the apt repo has not ingested yet is one the build's
+    `apt-get install task=<v>` cannot resolve.
 
     Versions are collected per stanza, and only from stanzas whose `Package:` is
     exactly `task`. The repo serves nothing else today, but a second package

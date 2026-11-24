@@ -61,6 +61,17 @@ assert_eq() {
   fi
 }
 
+# Passes only when the variable is unset; a variable exported as an empty
+# string counts as set and fails.
+assert_unset() {
+  local label="$1" name="$2"
+  if [ -z "${!name+x}" ]; then
+    pass "$label: $name is unset"
+  else
+    fail "$label: $name is set to '${!name}'"
+  fi
+}
+
 # Run a command and assert it fails with a substring matching the read-only
 # filesystem error (uutils coreutils on ubuntu:26.04 emits "Read-only file
 # system"; GNU coreutils emits the same string — match the common substring).
@@ -257,17 +268,9 @@ check_path_order() {
   assert_eq "path-git-resolves-system" "$(command -v git)" "/usr/bin/git"
 }
 
-# Go is not part of the base image (a child image installs it): no toolchain
-# and no Go environment. Unset, not merely empty: an exported empty GOROOT
-# would still be a stray ENV.
-assert_unset() {
-  local label="$1" name="$2"
-  if [ -z "${!name+x}" ]; then
-    pass "$label: $name is unset"
-  else
-    fail "$label: $name is set to '${!name}'"
-  fi
-}
+# ---------------------------------------------------------------------------
+# 3a. No Go toolchain — a child image installs Go, the base image does not
+# ---------------------------------------------------------------------------
 
 check_no_go() {
   assert_eq "no-go: go not on PATH" "$(command -v go || true)" ""

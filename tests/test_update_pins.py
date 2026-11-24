@@ -748,7 +748,7 @@ class TestPrintReminders(unittest.TestCase):
 
     def test_reminder_block_has_no_go_pin(self):
         out = self._capture("3.53.1")
-        self.assertIsNone(re.search(r"^\s*⚠ go\s", out, re.M),
+        self.assertIsNone(re.search(r"^\s*⚠ go\s", out, re.MULTILINE),
                           "Go left the base image, so it has no manual-pin reminder")
 
 

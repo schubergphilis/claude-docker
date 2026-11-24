@@ -36,7 +36,7 @@ A weekly GitHub Actions run does the same thing unattended: [`pins-updater.yml`]
 
 > **CI on the automated PR needs one click.** The PR is opened with the job's `GITHUB_TOKEN`, so GitHub holds its `pull_request` runs until a maintainer clicks _Approve and run_ on the PR. The required `Validate` and `Docker build (validate, no push)` checks report after that. Review the diff, then approve the run.
 
-`nodejs` (from NodeSource's signed apt repo) and the `ubuntu` base-image digest are pinned manually: the script reports base-digest drift but does not rewrite either, since moving the base OS is a deliberate, separately-reviewed change.
+`nodejs` (from NodeSource's signed apt repo), `task` (from Cloudsmith's signed apt repo, whose `Packages` index has no publish dates to soak-gate against) and the `ubuntu` base-image digest are pinned manually: the script reports their drift but rewrites none of them, since moving the base OS or a runtime is a deliberate, separately-reviewed change.
 
 `anchore/scan-action` in `ci.yml` and `image-scan.yml` is pinned to the commit that `docker.yml`'s `mcvs-docker-action` runs, so the PR and publish scans run the same grype (see [Image vulnerability scanning](security.md#image-vulnerability-scanning)). Dependabot ignores it; it moves with `mcvs-docker-action`. When that pin moves, [`tests/test_grype_gate.py`](../tests/test_grype_gate.py) fails until you look up the scan-action commit in the new release's `action.yml`, add the pair to the test, and move both workflows to it.
 
