@@ -240,4 +240,49 @@ CLAUDE_DOCKER_IMAGE="$IMAGE" exec claude-docker "$@"
 
 The child Dockerfile uses `FROM claude-code:local` (locally-built tag) — assumes the base has been built once on the host. Every wrapper flag (`--aws`, `--gh`, `--ephemeral`, `--ro`, `--iterm`, …) keeps working because the child script just exec's into this one with a different image tag.
 
+### Example: Go
+
+Go is not in the base image: a project's language runtimes are fetched per project or go in a child image. This child image installs a pinned Go toolchain the way the base image once did, from the official `go.dev` tarball with its sha256 checked at build time:
+
+```dockerfile
+# .claude-docker/Dockerfile
+FROM claude-code:local
+
+# Keep this block above your frequently edited RUN and COPY lines, so the
+# Go download stays in the build cache.
+#
+# Bump the version and both hashes together. Take each sha256 from
+# https://go.dev/dl/ and confirm it equals the hash of a tarball you downloaded
+# yourself, ideally from another network: neither source alone is independent.
+ARG GO_VERSION=1.26.11
+ARG GO_SHA256_AMD64=9849f4e04ee35303714e34fbc3ac8ab44ea3e448a95aa182f91e3b9b79c710ec
+ARG GO_SHA256_ARM64=6c2f29b458b5add0835f18b776f69c8881a6d88428f1484a6da55755e620757e
+RUN ARCH=$(dpkg --print-architecture); \
+    case "$ARCH" in \
+      amd64) SHA="${GO_SHA256_AMD64}" ;; \
+      arm64) SHA="${GO_SHA256_ARM64}" ;; \
+      *) echo "Unsupported arch for go: $ARCH" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://go.dev/dl/go${GO_VERSION}.linux-${ARCH}.tar.gz" -o /tmp/go.tar.gz \
+ && echo "${SHA}  /tmp/go.tar.gz" | sha256sum -c - \
+ && tar -C /usr/local -xzf /tmp/go.tar.gz \
+ && rm /tmp/go.tar.gz \
+ && rm -rf /usr/local/go/api /usr/local/go/test \
+ && find /usr/local/go/src -type d -name testdata -prune -exec rm -rf {} + \
+ && /usr/local/go/bin/go version
+
+# /usr/local/go/bin is root-owned, so it goes first: the pinned `go` wins over
+# anything in /root/.local/bin. /root/go/bin is on the persistent
+# claude-code-root volume and agent-writable, so it goes last, after the system
+# paths: a binary left there must not shadow git, gh or aws on a later run.
+ENV GOROOT=/usr/local/go \
+    GOPATH=/root/go \
+    GOBIN=/root/go/bin \
+    PATH="/usr/local/go/bin:${PATH}:/root/go/bin"
+```
+
+The PATH order covers binary shadowing only: the Go module cache (`GOPATH`) and Go's config file (`GOENV`, under `/root/.config/go`) live on the same persistent volume, as the rc files in the [threat model](security.md#threat-model) do. A child image can add `GOTOOLCHAIN=local` and `GOENV=off` to its `ENV` so a planted toolchain or `go env` file cannot take effect; the module cache itself stays on the volume (`go mod verify` checks it).
+
+The pin and its upkeep are the child image's: the base image no longer tracks Go releases or scans for Go CVEs. With `GOTOOLCHAIN` at its default `auto`, a `go.mod` that asks for a newer Go downloads that toolchain at runtime; set `GOTOOLCHAIN=local` to refuse it ([Go toolchains](https://go.dev/doc/toolchain)).
+
 Any extra package managers a child image installs (rustup, go, ruby, etc.) _add_ to the runtime code-fetch surface noted under [Threat model](security.md#threat-model) — they don't replace the existing `npx`/`pnpm dlx`/`uvx` primitives.

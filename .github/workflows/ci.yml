@@ -295,10 +295,10 @@ jobs:
       # `scanners: vuln` is explicit on both passes and must stay that way. An
       # unset input exports no TRIVY_SCANNERS, so Trivy's own default of
       # `vuln,secret` applies and secret detection runs over the whole image
-      # filesystem — where the Go distribution's crypto test data and vendored
-      # node_modules fixtures carry dummy keys. A secret finding has no fixed
-      # version, so `ignore-unfixed` cannot filter it, and it would block every
-      # merge under a check that is meant to be about vulnerabilities.
+      # filesystem — where vendored node_modules fixtures carry dummy keys. A
+      # secret finding has no fixed version, so `ignore-unfixed` cannot filter
+      # it, and it would block every merge under a check that is meant to be
+      # about vulnerabilities.
       #
       # `vuln-type` is deliberately left at the action's `os,library` default:
       # that default is the OS-plus-language coverage we want, and the npm

@@ -357,7 +357,7 @@ claude-docker: the egress log in ~/.local/state/claude-docker/egress/20260927T10
 **Limitations:**
 
 - SSH remotes (port 22) and every other non-HTTP protocol are blocked. Use HTTPS remotes.
-- Node's built-in `fetch` ignores proxy env vars, so scripts that use it fail closed. Claude Code, npm, pnpm, pip, uv, curl and Go honour them.
+- Node's built-in `fetch` ignores proxy env vars, so scripts that use it fail closed. Claude Code, npm, pnpm, pip, uv and curl honour them.
 - An `ANTHROPIC_BASE_URL` set only in `settings.docker.json` isn't visible to `run.sh`, which then refuses to start. Export it on the host instead.
 - A `CONNECT` to a provider's raw IP address isn't matched by the host deny. Claude Code never does that, and it would show up in the log.
 - A `run.sh` killed with `SIGKILL` never runs its `EXIT` trap, so that session's log is lost.

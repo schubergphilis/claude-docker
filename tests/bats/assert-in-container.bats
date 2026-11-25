@@ -37,6 +37,19 @@ setup() {
   [ "$output" = "PASS: lbl: got 'x'" ]
 }
 
+@test "assert_unset passes on an unset variable" {
+  unset GOROOT
+  run assert_unset lbl GOROOT
+  [ "$output" = "PASS: lbl: GOROOT is unset" ]
+}
+@test "assert_unset fails on a variable set to the empty string" {
+  GOROOT="" run assert_unset lbl GOROOT
+  [ "$output" = "FAIL: lbl: GOROOT is set to ''" ]
+}
+@test "assert_unset fails on a variable with a value" {
+  GOROOT=/x run assert_unset lbl GOROOT
+  [ "$output" = "FAIL: lbl: GOROOT is set to '/x'" ]
+}
 @test "assert_eq fails on different values" {
   assert_eq lbl x y >/dev/null
   [ "$PASS_COUNT" -eq 0 ] && [ "$FAIL_COUNT" -eq 1 ]
@@ -57,7 +70,7 @@ setup() {
 }
 
 @test "path_index does not match a prefix" {
-  PATH=/root/go/bin/foo:/usr/bin run path_index /root/go/bin
+  PATH=/root/.local/bin/foo:/usr/bin run path_index /root/.local/bin
   [ "$output" = -1 ]
 }
 
@@ -522,6 +535,7 @@ stub_checks() {
   check_identity() { pass c2; }
   check_security() { pass c3; }
   check_path_order() { pass c4; }
+  check_no_go() { pass c4a; }
   check_git_trust() { pass c4b; }
   check_git_config_ro() { pass c4c; }
   check_workspace_write() { pass c5; }
@@ -536,7 +550,7 @@ stub_checks() {
   check_settings() { fail settings; }
   run main
   [ "$status" -eq 1 ]
-  [[ "$output" == *"Results: 11 passed, 1 failed"* ]]
+  [[ "$output" == *"Results: 12 passed, 1 failed"* ]]
   [[ "$output" == *"RESULT: FAIL" ]]
   [[ "$output" != *"RESULT: PASS"* ]]
 }

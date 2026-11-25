@@ -621,21 +621,6 @@ def ubuntu_current_digest() -> str:
         return ""
 
 
-def go_latest_stable() -> str:
-    """Newest stable Go version per go.dev's release feed, without the `go`
-    prefix (e.g. '1.26.7'). Best-effort: returns '' on any failure.
-
-    Go stays a manual pin because this feed carries no publish dates — there is
-    nothing here to evaluate the soak window against, so Go cannot join the
-    automated selection in TOOLS without a second, weaker date source."""
-    try:
-        rel = get_json("https://go.dev/dl/?mode=json")
-        stable = [r["version"].removeprefix("go") for r in rel if r.get("stable")]
-        return max_stable(stable)
-    except Exception:
-        return ""
-
-
 def base_image_codename(dockerfile_text: str) -> str:
     """Ubuntu suite codename of the pinned base image, taken from its FROM tag
     (`ubuntu:resolute-20260724.1@sha256:…` → 'resolute'). Returns '' when the
@@ -660,11 +645,11 @@ def task_latest_published(codename: str) -> str:
     """Newest stable `task` (go-task) version published in the Cloudsmith apt
     repo for `codename`. Best-effort: returns '' on any failure.
 
-    task stays a manual pin for the same reason as Go above: a Debian `Packages`
-    index carries no publish dates, so there is nothing here to evaluate the soak
-    window against. This index — not go-task's GitHub releases — is the source
-    that matters, because a version the apt repo has not ingested yet is one the
-    build's `apt-get install task=<v>` cannot resolve.
+    task stays a manual pin: a Debian `Packages` index carries no publish
+    dates, so there is nothing here to evaluate the soak window against. This
+    index — not go-task's GitHub releases — is the source that matters, because
+    a version the apt repo has not ingested yet is one the build's
+    `apt-get install task=<v>` cannot resolve.
 
     Versions are collected per stanza, and only from stanzas whose `Package:` is
     exactly `task`. The repo serves nothing else today, but a second package
@@ -702,15 +687,12 @@ def print_reminders():
     print("\n  ⚠ needs your eyes (manual pins) ─────────────────────────────")
     node = ""
     task_v = ""
-    go = ""
     base_line = ""
     for line in DOCKERFILE.read_text().splitlines():
         if line.startswith("ARG NODE_VERSION="):
             node = line.split("=", 1)[1]
         if line.startswith("ARG TASK_VERSION="):
             task_v = line.split("=", 1)[1]
-        if line.startswith("ARG GO_VERSION="):
-            go = line.split("=", 1)[1]
         if line.startswith("FROM ubuntu"):
             base_line = line
     # One base-image line feeds both reminders below: the digest this run reports
@@ -733,14 +715,6 @@ def print_reminders():
     else:
         print(f"  ⚠ task          pinned {task_v or '?'}  "
               f"(could not derive an apt suite from the pinned base-image tag)")
-    go_cur = go_latest_stable()
-    if go_cur and go_cur != go:
-        print(f"  ⚠ go            pinned {go or '?'}  latest stable → {go_cur}  "
-              f"(bump via the go.dev note in the Dockerfile — hashes too)")
-    elif go_cur:
-        print(f"  ⚠ go            pinned {go or '?'}  (matches latest stable on go.dev)")
-    else:
-        print(f"  ⚠ go            pinned {go or '?'}  (could not resolve latest stable from go.dev)")
     cur = ubuntu_current_digest()
     if cur and cur != base:
         print(f"  ⚠ ubuntu base   pinned {base[:19]}…  current tag → {cur[:19]}…  (DIFFERS — review)")

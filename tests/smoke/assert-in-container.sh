@@ -61,6 +61,17 @@ assert_eq() {
   fi
 }
 
+# Passes only when the variable is unset; a variable exported as an empty
+# string counts as set and fails.
+assert_unset() {
+  local label="$1" name="$2"
+  if [ -z "${!name+x}" ]; then
+    pass "$label: $name is unset"
+  else
+    fail "$label: $name is set to '${!name}'"
+  fi
+}
+
 # Run a command and assert it fails with a substring matching the read-only
 # filesystem error (uutils coreutils on ubuntu:26.04 emits "Read-only file
 # system"; GNU coreutils emits the same string — match the common substring).
@@ -207,11 +218,11 @@ check_security() {
 }
 
 # ---------------------------------------------------------------------------
-# 3. PATH ordering and the exported Go environment
+# 3. PATH ordering
 # ---------------------------------------------------------------------------
 
 # Index of an entry in the colon-separated PATH, or -1 when absent. Matches
-# whole entries only, so /root/go/bin never matches inside /root/go/bin/foo.
+# whole entries only, so /root/.local/bin never matches inside /root/.local/bin/foo.
 path_index() {
   local want="$1" i=0 entry
   local IFS=:
@@ -244,27 +255,30 @@ assert_path_before() {
 check_path_order() {
   # The image PATH survives the privilege drop — entrypoint.sh execs
   # `runuser -u claude` (not -l), so what this script sees IS the shipped
-  # ordering. /root is the persistent claude-code-root volume, so both
-  # /root/.local/bin (pip --user / uv tool install prefix) and /root/go/bin
-  # (GOPATH default, `go install` target) are agent-writable and survive the
-  # session. Neither may precede a system path: a binary one session leaves
-  # there must not shadow git/gh/aws on a later run, in an unrelated workspace.
+  # ordering. /root is the persistent claude-code-root volume, so
+  # /root/.local/bin (pip --user / uv tool install prefix) is agent-writable and
+  # survives the session. It may not precede a system path: a binary one session
+  # leaves there must not shadow git/gh/aws on a later run, in an unrelated
+  # workspace.
   # /usr/bin stands in for "the system paths" — it is where git and gh live.
-  assert_path_before /usr/local/go/bin /usr/bin
   assert_path_before /usr/bin /root/.local/bin
-  assert_path_before /usr/bin /root/go/bin
 
   # And the resolution actually lands on the system copy, not merely earlier in
   # a string — this is the invariant the ordering exists to buy.
   assert_eq "path-git-resolves-system" "$(command -v git)" "/usr/bin/git"
+}
 
-  # Go environment exported by the image (ENV), so it holds for docker run,
-  # docker exec, and non-login shells alike rather than relying on `go env`
-  # defaults. Spelled against a literal /root: Docker does not define HOME at
-  # build time.
-  assert_eq "GOROOT=/usr/local/go" "${GOROOT:-}" "/usr/local/go"
-  assert_eq "GOPATH=/root/go" "${GOPATH:-}" "/root/go"
-  assert_eq "GOBIN=/root/go/bin" "${GOBIN:-}" "/root/go/bin"
+# ---------------------------------------------------------------------------
+# 3a. No Go toolchain — a child image installs Go, the base image does not
+# ---------------------------------------------------------------------------
+
+check_no_go() {
+  assert_eq "no-go: go not on PATH" "$(command -v go || true)" ""
+  assert_eq "no-go: /usr/local/go absent" \
+    "$([ -e /usr/local/go ] && echo present || echo absent)" "absent"
+  assert_unset "no-go" GOROOT
+  assert_unset "no-go" GOPATH
+  assert_unset "no-go" GOBIN
 }
 
 # ---------------------------------------------------------------------------
@@ -901,6 +915,7 @@ main() {
   check_identity
   check_security
   check_path_order
+  check_no_go
   check_git_trust
   check_git_config_ro
   check_workspace_write

@@ -675,7 +675,6 @@ class TestPrintReminders(unittest.TestCase):
     def _capture(self, task_cur, codename="resolute"):
         with unittest.mock.patch.object(up, "task_latest_published", return_value=task_cur), \
              unittest.mock.patch.object(up, "base_image_codename", return_value=codename), \
-             unittest.mock.patch.object(up, "go_latest_stable", return_value=""), \
              unittest.mock.patch.object(up, "ubuntu_current_digest", return_value=""):
             buf = io.StringIO()
             with contextlib.redirect_stdout(buf):
@@ -733,7 +732,6 @@ class TestPrintReminders(unittest.TestCase):
                  unittest.mock.patch.object(
                      up, "task_latest_published",
                      side_effect=lambda c: (seen.append(c), "")[1]), \
-                 unittest.mock.patch.object(up, "go_latest_stable", return_value=""), \
                  unittest.mock.patch.object(up, "ubuntu_current_digest", return_value=""):
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
@@ -745,8 +743,13 @@ class TestPrintReminders(unittest.TestCase):
 
     def test_reminder_block_covers_every_manual_pin(self):
         out = self._capture("3.53.1")
-        for pin in ("nodejs", "task", "go", "ubuntu base"):
+        for pin in ("nodejs", "task", "ubuntu base"):
             self.assertIn(pin, out, f"{pin} missing from the manual-pin reminder block")
+
+    def test_reminder_block_has_no_go_pin(self):
+        out = self._capture("3.53.1")
+        self.assertIsNone(re.search(r"^\s*⚠ go\s", out, re.MULTILINE),
+                          "Go left the base image, so it has no manual-pin reminder")
 
 
 class TestCIVersionCheckStep(unittest.TestCase):
