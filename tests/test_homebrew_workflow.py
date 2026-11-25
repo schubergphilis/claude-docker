@@ -14,15 +14,23 @@ The rewrite itself, scripts/bump-homebrew-formula.sh, runs here against a
 copy of the formula with a stub curl: a wrong version comparison would move
 Homebrew users backwards or skip every bump, and nothing else would notice.
 
-Stdlib only, so CI's unit-test step keeps running with no install step.
+So does the step that opens the pull request, against a stub gh that keeps
+a list of pull requests: a bump that ran again for an older tag would
+otherwise leave two bumps open.
+
+Stdlib only, so CI's unit-test step keeps running with no install step. The
+stub gh runs its --jq filters with jq, as the runner image has it.
 """
 
 import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 from pathlib import Path
 
@@ -40,6 +48,66 @@ for a; do url="$a"; done
 [ -n "$CURL_FAIL" ] && exit 22
 printf '%s' "$url"
 """
+
+# Keeps the repository's pull requests in $GH_STATE, as gh would see them,
+# and runs --jq through jq the way gh does.
+GH = """#!PYTHON
+import json, os, subprocess, sys
+
+state = os.environ["GH_STATE"]
+prs = json.load(open(state))
+args = sys.argv[1:]
+with open(state + ".log", "a") as log:
+    log.write(" ".join(args) + "\\n")
+
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+
+if args[:2] == ["pr", "list"]:
+    rows = [p for p in prs if p["state"] == opt("--state").upper()]
+    for flag, key in (("--base", "baseRefName"), ("--head", "headRefName")):
+        if opt(flag):
+            rows = [p for p in rows if p[key] == opt(flag)]
+    rows = [{k: p[k] for k in opt("--json").split(",")} for p in rows]
+    out = json.dumps(rows)
+    if opt("--jq"):
+        out = subprocess.run(["jq", "-r", opt("--jq")], input=out, capture_output=True, text=True, check=True).stdout
+    sys.stdout.write(out)
+elif args[:2] == ["pr", "create"]:
+    prs.append({"number": len(prs) + 1, "headRefName": opt("--head"), "baseRefName": opt("--base"),
+                "isCrossRepository": False, "state": "OPEN"})
+elif args[:2] == ["pr", "close"]:
+    next(p for p in prs if p["number"] == int(args[2]))["state"] = "CLOSED"
+elif args[:2] != ["pr", "edit"]:
+    sys.exit("unexpected gh " + " ".join(args))
+json.dump(prs, open(state, "w"))
+"""
+
+# Records pushes instead of making them; passes everything else to git.
+GIT = """#!/bin/sh
+if [ "$1" = push ]; then echo "push $*" >> "$GH_STATE.log"; exit 0; fi
+exec GIT "$@"
+"""
+
+
+def bash4():
+    """Return a bash of version 4 or later from the PATH, as the runner has,
+    or None: the step lowercases with ${var,,}, which macOS's bash 3.2 lacks."""
+    for path in os.environ["PATH"].split(os.pathsep):
+        bash = Path(path) / "bash"
+        if bash.is_file() and os.access(bash, os.X_OK):
+            version = subprocess.run([bash, "-c", "echo ${BASH_VERSINFO[0]}"], capture_output=True, text=True).stdout
+            if version.strip().isdigit() and int(version) >= 4:
+                return str(bash)
+    return None
+
+
+def step(text, name):
+    """Return the run script of one step of a workflow, dedented."""
+    match = re.search(
+        rf"^( *)- name: {re.escape(name)}\n.*?^\1  run: \|\n((?:\1    .*\n|\n)+)", text, re.MULTILINE | re.DOTALL
+    )
+    return textwrap.dedent(match.group(2)) if match else ""
 
 
 def job(text, name):
@@ -189,6 +257,94 @@ class BumpScriptTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual(result.stdout, "")
         self.assertEqual(self.formula.read_text(), before)
+
+
+@unittest.skipUnless(shutil.which("jq"), "the stub gh needs jq for --jq")
+@unittest.skipUnless(bash4(), "the step needs bash 4 or later")
+class OpenPullRequestTests(unittest.TestCase):
+    """Run homebrew.yml's "Open the pull request" step against stub gh and
+    git, from a copy of main that names 1.1.0."""
+
+    def setUp(self):
+        self.script = step((WORKFLOWS / "homebrew.yml").read_text(), "Open the pull request")
+        self.assertIn("scripts/bump-homebrew-formula.sh", self.script)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.repo = root / "repo"
+        (self.repo / "Formula").mkdir(parents=True)
+        (self.repo / "scripts").mkdir()
+        shutil.copy(FORMULA, self.repo / "Formula" / "claude-docker.rb")
+        shutil.copy(BUMP, self.repo / "scripts" / BUMP.name)
+        formula = self.repo / "Formula" / "claude-docker.rb"
+        formula.write_text(re.sub(r"/refs/tags/v[0-9.]+\.tar\.gz", "/refs/tags/v1.1.0.tar.gz", formula.read_text()))
+        git = shutil.which("git")
+        stubs = root / "bin"
+        stubs.mkdir()
+        for name, text in (("curl", CURL), ("gh", GH.replace("PYTHON", sys.executable)), ("git", GIT.replace("GIT", git))):
+            (stubs / name).write_text(text)
+            (stubs / name).chmod(0o755)
+        self.state = root / "prs.json"
+        self.state.write_text("[]")
+        self.env = {
+            **os.environ,
+            "PATH": f"{stubs}{os.pathsep}{os.environ['PATH']}",
+            "GITHUB_SERVER_URL": SERVER,
+            "GITHUB_REPOSITORY": REPO,
+            "GITHUB_STEP_SUMMARY": str(root / "summary"),
+            "GH_STATE": str(self.state),
+            "GH_TOKEN": "token",
+            "GH_REPO": REPO,
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+        }
+        for cmd in (["init", "-q", "-b", "main"], ["add", "."], ["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "main"]):
+            subprocess.run([git, *cmd], cwd=self.repo, env=self.env, check=True)
+
+    def bump(self, tag):
+        """Run the step for `tag` on a fresh checkout of main, as the job does."""
+        subprocess.run(["git", "checkout", "-qf", "main"], cwd=self.repo, env=self.env, check=True)
+        log = Path(f"{self.state}.log")
+        log.unlink(missing_ok=True)
+        result = subprocess.run(
+            [bash4(), "-c", self.script], cwd=self.repo, env={**self.env, "TAG": tag}, capture_output=True, text=True
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        return log.read_text() if log.exists() else ""
+
+    def open_bumps(self):
+        return sorted(p["headRefName"] for p in json.loads(self.state.read_text()) if p["state"] == "OPEN")
+
+    def test_an_older_bump_run_again_leaves_the_newer_one(self):
+        # The bump for v1.2.0 opens its pull request; v1.3.0's supersedes it.
+        self.bump("v1.2.0")
+        calls = self.bump("v1.3.0")
+        self.assertIn("pr close 1 --delete-branch", calls)
+        self.assertEqual(self.open_bumps(), ["homebrew/v1.3.0"])
+        # v1.2.0's bump runs again before v1.3.0's merges: main still names
+        # 1.1.0, but the open v1.3.0 bump says not to.
+        calls = self.bump("v1.2.0")
+        self.assertNotIn("push", calls, "should not push a branch for the older tag")
+        self.assertNotIn("pr create", calls)
+        self.assertNotIn("pr edit", calls)
+        self.assertEqual(self.open_bumps(), ["homebrew/v1.3.0"])
+        self.assertIn("newer than v1.2.0", (Path(self.tmp.name) / "summary").read_text())
+
+    def test_a_bump_run_again_updates_its_own_pull_request(self):
+        self.bump("v1.2.0")
+        calls = self.bump("v1.2.0")
+        self.assertIn("pr edit 1", calls)
+        self.assertNotIn("pr create", calls)
+        self.assertEqual(self.open_bumps(), ["homebrew/v1.2.0"])
+
+    def test_a_forks_newer_bump_branch_is_not_ours_to_give_way_to(self):
+        self.state.write_text(json.dumps([
+            {"number": 1, "headRefName": "homebrew/v1.3.0", "baseRefName": "main", "isCrossRepository": True, "state": "OPEN"},
+        ]))
+        calls = self.bump("v1.2.0")
+        self.assertIn("pr create --base main --head homebrew/v1.2.0", calls)
+        self.assertNotIn("pr close", calls)
+        self.assertEqual(self.open_bumps(), ["homebrew/v1.2.0", "homebrew/v1.3.0"])
 
 
 if __name__ == "__main__":
